@@ -19,7 +19,12 @@ where = ["src"]
 target-version = "py312"
 line-length = 100
 
+[tool.ruff.lint]
+# Keep the same correctness rules on local and CI Ruff versions.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
 
