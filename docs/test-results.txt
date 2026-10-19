@@ -1,0 +1,46 @@
+test_allowlist_and_reviewer_roles (test_backend.ApiTests.test_allowlist_and_reviewer_roles) ... ok
+test_business_api_requires_login (test_backend.ApiTests.test_business_api_requires_login) ... ok
+test_chunked_body_limit_is_enforced (test_backend.ApiTests.test_chunked_body_limit_is_enforced) ... ok
+test_complete_and_duplicate_fields (test_backend.ApiTests.test_complete_and_duplicate_fields) ... ok
+test_cors_and_openapi (test_backend.ApiTests.test_cors_and_openapi) ... ok
+test_create_list_detail_pagination (test_backend.ApiTests.test_create_list_detail_pagination) ... ok
+test_decision_requires_explicit_confirmation (test_backend.ApiTests.test_decision_requires_explicit_confirmation) ... ok
+test_empty_allowlist_denies_even_valid_login (test_backend.ApiTests.test_empty_allowlist_denies_even_valid_login) ... ok
+test_file_types_limits_and_signed_url_expiry (test_backend.ApiTests.test_file_types_limits_and_signed_url_expiry) ... ok
+test_health_and_readiness (test_backend.ApiTests.test_health_and_readiness) ... ok
+test_invalid_paths_and_pagination (test_backend.ApiTests.test_invalid_paths_and_pagination) ... ok
+test_login_rate_limit (test_backend.ApiTests.test_login_rate_limit) ... ok
+test_login_refresh_and_no_store (test_backend.ApiTests.test_login_refresh_and_no_store) ... ok
+test_missing_file_does_not_replace_fields (test_backend.ApiTests.test_missing_file_does_not_replace_fields) ... ok
+test_multiline_decisions_and_audit (test_backend.ApiTests.test_multiline_decisions_and_audit) ... ok
+test_oversized_extracted_value_is_a_validation_error (test_backend.ApiTests.test_oversized_extracted_value_is_a_validation_error) ... ok
+test_private_upload_and_analysis_pipeline (test_backend.ApiTests.test_private_upload_and_analysis_pipeline) ... ok
+test_rejection_keeps_classification_and_actor (test_backend.ApiTests.test_rejection_keeps_classification_and_actor) ... ok
+test_review_has_no_automatic_decision (test_backend.ApiTests.test_review_has_no_automatic_decision) ... ok
+test_selected_quote_must_match_spec (test_backend.ApiTests.test_selected_quote_must_match_spec) ... ok
+test_validation_does_not_echo_secrets (test_backend.ApiTests.test_validation_does_not_echo_secrets) ... ok
+test_cost_normalization_uses_coverage_not_requested_quantity (test_backend.BusinessRulesTests.test_cost_normalization_uses_coverage_not_requested_quantity) ... ok
+test_decimal_parsing_and_real_dates (test_backend.BusinessRulesTests.test_decimal_parsing_and_real_dates) ... ok
+test_out_of_period_cost_is_not_silently_added (test_backend.BusinessRulesTests.test_out_of_period_cost_is_not_silently_added) ... ok
+test_quote_validation_moq_expiry_lead_time_and_price (test_backend.BusinessRulesTests.test_quote_validation_moq_expiry_lead_time_and_price) ... ok
+test_ambiguous_or_unstructured_text_not_guessed (test_backend.ExtractionTests.test_ambiguous_or_unstructured_text_not_guessed) ... ok
+test_email_body_and_html_do_not_execute_scripts (test_backend.ExtractionTests.test_email_body_and_html_do_not_execute_scripts) ... ok
+test_model_rejects_boolean_line_number (test_backend.ExtractionTests.test_model_rejects_boolean_line_number) ... ok
+test_multiline_headers_and_missing_values (test_backend.ExtractionTests.test_multiline_headers_and_missing_values) ... ok
+test_pdf_text_and_scanned_pdf (test_backend.ExtractionTests.test_pdf_text_and_scanned_pdf) ... ok
+test_config_rejects_credential_url (test_backend.TransportTests.test_config_rejects_credential_url) ... ok
+test_filter_literals_escape_quotes (test_backend.TransportTests.test_filter_literals_escape_quotes) ... ok
+test_missing_configuration_fails_without_network (test_backend.TransportTests.test_missing_configuration_fails_without_network) ... ok
+test_new_secret_is_not_sent_as_jwt_and_user_token_is_separate (test_backend.TransportTests.test_new_secret_is_not_sent_as_jwt_and_user_token_is_separate) ... ok
+test_postgres_error_is_mapped_without_leaking_sql (test_backend.TransportTests.test_postgres_error_is_mapped_without_leaking_sql) ... ok
+test_redirects_are_not_followed (test_backend.TransportTests.test_redirects_are_not_followed) ... ok
+test_settings_never_repr_key (test_backend.TransportTests.test_settings_never_repr_key) ... ok
+test_browser_and_malformed_keys_rejected (test_local_setup.LocalSetupTests.test_browser_and_malformed_keys_rejected) ... ok
+test_env_preserves_settings_and_rejects_injection (test_local_setup.LocalSetupTests.test_env_preserves_settings_and_rejects_injection) ... ok
+test_readonly_preflight_checks_all_tables_and_private_storage (test_local_setup.LocalSetupTests.test_readonly_preflight_checks_all_tables_and_private_storage) ... ok
+test_service_role_type_supported (test_local_setup.LocalSetupTests.test_service_role_type_supported) ... ok
+
+----------------------------------------------------------------------
+Ran 41 tests in 1.316s
+
+OK

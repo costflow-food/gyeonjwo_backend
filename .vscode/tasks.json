@@ -1,0 +1,20 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "CostFlow: local setup and connection check",
+      "type": "shell",
+      "command": "./start.ps1",
+      "args": ["-Setup", "-CheckOnly"],
+      "options": {"cwd": "${workspaceFolder}"},
+      "problemMatcher": []
+    },
+    {
+      "label": "CostFlow: check and start API",
+      "type": "shell",
+      "command": "./start.ps1",
+      "options": {"cwd": "${workspaceFolder}"},
+      "problemMatcher": []
+    }
+  ]
+}
