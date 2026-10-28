@@ -149,7 +149,3 @@ class AnalysisResponse(BaseModel):
             if self.outcome == 'FAILED' and not self.error:
                 raise ValueError('Failed analysis needs an error')
         return self
-
-
-class ErrorResponse(BaseModel):
-    error: dict

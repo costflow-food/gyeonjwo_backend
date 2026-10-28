@@ -43,9 +43,9 @@ def test_work_detail_does_not_expose_server_credentials():
         'created_at': '2026-10-26T00:00:00Z', 'updated_at': '2026-10-26T00:00:00Z', 'run_id': 'private-token'}, 'mail_header': {'message_id': 'original'}}
     response = client.get('/api/v1/work-items/' + WORK)
     assert response.status_code == 200
-    assert response.json()['mail_header']['message_id'] == 'original'
-    assert response.headers['cache-control'] == 'no-store'
-    assert 'run_id' not in response.json()['work']
+    assert response.json()['data']['mail_header']['message_id'] == 'original'
+    assert response.headers['cache-control'] == 'private, no-store'
+    assert 'run_id' not in response.json()['data']['work']
 
 
 @pytest.mark.parametrize('outcome,status', [('SUCCESS', 200), ('REVIEW_REQUIRED', 200), ('FAILED', 502)])
@@ -65,8 +65,8 @@ def test_analyze_delivers_current_result_once_with_decimal_strings(outcome, stat
         'error': {'code': 'FAILED'} if outcome == 'FAILED' else None}
     response = client.post('/api/v1/work-items/' + WORK + '/analyze', json={})
     assert response.status_code == status
-    assert response.json()['baseline']['goods_amount'] == '5420000.00'
-    assert response.json()['result_persisted'] is False
+    assert response.json()['data']['baseline']['goods_amount'] == '5420000.00'
+    assert response.json()['data']['result_persisted'] is False
     assert client.get('/api/v1/work-items/' + WORK + '/results').status_code == 404
 
 

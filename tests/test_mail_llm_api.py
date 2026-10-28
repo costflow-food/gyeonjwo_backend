@@ -32,7 +32,7 @@ def test_endpoint_calls_llm_with_bounded_mail_and_maps_classification(status, ex
         response = client().post('/api/v1/llm/classify-mail', json={'subject': '단가 인상', 'body': '확인 부탁드립니다.'})
         args = agent.return_value.run.call_args.args
     assert response.status_code == 200
-    assert response.json() == {'classification': expected, 'reason': '근거 확인', 'persisted': False}
+    assert response.json()['data'] == {'classification': expected, 'reason': '근거 확인', 'persisted': False}
     assert args[0] == 'classification' and args[2] == {'subject': '단가 인상', 'body_excerpt': '확인 부탁드립니다.'}
     assert args[3] is Classification
 
