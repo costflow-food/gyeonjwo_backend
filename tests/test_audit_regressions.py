@@ -166,4 +166,4 @@ def test_invalid_public_analysis_output_is_not_published_as_success():
     app = create_app(Settings(_env_file=None), service)
     app.dependency_overrides[require_member] = lambda: 'test-user'
     response = TestClient(app, raise_server_exceptions=False).post('/api/v1/work-items/' + WORK + '/analyze', json={})
-    assert response.status_code == 503 and response.json()['error']['code'] == 'SERVICE_UNAVAILABLE'
+    assert response.status_code == 503 and response.json()['error']['code'] == 'PROCESSING_UNAVAILABLE'

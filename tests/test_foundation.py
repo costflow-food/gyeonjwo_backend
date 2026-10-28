@@ -15,7 +15,7 @@ from scripts.check_connection import check
 
 
 def test_health_does_not_require_db_credentials():
-    assert TestClient(app).get('/api/v1/health').json()['status'] == 'ok'
+    assert TestClient(app).get('/health').json()['status'] == 'ok'
 
 
 def test_no_credentials_is_not_a_successful_connection():

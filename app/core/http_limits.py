@@ -1,14 +1,26 @@
 from starlette.responses import JSONResponse
 
+from app.core.errors import error_payload
+
+MAX_BODY_BYTES = 65536
+
+
+def _too_large():
+    return JSONResponse(error_payload('REQUEST_TOO_LARGE', '요청 본문이 너무 큽니다.', 413), status_code=413)
+
 
 class BodyLimitMiddleware:
-    """Bound chunked JSON requests before FastAPI parses them; no Content-Length trust."""
-    def __init__(self, app, limit=65536):
+    """Single place for request body limits: rejects a declared oversize Content-Length early and
+    bounds chunked bodies before FastAPI parses them (Content-Length is not trusted alone)."""
+    def __init__(self, app, limit=MAX_BODY_BYTES):
         self.app, self.limit = app, limit
 
     async def __call__(self, scope, receive, send):
         if scope['type'] != 'http' or scope['method'] not in ('POST', 'PATCH', 'PUT'):
             return await self.app(scope, receive, send)
+        declared = dict(scope.get('headers') or []).get(b'content-length', b'')
+        if declared.isdigit() and int(declared) > self.limit:
+            return await _too_large()(scope, receive, send)
         chunks, size = [], 0
         while True:
             message = await receive()
@@ -16,9 +28,7 @@ class BodyLimitMiddleware:
                 return
             size += len(message.get('body', b''))
             if size > self.limit:
-                response = JSONResponse({'error': {'code': 'REQUEST_TOO_LARGE', 'message': '요청 본문이 너무 큽니다.', 'details': {}}},
-                                        status_code=413, headers={'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'})
-                return await response(scope, receive, send)
+                return await _too_large()(scope, receive, send)
             chunks.append(message.get('body', b''))
             if not message.get('more_body', False):
                 break

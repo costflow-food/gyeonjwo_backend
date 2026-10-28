@@ -31,7 +31,7 @@ class Services:
     def work(self, work_id):
         rows = self.client.table('work_items').select(WORK_COLUMNS).eq('work_id', work_id).limit(1).execute().data
         if not rows:
-            raise ServiceError('WORK_NOT_FOUND', '업무를 찾을 수 없습니다.', 404)
+            raise ServiceError('RESOURCE_NOT_FOUND', '업무를 찾을 수 없습니다.', 404)
         return rows[0]
 
     def source(self, work_id):
@@ -78,9 +78,9 @@ class Services:
     def reclassify(self, work_id):
         work = self.work(work_id)
         if work['queue_status'] == 'RUNNING':
-            raise ServiceError('WORK_RUNNING', '이미 분석 중인 업무입니다.', 409)
+            raise ServiceError('WORK_ALREADY_STARTED', '이미 분석 중인 업무입니다.', 409)
         if work['queue_status'] == 'COMPLETE':
-            raise ServiceError('INVALID_WORK_STATE', '종료된 업무는 재분류할 수 없습니다. 다시 분석할 수 있습니다.', 409)
+            raise ServiceError('ACTION_NOT_ALLOWED', '종료된 업무는 재분류할 수 없습니다. 다시 분석할 수 있습니다.', 409)
         token = self.rpc.call('restart_classification', p_work_id=work_id)
         source = self.source(work_id)
         self.verify_source(work_id, source)
@@ -92,7 +92,7 @@ class Services:
     def skip(self, work_id):
         work = self.work(work_id)
         if work['queue_status'] not in ('PENDING', 'TRUE', 'FALSE'):
-            raise ServiceError('INVALID_WORK_STATE', '분석 전 업무만 실행 안 함으로 표시할 수 있습니다.', 409)
+            raise ServiceError('ACTION_NOT_ALLOWED', '분석 전 업무만 실행 안 함으로 표시할 수 있습니다.', 409)
         self.rpc.call('exclude_work_item', p_work_id=work_id)
         return {'work_id': work_id, 'queue_status': 'FALSE'}
 
@@ -138,9 +138,9 @@ class Services:
     def analyze(self, work_id):
         self.settings.require_llm()
         if self.work(work_id)['queue_status'] == 'RUNNING':
-            raise ServiceError('WORK_RUNNING', '이미 분석 중인 업무입니다.', 409)
+            raise ServiceError('WORK_ALREADY_STARTED', '이미 분석 중인 업무입니다.', 409)
         if not self.analysis_lock.acquire(blocking=False):
-            raise ServiceError('ANALYSIS_BUSY', '다른 업무의 분석이 진행 중입니다.', 409)
+            raise ServiceError('ANALYSIS_BUSY', '다른 업무의 분석이 진행 중입니다.', 409, retryable=True)
         found_item, status = None, 200
         try:
             try:

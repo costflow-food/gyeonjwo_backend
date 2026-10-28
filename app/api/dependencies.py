@@ -19,11 +19,11 @@ def get_service(request: Request):
 
 def require_member(request: Request, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]):
     if not credentials or credentials.scheme.lower() != 'bearer':
-        raise ServiceError('UNAUTHORIZED', '사용자 로그인이 필요합니다.', 401)
+        raise ServiceError('AUTH_REQUIRED', '사용자 로그인이 필요합니다.', 401)
     try:
         return verify_member(credentials.credentials, request.app.state.settings)
     except AuthenticationFailed:
-        raise ServiceError('UNAUTHORIZED', '로그인 토큰이 유효하지 않습니다.', 401) from None
+        raise ServiceError('AUTH_REQUIRED', '로그인 토큰이 유효하지 않습니다.', 401) from None
     except AccessDenied:
         raise ServiceError('ACCESS_DENIED', '로그인 또는 프로젝트 접근 권한을 확인해 주세요.', 403) from None
     except AuthUnavailable:

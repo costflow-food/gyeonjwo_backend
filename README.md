@@ -1,5 +1,7 @@
 # 견줘 Python 백엔드
 
+**2026-10-28 API 공통 계약:** JSON 성공 응답은 `{data, meta}`, 오류는 `{error, meta}`이며 `meta.request_id`와 `X-Request-ID`가 같습니다. 파일 스트림·204 웹훅·운영 `/health`, `/ready`는 각 기존 응답을 유지합니다. 프론트는 기존 JSON 본문 필드를 `data` 안에서 읽어야 합니다. [적용 범위·다음 단계·DB 연동 계약](docs/COMMON_CONTRACT_NEXT_STEPS.md)을 확인하세요. `/work-cases` 전환·비동기 처리·지속 멱등성은 아직 연결되지 않았습니다.
+
 **메일 수신 API·LLM 호출용 서버 실행:** [Docker/로컬 실행 가이드](docs/MAIL_API_SERVER.md). 작업 브랜치 `feature/mail-api-server`, Dockerfile·compose.yaml·인증된 메일 분류 LLM API를 추가했습니다. Docker 이미지 빌드·컨테이너 healthy 및 실제 HTTP 응답 확인을 마쳤습니다. 전체 테스트175개 통과이며 실제 외부 서비스 연동은 별도입니다.
 
 **에이전트 작업 폴더:** `app/agents/` (common·다섯 역할·orchestrator 하위 폴더). 에이전트 담당자가 구현합니다.
