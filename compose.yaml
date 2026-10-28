@@ -1,0 +1,28 @@
+name: gyeonjwo-backend
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gyeonjwo-backend:local
+    env_file:
+      - .env
+    environment:
+      # One process owns the Gmail receiver. Enable only after credentials/DB are ready.
+      WORKER_ENABLED: ${WORKER_ENABLED:-false}
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    stop_grace_period: 30s

@@ -1,0 +1,12 @@
+{
+  "folders": [
+    {
+      "name": "견줘 Python 백엔드",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+    "explorer.compactFolders": false
+  }
+}
