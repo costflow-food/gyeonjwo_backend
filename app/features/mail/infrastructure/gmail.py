@@ -31,7 +31,7 @@ def verify_push(token, settings):
         raise ServiceError('UNAUTHORIZED_PUSH', 'Pub/Sub 인증에 실패했습니다.', 401) from None
 
 
-def parse_notification(body, settings):
+def parse_notification(body, settings, *, connected=False):
     try:
         if body.get('subscription') != settings.gmail_subscription:
             raise ServiceError('UNEXPECTED_SUBSCRIPTION', '허용하지 않은 구독입니다.', 403)
@@ -43,7 +43,9 @@ def parse_notification(body, settings):
         history = decoded['historyId']
         if not isinstance(history, str) or not history.isascii() or not history.isdigit() or len(history) > 30:
             raise ValueError('Invalid history ID')
-        if email != settings.gmail_email.lower():
+        if not isinstance(email, str) or '@' not in email:
+            raise ValueError('Invalid mailbox')
+        if not connected and email != settings.gmail_email.lower():
             raise ServiceError('UNEXPECTED_SUBSCRIPTION', '허용하지 않은 메일함입니다.', 403)
         return message['messageId'], email, history
     except (KeyError, ValueError, TypeError, AttributeError):
