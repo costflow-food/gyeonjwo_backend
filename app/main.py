@@ -21,18 +21,23 @@ from app.core.http_limits import BodyLimitMiddleware
 from app.features.system.api.router import router as system_router
 from app.features.mail.api.router import router as mail_router
 from app.features.review.api.router import router as review_router
+from app.features.mailboxes.api.router import router as mailbox_router, make_mailbox_service
+from app.features.mailboxes.application.worker import ConnectedMailboxWorker
 
 logger = logging.getLogger('gyeonjwo')
 RATE_WINDOW_SECONDS = 60
 RATE_LIMIT_PER_WINDOW = 120
 RATE_LIMIT_EXEMPT_PATHS = frozenset({'/api/v1/webhooks/gmail'})
 
-def create_app(settings=None, services=None, push_verifier=verify_push):
+def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_service=None):
     settings = settings or get_settings()
 
     @asynccontextmanager
     async def lifespan(app):
         worker = None
+        connected_worker = None
+        if settings.worker_enabled and settings.google_mailbox_worker_enabled:
+            raise RuntimeError('Legacy and connected-mailbox workers cannot run together')
         if settings.worker_enabled:
             settings.require_server()
             settings.require_gmail()
@@ -42,11 +47,21 @@ def create_app(settings=None, services=None, push_verifier=verify_push):
             worker = GmailWorker(app.state.services)
             app.state.worker = worker
             worker.start()
+        if settings.google_mailbox_worker_enabled:
+            settings.require_google_connect()
+            settings.require_llm()
+            if app.state.mailbox_service is None:
+                app.state.mailbox_service = make_mailbox_service(settings)
+            connected_worker = ConnectedMailboxWorker(app.state.mailbox_service)
+            app.state.connected_mailbox_worker = connected_worker
+            connected_worker.start()
         try:
             yield
         finally:
             if worker:
                 worker.close()
+            if connected_worker:
+                connected_worker.close()
 
     # Explicitly override FastAPI's default HTTPValidationError schema: runtime uses ErrorEnvelope.
     common_errors = {status: {'model': ErrorEnvelope} for status in
@@ -54,6 +69,8 @@ def create_app(settings=None, services=None, push_verifier=verify_push):
     app = FastAPI(title='견줘 Python Backend', version='1.0.0', lifespan=lifespan,
                   responses=common_errors)
     app.state.settings, app.state.services, app.state.worker = settings, services, None
+    app.state.mailbox_service = mailbox_service
+    app.state.connected_mailbox_worker = None
     app.state.service_lock = threading.Lock()
     app.state.push_verifier = push_verifier
     app.add_middleware(BodyLimitMiddleware)
@@ -88,13 +105,14 @@ def create_app(settings=None, services=None, push_verifier=verify_push):
                 response = api_error('PROCESSING_UNAVAILABLE', '요청을 처리하지 못했습니다.', 503)
         response.headers['Cache-Control'] = 'private, no-store'
         response.headers['X-Content-Type-Options'] = 'nosniff'
-        response.headers['X-Request-ID'] = request_id
+        # Exact idempotent replay preserves the first envelope and its request ID.
+        response.headers.setdefault('X-Request-ID', request_id)
         return response
 
     # Added last so it is the outermost middleware: 429/413 responses also carry CORS headers for the browser.
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False,
                        allow_methods=['GET', 'POST', 'PATCH', 'PUT'],
-                       allow_headers=['Authorization', 'Content-Type', 'Idempotency-Key'],
+                       allow_headers=['Authorization', 'Content-Type', 'Idempotency-Key', 'Cache-Control'],
                        expose_headers=['X-Request-ID', 'Retry-After'])
 
     @app.exception_handler(ServiceError)
@@ -130,6 +148,7 @@ def create_app(settings=None, services=None, push_verifier=verify_push):
     app.include_router(system_router)
     app.include_router(mail_router)
     app.include_router(review_router)
+    app.include_router(mailbox_router)
     return app
 
 
