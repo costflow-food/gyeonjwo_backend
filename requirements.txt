@@ -5,4 +5,3 @@ supabase==2.33.0
 httpx==0.28.1
 google-auth[requests]==2.62.0
 pypdf==6.21.2
-cryptography==50.0.2

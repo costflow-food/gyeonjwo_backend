@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     analysis_timeout_seconds: int = Field(default=600, ge=30, le=1800)
     calculation_rounds: int = Field(default=3, ge=2, le=5)
     max_document_characters: int = Field(default=120000, ge=1000, le=300000)
-    cors_origins: list[str] = ['http://localhost:3000']
+    cors_origins: list[str] = []
     gmail_email: str = ''
     gmail_client_id: str = ''
     gmail_client_secret: SecretStr | None = None
@@ -32,12 +32,9 @@ class Settings(BaseSettings):
     worker_enabled: bool = False
     worker_poll_seconds: int = Field(default=10, ge=1, le=60)
     worker_sync_seconds: int = Field(default=300, ge=60, le=3600)
-    google_token_encryption_key: SecretStr | None = None
-    google_mailbox_worker_enabled: bool = False
-    google_mailbox_poll_seconds: int = Field(default=90, ge=60, le=120)
 
     @field_validator('supabase_url', 'llm_base_url', 'supabase_secret_key', 'supabase_publishable_key',
-                     'llm_api_key', 'gmail_client_secret', 'gmail_refresh_token', 'google_token_encryption_key', mode='before')
+                     'llm_api_key', 'gmail_client_secret', 'gmail_refresh_token', mode='before')
     @classmethod
     def empty_optional_values(cls, value):
         return None if isinstance(value, str) and not value.strip() else value
@@ -55,13 +52,6 @@ class Settings(BaseSettings):
     def require_server(self) -> None:
         if not self.supabase_url or not self.supabase_secret_key or not self.supabase_secret_key.get_secret_value():
             raise RuntimeError('SUPABASE_URL and SUPABASE_SECRET_KEY must be configured locally.')
-
-    def require_google_connect(self):
-        self.require_server()
-        if not self.gmail_client_id or not self.gmail_client_secret or not self.google_token_encryption_key:
-            raise RuntimeError('Google OAuth client and token encryption key must be configured')
-        if self.worker_enabled and self.google_mailbox_worker_enabled:
-            raise RuntimeError('Legacy and connected-mailbox workers cannot run together')
 
 
 @lru_cache

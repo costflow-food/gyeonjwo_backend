@@ -10,7 +10,6 @@ from app.core.errors import ServiceError
 from app.features.mail.infrastructure.gmail import parse_notification
 from app.shared.infrastructure.llm import JsonAgent
 from app.features.mail.domain.schemas import Classification, MailClassificationRequest
-from app.features.mailboxes.api.router import get_mailbox_service
 
 router = APIRouter(tags=['mail'])
 protected = [Depends(require_member)]
@@ -18,9 +17,7 @@ protected = [Depends(require_member)]
 @router.post('/api/v1/webhooks/gmail', status_code=204)
 async def gmail_webhook(request: Request, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]):
     settings = request.app.state.settings
-    connected = settings.google_mailbox_worker_enabled
-    if (not settings.pubsub_audience or not settings.pubsub_service_account or not settings.gmail_subscription
-            or (not connected and not settings.gmail_email)):
+    if not settings.pubsub_audience or not settings.pubsub_service_account or not settings.gmail_subscription or not settings.gmail_email:
         raise ServiceError('INGEST_UNAVAILABLE', '메일 수신 설정이 필요합니다.', 503)
     if not credentials:
         raise ServiceError('UNAUTHORIZED_PUSH', 'Pub/Sub 인증이 필요합니다.', 401)
@@ -34,14 +31,7 @@ async def gmail_webhook(request: Request, credentials: Annotated[HTTPAuthorizati
         payload = json.loads(raw)
     except (ValueError, TypeError):
         raise ServiceError('INVALID_NOTIFICATION', '잘못된 알림 JSON입니다.', 400) from None
-    notification_id, email, history_id = parse_notification(payload, settings, connected=connected)
-    if connected:
-        mailbox = get_mailbox_service(request)
-        await run_in_threadpool(mailbox.repo.enqueue_push, settings.gmail_subscription, notification_id, email, history_id)
-        worker = request.app.state.connected_mailbox_worker
-        if worker:
-            worker.wake.set()
-        return Response(status_code=204)
+    notification_id, email, history_id = parse_notification(payload, settings)
     service = get_service(request)
     try:
         await run_in_threadpool(service.rpc.call, 'enqueue_gmail_notification', p_subscription=settings.gmail_subscription,

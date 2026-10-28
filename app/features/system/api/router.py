@@ -12,20 +12,6 @@ def health():
 
 @router.get('/ready')
 def ready(request: Request):
-    if request.app.state.settings.google_mailbox_worker_enabled:
-        try:
-            settings = request.app.state.settings
-            settings.require_google_connect()
-            settings.require_llm()
-            service = request.app.state.mailbox_service
-            worker = request.app.state.connected_mailbox_worker
-            if not service or not worker or not worker.running:
-                raise RuntimeError('Connected mailbox worker not running')
-            if service.repo.call('connected_google_mailbox_health') != 'google-mailbox-v1':
-                raise RuntimeError('Connected mailbox schema mismatch')
-        except Exception:
-            return JSONResponse({'status': 'not_ready'}, status_code=503)
-        return {'status': 'ready', 'checks': {'database': 'google-mailbox-v1', 'llm': 'configured', 'gmail_worker': 'running'}}
     settings = request.app.state.settings
     try:
         settings.require_server()

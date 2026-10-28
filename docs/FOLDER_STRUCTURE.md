@@ -65,20 +65,6 @@ tests/                            # 기능/회귀 검증
 
 API 레이어는 HTTP 입력·인증·응답을, application은 업무의 진행 순서를, domain은 데이터/계산 규칙을, infrastructure는 Gmail·LLM·DB·파일 같은 외부 연동을 맡는다. 에이전트 담당자는 application 서비스와 허용된 조회/계산 도구를 연결한다. 이 폴더 정리가 최신 기획의 다섯 에이전트·새 논리 DB를 모두 구현했다는 뜻은 아니다.
 
-## Google 로그인 메일함 연결
-
-`app/features/mailboxes/`에 별도로 분리했다. 기존 `mail`은 구 고정 계정 워커이며 동시에 실행하지 않는다.
-
-- `api/router.py`: 두 연결 API, HTTPS·인증·멱등 응답.
-- `application/auth.py`: Supabase Auth의 검증된 Google identity.
-- `application/service.py`: OAuth 확인·갱신·연결 상태·권한 검사.
-- `application/worker.py`: 저장된 연결 정보로 수집, 분류 노드 연결, 커서 관리.
-- `application/ingestion.py`: Gmail 본문·첨부 메타 파싱 및 회신 참조 검사.
-- `domain/schemas.py`: 프론트 DTO·입력 비밀 문자열·scope 상수.
-- `infrastructure/google.py`: 토큰 및 Gmail REST 호출, 토큰 URL 비기록.
-- `infrastructure/crypto.py`: 서버 비밀키 기반 암호화/HMAC.
-- `infrastructure/repository.py`: DB 담당자와 맞출 Supabase RPC 어댑터.
-
 기존 `Services`는 구 DB에 연결된 서비스 진입점으로 유지했다. 최신 업무 그룹/견적/발송 기능을 구현할 때 각 기능 application으로 분해할 수 있지만, 이번 정리에서 새 DB 테이블이나 동작을 임의 생성하지 않았다.
 
 ## 이동 시 함께 수정한 것
