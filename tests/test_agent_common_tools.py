@@ -1,7 +1,9 @@
+import json
 from uuid import UUID
 
 import pytest
 from agent_memory_store import MemoryStore
+from test_agent_extractor import SYNTHETIC_CASES, synthetic_store
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 
@@ -60,8 +62,15 @@ def test_evidence_reads_body_or_attachment_page_of_the_running_case_only(store):
     assert load_evidence(store, CONTEXT, 'mail-1', 'body', None)['text'] == '가나농산 냉동 딸기 5,450원/kg'
     page = load_evidence(store, CONTEXT, 'mail-1', 'att-1', 2)
     assert (page['text'], page['location'], page['truncated']) == ('단가표', 'mail-1 quote.pdf p.2', False)
-    assert load_evidence(store, CONTEXT, 'mail-9', 'body', None)['status'] == 'NOT_FOUND'
+    other_case = load_evidence(store, CONTEXT, 'mail-9', 'body', None)
+    assert other_case['status'] == 'NOT_FOUND' and 'available_parts' not in other_case   # 다른 업무 메일은 알려주지 않음
     assert load_evidence(store, CONTEXT, 'mail-1', 'att-1', 5)['status'] == 'NOT_FOUND'
+
+
+def test_wrong_part_returns_the_parts_that_can_be_read(store):
+    result = load_evidence(store, CONTEXT, 'mail-1', 'attachment_ref', 1)
+    assert result['status'] == 'NOT_FOUND'
+    assert result['available_parts'] == [{'part': 'body'}, {'part': 'att-1', 'pages': 2}]
 
 
 def test_long_evidence_is_truncated(store):
@@ -150,3 +159,139 @@ def test_runner_records_failure(store):
         AgentRunner(model, runs=store)(AgentRole.INFO_EXTRACTOR, extraction_in())
     assert store.agent_runs['run-1']['status'] == 'FAILED'
     assert store.agent_runs['run-1']['error_jsonb'] == {'type': 'RuntimeError'}
+
+
+# ─────────────────────────────────────────────
+# 합성 메일 20건으로 공통 도구 검사 (LLM 없음). 데이터는 test_agent_extractor.SYNTHETIC_CASES
+# ─────────────────────────────────────────────
+
+SYNTHETIC = [pytest.param(case.values[0], id=case.id) for case in SYNTHETIC_CASES]
+MISSING_CASE = '00000000-0000-4000-8000-000000000099'
+
+
+def synthetic_context(data):
+    case_id, memory = synthetic_store(data)
+    return memory, RunContext(case_id, 1)
+
+
+def attachment_list(mail):
+    return [{'attachment_ref': a['attachment_ref'], 'filename': a['filename'], 'pages': len(a['pages'])}
+            for a in mail['attachments']]
+
+
+@pytest.mark.parametrize('data', SYNTHETIC)
+def test_case_context_returns_the_synthetic_case_and_its_mail_list(data):
+    memory, context = synthetic_context(data)
+    result = load_case_context(memory, context)
+    assert result['status'] == 'OK' and result['input_revision'] == 1
+    assert result['item_name'] == data['item_name'] and result['latest_quote_version_ids'] == []
+    assert result['mandatory_conditions'] == data['case_fields'].get('mandatory_conditions')
+    assert [(m['mail_id'], m['supplier_id'], m['subject'], m['received_at'], m['attachments'])
+            for m in result['mails']] == [(m['id'], m['supplier_id'], m['subject'], m['received'], attachment_list(m))
+                                          for m in data['mails']]
+    assert all(mail['body'] not in json.dumps(result, ensure_ascii=False) for mail in data['mails'])   # 본문은 주지 않음
+
+
+@pytest.mark.parametrize('data', SYNTHETIC)
+def test_case_context_stops_when_revision_moved_or_case_is_unknown(data):
+    memory, context = synthetic_context(data)
+    assert load_case_context(memory, RunContext(MISSING_CASE, 1)) == {'status': 'CASE_NOT_FOUND'}
+    memory.work_cases[context.case_id]['input_revision'] = 2           # 실행 중 새 회신이 들어옴
+    assert load_case_context(memory, context) == {'status': 'REVISION_CHANGED'}
+
+
+@pytest.mark.parametrize('data', SYNTHETIC)
+def test_evidence_returns_every_body_and_attachment_page_as_written(data):
+    memory, context = synthetic_context(data)
+    for mail in data['mails']:
+        body = load_evidence(memory, context, mail['id'], 'body', None)
+        assert (body['status'], body['text'], body['location'], body['truncated']) == (
+            'OK', mail['body'], f"{mail['id']} 본문", False)
+        for attachment in mail['attachments']:
+            for page, text in enumerate(attachment['pages'], 1):
+                result = load_evidence(memory, context, mail['id'], attachment['attachment_ref'], page)
+                assert (result['status'], result['text'], result['location']) == (
+                    'OK', text, f"{mail['id']} {attachment['filename']} p.{page}")
+
+
+@pytest.mark.parametrize('data', SYNTHETIC)
+def test_wrong_part_or_page_tells_which_parts_can_be_read(data):
+    memory, context = synthetic_context(data)
+    for mail in data['mails']:
+        readable = [{'part': 'body'}] + [{'part': a['attachment_ref'], 'pages': len(a['pages'])}
+                                         for a in mail['attachments']]
+        wrong = [('attachment_ref', 1), ('att-9', 1)] + [(a['attachment_ref'], len(a['pages']) + 1)
+                                                         for a in mail['attachments']]
+        for part, page in wrong:
+            result = load_evidence(memory, context, mail['id'], part, page)
+            assert result['status'] == 'NOT_FOUND' and result['available_parts'] == readable
+
+
+@pytest.mark.parametrize('index', range(len(SYNTHETIC_CASES)))
+def test_mails_of_another_synthetic_case_cannot_be_read(index):
+    own, other = SYNTHETIC_CASES[index].values[0], SYNTHETIC_CASES[(index + 1) % len(SYNTHETIC_CASES)].values[0]
+    case_id, memory = synthetic_store(own)
+    memory.add_case(MISSING_CASE)
+    for mail in other['mails']:
+        memory.add_mail(f"other-{mail['id']}", MISSING_CASE, mail['body'], supplier_id=mail['supplier_id'],
+                        attachments=mail['attachments'])
+    context = RunContext(case_id, 1)
+    assert [m['mail_id'] for m in load_case_context(memory, context)['mails']] == [m['id'] for m in own['mails']]
+    for mail in other['mails']:
+        for part, page in [('body', None)] + [(a['attachment_ref'], 1) for a in mail['attachments']]:
+            result = load_evidence(memory, context, f"other-{mail['id']}", part, page)
+            assert result['status'] == 'NOT_FOUND' and 'available_parts' not in result   # 다른 업무는 알려주지 않음
+
+
+@pytest.mark.parametrize('data', SYNTHETIC)
+def test_save_result_keeps_the_interim_result_apart_from_the_final_one(data):
+    memory, context = synthetic_context(data)
+    started = memory.start_agent_run(context.case_id, AgentRole.INFO_EXTRACTOR, 1, {}, 'fake', 'p1')
+    context = RunContext(context.case_id, 1, started['agent_run_id'], started['review_batch_id'])
+    reason = f"{data['mails'][0]['id']} 확인"
+
+    def save(action='HOLD', why=reason):
+        return save_result(memory, context, AgentRole.INFO_EXTRACTOR, action, why, ['unit_price'], ['qv-0'], [])
+    assert save('SEND_RFQ') == {'status': 'REJECTED', 'code': 'INVALID_NEXT_ACTION'}   # ①이 고를 수 없는 값
+    assert save(why=' ') == {'status': 'REJECTED', 'code': 'INVALID_REASON'}
+    assert save(why='가' * 501) == {'status': 'REJECTED', 'code': 'INVALID_REASON'}
+    assert memory.agent_runs['run-1']['output_jsonb'] == {}
+    assert save() == {'status': 'SAVED', 'result_id': 'run-1', 'is_latest': True}
+    assert memory.agent_runs['run-1']['output_jsonb'] == {
+        'interim': {'next_action': 'HOLD', 'reason': reason, 'unknown_fields': ['unit_price']},
+        'source_quote_ids': ['qv-0'], 'source_run_ids': []}
+    memory.finish_agent_run('run-1', 'COMPLETED', {'next_action': 'STORED', 'reason': '최종'}, None)
+    output = memory.agent_runs['run-1']['output_jsonb']
+    assert (output['next_action'], output['interim']['next_action']) == ('STORED', 'HOLD')   # 서로 덮어쓰지 않음
+    memory.work_cases[context.case_id]['input_revision'] = 2
+    assert save('STORED', '다시') == {'status': 'REVISION_CHANGED', 'is_latest': False}
+    assert memory.agent_runs['run-1']['output_jsonb']['interim']['reason'] == reason       # 바뀐 revision에선 안 씀
+
+
+@pytest.mark.parametrize('data', SYNTHETIC)
+def test_common_tools_called_by_the_agent_use_the_running_case_and_role(data):
+    case_id, memory = synthetic_store(data)
+    first = data['mails'][0]
+    calls = [('get_case_context', {}), ('read_mail_evidence', {'mail_id': first['id']})]
+    calls += [('read_mail_evidence', {'mail_id': first['id'], 'part': a['attachment_ref'], 'page': 1})
+              for a in first['attachments']]
+    calls += [('save_agent_result', {'next_action': 'HOLD', 'reason': '도구 확인', 'unknown_fields': ['unit']})]
+    started = memory.start_agent_run(case_id, AgentRole.INFO_EXTRACTOR, 1, {}, 'fake', 'p1')
+    tools.use_case_store(memory)
+    try:
+        result = build_agent(AgentRole.INFO_EXTRACTOR, FakeModel(messages=iter(messages(calls)))).invoke(
+            {'messages': [('user', '{}')]},
+            context=RunContext(case_id, 1, started['agent_run_id'], started['review_batch_id']))
+    finally:
+        tools.use_case_store(None)
+    outputs = [json.loads(m.content) for m in result['messages']
+               if isinstance(m, ToolMessage) and m.name != 'ExtractionOut']
+    context_out, body, *pages, saved = outputs
+    assert context_out['status'] == 'OK' and [m['mail_id'] for m in context_out['mails']] == [
+        m['id'] for m in data['mails']]
+    assert body['text'] == first['body']
+    assert [page['text'] for page in pages] == [a['pages'][0] for a in first['attachments']]
+    assert saved == {'status': 'SAVED', 'result_id': 'run-1', 'is_latest': True}
+    # 역할은 에이전트 이름(info_extractor)에서 읽혀 이 실행 기록에 저장됐다
+    assert memory.agent_runs['run-1']['output_jsonb']['interim'] == {
+        'next_action': 'HOLD', 'reason': '도구 확인', 'unknown_fields': ['unit']}

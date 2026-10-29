@@ -29,8 +29,14 @@ def registry(monkeypatch):
         calls.append(evidence_id)
         return '원문'
 
+    @tool
+    def store_structured_mail(note: str) -> dict:
+        '''Store a quote.'''
+        return {'status': 'STORED', 'quote_version_id': 'q1'}
+
     monkeypatch.setattr(tools, '_registry', {})
     tools.register(read_mail_evidence)
+    tools.register(store_structured_mail)
     return calls
 
 
@@ -41,7 +47,8 @@ def extraction_in():
 def test_agent_calls_allowed_tool_then_returns_validated_output(registry):
     model = FakeModel(messages=iter([
         call('read_mail_evidence', {'evidence_id': 'm1'}, 1),
-        call('ExtractionOut', {'next_action': 'STORED', 'reason': '저장', 'quote_version_ids': ['q1']}, 2)]))
+        call('store_structured_mail', {'note': 'q'}, 2),
+        call('ExtractionOut', {'next_action': 'STORED', 'reason': '저장', 'quote_version_ids': ['q1']}, 3)]))
     out = AgentRunner(model)(AgentRole.INFO_EXTRACTOR, extraction_in())
     assert isinstance(out, ExtractionOut) and out.quote_version_ids == ['q1']
     assert registry == ['m1']

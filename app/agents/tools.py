@@ -40,6 +40,7 @@
 | create_mail_draft         | ②③⑤   | 목적(RFQ/CLARIFICATION/COUNTER_OFFER)·대상·근거·스타일 → 초안 ID | 내부 저장만, 발송은 백엔드        |
 """
 import re
+from datetime import date
 from decimal import Decimal
 from typing import Literal, Protocol, get_args
 
@@ -163,7 +164,14 @@ def load_case_context(store: CaseStore, context: RunContext) -> dict:
 def load_evidence(store: CaseStore, context: RunContext, mail_id: str, part: str, page: int | None) -> dict:
     item = _read(lambda: store.read_mail_part(context.case_id, mail_id, part, page))
     if item is None:
-        return {'status': 'NOT_FOUND', 'mail_id': mail_id, 'part': part, 'page': page}
+        result = {'status': 'NOT_FOUND', 'mail_id': mail_id, 'part': part, 'page': page}
+        mail = next((row for row in _read(lambda: store.list_case_mails(context.case_id))
+                     if row['mail_id'] == mail_id), None)
+        if mail is not None:     # 이 업무의 메일이면 읽을 수 있는 part를 알려준다. 다른 업무의 메일은 알려주지 않는다
+            result['available_parts'] = [{'part': 'body'}] + [
+                {'part': attachment['attachment_ref'], 'pages': attachment['pages']}
+                for attachment in mail.get('attachments') or []]
+        return result
     text = item['text']
     return {'status': 'OK', 'mail_id': mail_id, 'part': part, 'page': page, 'text': text[:MAX_EVIDENCE_CHARS],
             'location': item.get('location'), 'truncated': len(text) > MAX_EVIDENCE_CHARS}
@@ -205,9 +213,12 @@ def get_case_context(runtime: ToolRuntime[RunContext]) -> dict:
 @tool
 def read_mail_evidence(mail_id: str, runtime: ToolRuntime[RunContext], part: str = 'body',
                        page: int | None = None) -> dict:
-    '''이 업무에 속한 메일의 본문(part='body') 또는 첨부(part=attachment_ref) 한 쪽(page)의 원문과 위치를 읽는다.
+    '''이 업무에 속한 메일의 본문 또는 첨부 한 쪽(page)의 원문과 위치를 읽는다.
+    part: 본문은 'body', 첨부는 get_case_context 메일 목록의 attachment_ref 값(예: 'att-1'). 'attachment_ref'라는 글자가 아니다.
+    page: 첨부의 쪽 번호(1부터). 본문은 비운다.
 
-    반환 status: OK면 text·location·truncated(원문이 길어 앞부분만 줬으면 true) / NOT_FOUND(이 업무의 메일·첨부가 아님)
+    반환 status: OK면 text·location·truncated(원문이 길어 앞부분만 줬으면 true)
+      / NOT_FOUND(이 업무의 메일인데 part·page가 틀렸으면 available_parts로 읽을 수 있는 part·쪽수를 알려준다)
     '''
     return load_evidence(_case_store, _run_context(_case_store, runtime), mail_id, part, page)
 
@@ -266,6 +277,18 @@ PRICE_BASIS = ('unit', 'currency', 'order_unit', 'quantity_per_order_unit')
 # 단가 포함·별도 표현. 서버가 확신할 수 있는 표현만 보고, 그 밖에는 확정하지 않는다
 _INCLUDED_PHRASES = ('별도청구하지않', '별도로청구하지않', '별도청구없', '별도비용없')   # '별도'가 있어도 포함 뜻
 _EXCLUDED_WORDS = ('별도', '미포함', '불포함')
+# 저장하는 단위. 원문 표기는 _UNIT_ALIASES·unit_name으로 바꾸고, 이 밖의 단위는 INVALID_UNIT으로 거절한다
+_UNITS = {'kg', 'g', '톤', 'box', '개', '팩', '봉', '포대'}
+_UNIT_ALIASES = {'Box': 'box', '상자': 'box', '그램': 'g', 't': '톤', 'EA': '개', 'ea': '개'}
+# 수량에 붙는 수식어 ('최소 20박스', '5박스 단위', '500kg 미만'). 숫자를 읽을 때만 떼고, 원문 대조는 붙인 채로 한다
+_QUANTITY_FIELDS = {'available_quantity', 'quantity_per_order_unit', 'moq', 'pack_multiple'}
+_QUANTITY_WORDS = re.compile(r'^\s*(?:최소\s*주문\s*량|최소\s*발주\s*량|MOQ|최소|최대)\s*:?\s*'
+                             r'|\s*(?:이상|이하|미만|초과|단위|까지|부터)\s*$')
+# 단가 구간 경계의 뜻. 최솟값에는 아래 경계 표현만, 최댓값에는 위 경계 표현만 올 수 있다
+_LOWER_BOUND_WORDS = ('이상', '초과', '부터')
+_UPPER_BOUND_WORDS = ('미만', '이하', '까지')
+_DATE_SUFFIX = re.compile(r'\s*(?:까지|부터|자)\s*$')
+_DOTTED_DATE = re.compile(r'(\d{4})\s*[./]\s*(\d{1,2})\s*[./]\s*(\d{1,2})\s*\.?')   # 2026. 12. 1. / 2026/12/01
 
 
 class EvidenceRef(StrictModel):
@@ -357,14 +380,40 @@ def _compact(text: str) -> str:
     return re.sub(r'\s+', '', text)
 
 
+def _quantity_text(raw: str) -> str:
+    return _QUANTITY_WORDS.sub('', raw.strip()).strip()
+
+
+def _date(raw: str, field_name: str) -> str:
+    """연도가 있는 날짜만 받는다. '2026년 12월 1일', '2026-12-01', '2026. 12. 1.', 뒤의 '까지·부터'는 허용."""
+    text = _DATE_SUFFIX.sub('', raw.strip())
+    match = _DOTTED_DATE.fullmatch(text)
+    if match is None:
+        return explicit_date(text, field_name).isoformat()
+    try:
+        return date(*map(int, match.groups())).isoformat()
+    except ValueError:
+        raise ReviewRequired('INVALID_DATE', f'{field_name}의 날짜를 확인할 수 없습니다.', field_name)
+
+
+def _unit(raw: str, field_name: str) -> str:
+    """'kg', '박스', '원/kg', 'kg당', '1kg'을 저장 단위로 바꾼다. 정해진 단위가 아니면 INVALID_UNIT."""
+    text = re.sub(r'\s*당$', '', re.sub(r'^(?:원\s*)?/\s*', '', raw.strip()))
+    text = re.sub(r'^1\s*(?=\D)', '', text)          # '1kg 당 단가'의 1kg
+    unit = unit_name(_UNIT_ALIASES.get(text, text))
+    if unit not in _UNITS:
+        raise ReviewRequired('INVALID_UNIT', f'{field_name}의 단위를 확인할 수 없습니다.', field_name)
+    return unit
+
+
 def _parse(kind: str, field_name: str, raw: str) -> str:
     """원문 값을 저장 값으로 바꾼다. 숫자는 소수 문자열, 날짜는 ISO, 단위·통화는 표준 이름."""
     if kind == 'number':
-        return str(decimal_value(raw, field_name))
+        return str(decimal_value(_quantity_text(raw) if field_name in _QUANTITY_FIELDS else raw, field_name))
     if kind == 'date':
-        return explicit_date(raw, field_name).isoformat()
+        return _date(raw, field_name)
     if kind == 'unit':
-        return unit_name(raw.strip())
+        return _unit(raw, field_name)
     if kind == 'currency':
         return 'KRW' if raw.strip() in _KRW else raw.strip().upper()
     return raw.strip()
@@ -376,7 +425,8 @@ class _SourceCheck:
     def __init__(self, store: CaseStore, case_id: str):
         self.store, self.case_id, self.parts = store, case_id, {}
 
-    def __call__(self, evidence: EvidenceRef | None, raw: str) -> tuple[str | None, dict | None]:
+    def __call__(self, evidence: EvidenceRef | None, raw: str, numeric=False) -> tuple[str | None, dict | None]:
+        """numeric이면 숫자의 천 단위 쉼표 차이(1,000kg와 1000kg)는 같은 값으로 본다."""
         if evidence is None:
             return 'MISSING_EVIDENCE', None
         key = (evidence.mail_id, evidence.part, evidence.page)
@@ -385,23 +435,26 @@ class _SourceCheck:
         part = self.parts[key]
         if part is None:
             return 'EVIDENCE_NOT_IN_CASE', None
-        if _compact(raw) not in _compact(part['text']):
+        value, text = _compact(raw), _compact(part['text'])
+        if numeric:
+            value, text = re.sub(r'(?<=\d),(?=\d)', '', value), re.sub(r'(?<=\d),(?=\d)', '', text)
+        if value not in text:
             return 'SOURCE_MISMATCH', None
         location = ' '.join(filter(None, [part.get('location'), evidence.cell]))
         return None, {'mail_id': evidence.mail_id, 'location': location}
 
 
-def _number(check, raw: str | None, name: str, evidence: EvidenceRef, free_is_zero=False):
-    """(값, 사유 코드). 원문에 없으면 (None, None)."""
+def _number(check, raw: str | None, name: str, evidence: EvidenceRef, free_is_zero=False, quantity=False):
+    """(값, 사유 코드). 원문에 없으면 (None, None). quantity면 '이상·미만' 같은 수식어를 떼고 읽는다."""
     if raw is None or not raw.strip():
         return None, None
-    issue, _ = check(evidence, raw)
+    issue, _ = check(evidence, raw, numeric=not (free_is_zero and raw.strip() in _FREE))
     if issue:
         return None, issue
     if free_is_zero and raw.strip() in _FREE:
         return '0', None
     try:
-        return str(decimal_value(raw, name)), None
+        return str(decimal_value(_quantity_text(raw) if quantity else raw, name)), None
     except ReviewRequired as error:
         return None, error.issue['code']
 
@@ -410,14 +463,22 @@ def _tiers(check, tiers: list[PriceTier], rejected: list) -> list[dict]:
     out = []
     for index, tier in enumerate(tiers):
         tier_values, issue = {}, None
+        if any(word in (tier.min_quantity or '') for word in _UPPER_BOUND_WORDS) or \
+                any(word in (tier.max_quantity or '') for word in _LOWER_BOUND_WORDS):
+            # '500kg 미만'이 최솟값에 오면 뜻이 반대가 된다
+            rejected.append({'field': f'price_tiers[{index}]', 'code': 'TIER_BOUND_MISPLACED'})
+            continue
         for name in ('unit_price', 'min_quantity', 'max_quantity'):
-            tier_values[name], issue = _number(check, getattr(tier, name), name, tier.evidence)
+            tier_values[name], issue = _number(check, getattr(tier, name), name, tier.evidence,
+                                               quantity=name != 'unit_price')
             if issue:
                 break
         if issue:
             rejected.append({'field': f'price_tiers[{index}]', 'code': issue})
             continue
-        out.append(tier_values | check(tier.evidence, tier.unit_price)[1])
+        # 경계의 이상·미만 같은 뜻은 원문 표기로 남긴다
+        raw = {'min_quantity_raw': tier.min_quantity, 'max_quantity_raw': tier.max_quantity}
+        out.append(tier_values | raw | check(tier.evidence, tier.unit_price, numeric=True)[1])
     bounded = sorted((t for t in out if t['min_quantity'] is not None), key=lambda t: Decimal(t['min_quantity']))
     for before, after in zip(bounded, bounded[1:]):
         if before['max_quantity'] is not None and Decimal(after['min_quantity']) < Decimal(before['max_quantity']):
@@ -536,7 +597,7 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         if field.raw_value is None or not field.raw_value.strip():
             sent_null.append(field.field_name)
             continue
-        issue, source = check(field.evidence, field.raw_value)
+        issue, source = check(field.evidence, field.raw_value, numeric=QUOTE_FIELDS[field.field_name][0] == 'number')
         if issue is None:
             try:
                 value = _parse(QUOTE_FIELDS[field.field_name][0], field.field_name, field.raw_value)
@@ -636,7 +697,11 @@ def store_structured_mail(fields: list[QuoteField], runtime: ToolRuntime[RunCont
       lead_time, delivery_date, unit_price, unit(unit_price가 있으면 필수), available_quantity, effective_from,
       valid_until, currency, order_unit, quantity_per_order_unit, moq, pack_multiple,
       previous_unit_price(인상 전 단가), increase_reason(인상 사유)
-    price_tiers: 단가 구간 min_quantity·max_quantity·unit_price
+    raw_value는 원문에서 값 부분만 그대로 옮긴다 (예: unit_price "54,500원", unit "박스", valid_until "2026년 12월 31일").
+    price_tiers·cost_terms·item_notes는 fields가 아니라 각 인자로 보낸다.
+    price_tiers: 단가 구간 min_quantity·max_quantity(원문 그대로, 원문에 없으면 null)·unit_price
+      "이상·초과"는 min_quantity, "미만·이하"는 max_quantity다 (예: "500kg 이상 ~ 1,000kg 미만" → min "500kg 이상",
+      max "1,000kg 미만"). 반대로 넣으면 TIER_BOUND_MISPLACED로 거절한다.
     cost_terms: 비용 cost_type(SHIPPING/HANDLING/OTHER)·source_text(그 비용이 적힌 원문 구절)·amount·basis·payer·
       included_in_price(원문에 단가 포함·별도가 적혀 있을 때만 true/false)
     item_notes: 품목 비고 원문
