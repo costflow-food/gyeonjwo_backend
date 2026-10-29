@@ -6,7 +6,7 @@
 
 **메일 수신 API·LLM 호출용 서버 실행:** [Docker/로컬 실행 가이드](docs/MAIL_API_SERVER.md). 작업 브랜치 `feature/mail-api-server`, Dockerfile·compose.yaml·인증된 메일 분류 LLM API를 추가했습니다. Docker 이미지 빌드·컨테이너 healthy 및 실제 HTTP 응답 확인을 마쳤습니다. 전체 테스트175개 통과이며 실제 외부 서비스 연동은 별도입니다.
 
-**에이전트 작업 폴더:** `app/agents/` (common·다섯 역할·orchestrator 하위 폴더). 에이전트 담당자가 구현합니다.
+**에이전트 작업 폴더:** `app/agents/` (LangGraph 그래프·계약·프롬프트·도구). 담당·브랜치·작업 방법은 [에이전트 작업 안내](app/agents/README.md)를 보세요.
 
 **기능별 코드 위치:** [폴더·레이어 안내](docs/FOLDER_STRUCTURE.md). `mail`, `review`, `auth`, `system` 기능과 API/application/domain/infrastructure 책임으로 분리했습니다.
 

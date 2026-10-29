@@ -37,10 +37,12 @@ app/
         pdf_worker.py             # 격리 PDF 프로세스
         reference_files.py        # 참고자료 원문 조회
     system/api/router.py          # /health·/ready
-  agents/                         # 에이전트 작업 폴더 (에이전트 담당자 구현)
-    common/                       # 역할 공통
-    info_extractor/ candidate/ info_priority/ response_plan/ counter_offer/   # 다섯 역할
-    orchestrator/                 # 조정기
+  agents/                         # 에이전트 (작업 안내: app/agents/README.md)
+    schemas.py                    # 실행 한도·백엔드↔그래프 계약·역할별 입출력
+    graph.py                      # LangGraph 실행 조정기
+    agents.py                     # 역할별 프롬프트·create_agent 실행기
+    tools.py                      # 역할별 허용 도구·도구 구현
+    nodes.py                      # 코드 노드 (전처리·구매안/가격 검증·검토 카드)
   shared/
     domain/schemas.py             # 공통 StrictModel·빈 요청
     infrastructure/
