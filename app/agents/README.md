@@ -31,8 +31,8 @@ START ─ preprocess ─ ① ─ STORED ─ ② ─ SEND_RFQ ─ 종료 (WAITING
 REPLY ─ preprocess ─ ① ─ STORED ─ ③ ─ REQUEST_CLARIFICATION ─ 종료 (WAITING_REPLY)
                                     └ BUILD_PLANS ─ ④ ─ PLANS_PROPOSED ─ 구매안 검증
 PLAN ───────────────────────────────────────────┘     FIX → ④ / NEED_INFO → ③ / PASS ↓
-                    ⑤ ─ COUNTER_OFFER_PROPOSED ─ 가격 검증 ─ PASS ─ 검토 카드 (COMPLETE)
-                                                          └ NEED_INFO → ③
+                    ⑤ ─ COUNTER_OFFER_PROPOSED / SKIPPED ─ 가격 검증 ─ PASS ─ 검토 카드 (COMPLETE)
+                                                          FIX → ⑤ / NEED_INFO → ③
 ③④⑤ RECHECK_SOURCE → ①   ④⑤ NEEDS_EVIDENCE → ③   모든 역할 HOLD → 보류 (ON_HOLD)
 ```
 
@@ -56,7 +56,7 @@ PLAN ─────────────────────────
 | ② CANDIDATE | `CandidateIn` | `CandidateOut` | SEND_RFQ, HOLD |
 | ③ INFO_PRIORITY | `PriorityIn` | `PriorityOut` | REQUEST_CLARIFICATION, BUILD_PLANS, RECHECK_SOURCE, HOLD |
 | ④ RESPONSE_PLAN | `PlanIn` | `PlanOut` | PLANS_PROPOSED, NEEDS_EVIDENCE, RECHECK_SOURCE, HOLD |
-| ⑤ COUNTER_OFFER | `CounterOfferIn` | `CounterOfferOut` | COUNTER_OFFER_PROPOSED, NEEDS_EVIDENCE, RECHECK_SOURCE, HOLD |
+| ⑤ COUNTER_OFFER | `CounterOfferIn` | `CounterOfferOut` | COUNTER_OFFER_PROPOSED, COUNTER_OFFER_SKIPPED, NEEDS_EVIDENCE, RECHECK_SOURCE, HOLD |
 
 역할 사이에 넘어가는 결과 항목은 `schemas.py` 4절의 모델로 고정되어 있다(07 6절 기준).
 
@@ -108,7 +108,7 @@ PLAN ─────────────────────────
 | 모델·도구 예외 | FAILED `{역할}: AGENT_FAILED` |
 | 최종 응답이 `…Out` 형식이 아님 | FAILED `{역할}: INVALID_OUTPUT` |
 | 코드 노드 예외 | FAILED `{노드}: NODE_FAILED` |
-| 실행 중 `input_revision`이 바뀜 | STALE: 결과와 초안을 쓰지 않고, 백엔드가 최신 revision으로 다시 실행 |
+| 실행 중 `input_revision`이 바뀜 (에이전트 호출 뒤, 검토 카드 저장 직전에 확인) | STALE: 결과와 초안을 쓰지 않고, 백엔드가 최신 revision으로 다시 실행 |
 
 ## 계약 변경
 

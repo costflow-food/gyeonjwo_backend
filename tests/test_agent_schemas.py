@@ -4,8 +4,8 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from app.agents.schemas import (AGENT_IO, AgentNextAction, AgentRole, Allocation, CounterOfferTarget, ExtractionIn,
-                                ExtractionOut, Plan, PlanOut, RunCaseInput)
+from app.agents.schemas import (AGENT_IO, AgentNextAction, AgentRole, Allocation, CounterOfferOut, CounterOfferTarget,
+                                ExtractionIn, ExtractionOut, Plan, PlanOut, RunCaseInput)
 from app.agents.tools import KNOWN_TOOLS, ROLE_TOOLS
 
 
@@ -39,6 +39,14 @@ def test_role_tools_exclude_node_only_and_unsafe_tools():
     assert not KNOWN_TOOLS & {'classify_mail_input', 'preprocess_mail_documents', 'dispatch_mail'}
     assert 'store_structured_mail' in ROLE_TOOLS[AgentRole.INFO_EXTRACTOR]
     assert 'store_structured_mail' not in ROLE_TOOLS[AgentRole.CANDIDATE]
+
+
+def test_skipped_counter_offer_has_no_target_or_draft():
+    target = CounterOfferTarget(supplier_id='A', target_unit_price='5400', basis_quote_version_ids=['A-v1'])
+    CounterOfferOut(next_action='COUNTER_OFFER_SKIPPED', reason='정책상 유지 불필요')
+    for extra in ({'target': target}, {'draft_ids': ['d1']}):
+        with pytest.raises(ValidationError):
+            CounterOfferOut(next_action='COUNTER_OFFER_SKIPPED', reason='근거', **extra)
 
 
 def allocation(supplier, quantity='600'):

@@ -43,7 +43,9 @@ PROMPTS = {
     #    PLANS_PROPOSED: 안 구성 / NEEDS_EVIDENCE: ③ 확인 필요(unknown_fields에) / RECHECK_SOURCE / HOLD
     AgentRole.RESPONSE_PLAN: '',
     # ⑤ 기존 업체 유지 조건, 검증된 대안·회사 정책 기준, 정책 없으면 목표 가격 생성 금지
-    #    COUNTER_OFFER_PROPOSED: 목표 조건·초안 / NEEDS_EVIDENCE / RECHECK_SOURCE / HOLD: 정책·근거 없음
+    #    COUNTER_OFFER_PROPOSED: 목표 조건·초안 / COUNTER_OFFER_SKIPPED: 정책상 역제안 불필요 (target·초안 없이, reason에 근거)
+    #    NEEDS_EVIDENCE / RECHECK_SOURCE / HOLD: 정책·근거 없음
+    #    가격 검증 FIX로 다시 호출되면 입력의 price_check_reason을 보고 목표 조건을 고친다
     AgentRole.COUNTER_OFFER: '',
 }
 
