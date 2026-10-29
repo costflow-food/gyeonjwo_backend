@@ -15,14 +15,15 @@ class ScriptedAgents:
 
     def __init__(self, **scripts):
         self.scripts = {R[role]: list(actions) for role, actions in scripts.items()}
-        self.calls = []
+        self.calls, self.inputs = [], []
 
     def __call__(self, role, data):
         self.calls.append(role)
+        self.inputs.append(data)
         action = self.scripts[role].pop(0)
         output = AGENT_IO[role][1]
         extra = {'draft_ids': [f'{role}-draft']} if 'draft_ids' in output.model_fields else {}
-        return output(next_action=action, reason='근거', **extra)
+        return output(next_action=action, reason='근거', unknown_fields=[f'{role}-unknown'], **extra)
 
 
 def nodes(plan=(PlanCheck.PASS,), price=(PriceCheck.PASS,)):
@@ -91,6 +92,21 @@ def test_recheck_source_returns_to_extraction():
     out = run(agents)
     assert agents.calls == [R.INFO_EXTRACTOR, R.INFO_PRIORITY, R.INFO_EXTRACTOR, R.INFO_PRIORITY]
     assert out.status == RunStatus.ON_HOLD and out.processing_step == ProcessingStep.ON_HOLD
+
+
+def test_recheck_fields_reach_extractor_and_are_cleared():
+    agents = ScriptedAgents(INFO_EXTRACTOR=['STORED', 'STORED'], INFO_PRIORITY=['RECHECK_SOURCE', 'HOLD'])
+    run(agents)
+    first, recheck, _ = (agents.inputs[0], agents.inputs[2], agents.inputs[3])
+    assert first.recheck_fields == [] and recheck.recheck_fields == ['INFO_PRIORITY-unknown']
+
+
+def test_counter_offer_receives_quotes_and_validated_plans():
+    agents = ScriptedAgents(INFO_EXTRACTOR=['STORED'], INFO_PRIORITY=['BUILD_PLANS'], RESPONSE_PLAN=['PLANS_PROPOSED'],
+                            COUNTER_OFFER=['COUNTER_OFFER_PROPOSED'])
+    run(agents)
+    counter_in = agents.inputs[-1]
+    assert isinstance(counter_in, AGENT_IO[R.COUNTER_OFFER][0]) and counter_in.quote_version_ids == []
 
 
 def test_role_call_limit_fails_instead_of_looping():

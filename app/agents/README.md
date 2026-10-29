@@ -58,7 +58,19 @@ PLAN ─────────────────────────
 | ④ RESPONSE_PLAN | `PlanIn` | `PlanOut` | PLANS_PROPOSED, NEEDS_EVIDENCE, RECHECK_SOURCE, HOLD |
 | ⑤ COUNTER_OFFER | `CounterOfferIn` | `CounterOfferOut` | COUNTER_OFFER_PROPOSED, NEEDS_EVIDENCE, RECHECK_SOURCE, HOLD |
 
-> `list[dict]`/`dict` 필드(`candidates`, `questions`, `plans`, `target`, `priority_result`, `validated_plans`)는 아직 내용이 정해지지 않았다. 역할 담당이 필요한 필드를 제안하면 오케스트레이션 담당이 모델로 확정한다.
+역할 사이에 넘어가는 결과 항목은 `schemas.py` 4절의 모델로 고정되어 있다(07 6절 기준).
+
+| 모델 | 만드는 역할 | 받는 곳 |
+|---|---|---|
+| `Candidate`, `ConditionCheck` | ② | 백엔드(RFQ 대상) |
+| `Question` | ③ | ④ 입력 `PlanIn.questions` |
+| `Plan`, `Allocation` | ④ | 구매안 검증 노드, ⑤ 입력 `CounterOfferIn.validated_plans` |
+| `CounterOfferTarget` | ⑤ | 가격 검증 노드 |
+
+- 금액과 수량은 `DecimalStr`(예: `"5450000"`)이다. 쉼표나 단위가 붙으면 검증에서 거부된다. 계산은 도구가 하고, LLM은 도구 결과를 옮겨 적는다.
+- `Plan`은 KEEP과 SWITCH가 업체 1곳, SPLIT이 서로 다른 업체 2곳이어야 한다.
+- ③④⑤가 `RECHECK_SOURCE`를 고르면 `unknown_fields`가 ①의 `ExtractionIn.recheck_fields`로 전달된다.
+- 필드가 더 필요하면 오케스트레이션 담당에게 요청한다.
 
 ### 2. 프롬프트 — `agents.py`의 `PROMPTS`
 
@@ -104,7 +116,6 @@ PLAN ─────────────────────────
 
 ## 아직 정하지 않은 것
 
-- `list[dict]` 필드의 구체 모델
 - `nodes.py` 코드 노드 담당과 구현
 - `ProcessingStep`을 `work_cases`로 옮길지 여부(PR #3과 맞춤)
 - 백엔드에서 `run_case`를 호출하는 위치(업무 실행 API·워커)

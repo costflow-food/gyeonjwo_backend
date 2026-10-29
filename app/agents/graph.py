@@ -21,9 +21,9 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.nodes import Nodes
 from app.agents.schemas import (AGENT_IO, MAX_ROLE_CALLS_PER_RUN, AgentInput, AgentNextAction as N, AgentOutput,
-                                AgentRole, CandidateIn, CounterOfferIn, ExtractionIn, PlanCheck, PlanIn,
-                                PriceCheck, PriorityIn, ProcessingStep, RunCaseInput, RunCaseOutput, RunStatus,
-                                StartFrom)
+                                AgentRole, Candidate, CandidateIn, CounterOfferIn, CounterOfferTarget, ExtractionIn,
+                                Plan, PlanCheck, PlanIn, PriceCheck, PriorityIn, ProcessingStep, Question,
+                                RunCaseInput, RunCaseOutput, RunStatus, StartFrom)
 
 logger = logging.getLogger('gyeonjwo')
 
@@ -40,12 +40,13 @@ class CaseState(TypedDict, total=False):
     mail_ids: list[str]
     # 에이전트 결과
     quote_version_ids: list[str]                      # ①
-    candidates: list[dict]                            # ②
+    candidates: list[Candidate]                       # ②
     draft_ids: Annotated[list[str], operator.add]     # ②③⑤ 누적
-    priority: dict                                    # ③
+    questions: list[Question]                         # ③
     pending_questions: list[str]                      # ④⑤가 ③에 넘긴 미확인
-    plans: list[dict]                                 # ④
-    counter_offer: dict | None                        # ⑤
+    recheck_fields: list[str]                         # ③④⑤가 ①에 넘긴 재확인 항목
+    plans: list[Plan]                                 # ④
+    counter_offer: CounterOfferTarget | None          # ⑤
     # 분기 기준
     last_action: N
     plan_check: PlanCheck
@@ -73,21 +74,22 @@ def _ids(state):
 
 
 INPUTS = {
-    AgentRole.INFO_EXTRACTOR: lambda s: ExtractionIn(**_ids(s), mail_ids=s.get('mail_ids', [])),
+    AgentRole.INFO_EXTRACTOR: lambda s: ExtractionIn(**_ids(s), mail_ids=s.get('mail_ids', []),
+                                                     recheck_fields=s.get('recheck_fields', [])),
     AgentRole.CANDIDATE: lambda s: CandidateIn(**_ids(s), quote_version_ids=s.get('quote_version_ids', [])),
     AgentRole.INFO_PRIORITY: lambda s: PriorityIn(**_ids(s), quote_version_ids=s.get('quote_version_ids', []),
                                                   pending_questions=s.get('pending_questions', [])),
     AgentRole.RESPONSE_PLAN: lambda s: PlanIn(**_ids(s), quote_version_ids=s.get('quote_version_ids', []),
-                                              priority_result=s.get('priority', {}),
+                                              questions=s.get('questions', []),
                                               plan_check_reason=s.get('plan_check_reason')),
-    AgentRole.COUNTER_OFFER: lambda s: CounterOfferIn(**_ids(s), validated_plans=s.get('plans', [])),
+    AgentRole.COUNTER_OFFER: lambda s: CounterOfferIn(**_ids(s), quote_version_ids=s.get('quote_version_ids', []),
+                                                      validated_plans=s.get('plans', [])),
 }
 
 OUTPUTS = {
-    AgentRole.INFO_EXTRACTOR: lambda o: {'quote_version_ids': o.quote_version_ids},
+    AgentRole.INFO_EXTRACTOR: lambda o: {'quote_version_ids': o.quote_version_ids, 'recheck_fields': []},
     AgentRole.CANDIDATE: lambda o: {'candidates': o.candidates, 'draft_ids': o.draft_ids},
-    AgentRole.INFO_PRIORITY: lambda o: {'priority': {'questions': o.questions}, 'draft_ids': o.draft_ids,
-                                        'pending_questions': []},
+    AgentRole.INFO_PRIORITY: lambda o: {'questions': o.questions, 'draft_ids': o.draft_ids, 'pending_questions': []},
     AgentRole.RESPONSE_PLAN: lambda o: {'plans': o.plans},
     AgentRole.COUNTER_OFFER: lambda o: {'counter_offer': o.target, 'draft_ids': o.draft_ids},
 }
@@ -117,6 +119,8 @@ def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: N
             update |= OUTPUTS[role](output) | {'last_action': output.next_action, 'unresolved': output.unknown_fields}
             if output.next_action == N.NEEDS_EVIDENCE:
                 update['pending_questions'] = output.unknown_fields
+            elif output.next_action == N.RECHECK_SOURCE:
+                update['recheck_fields'] = output.unknown_fields
             return update
         return node
 

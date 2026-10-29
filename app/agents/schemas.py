@@ -3,17 +3,20 @@
 1. 실행 한도
 2. 백엔드 ↔ 그래프 계약 (run_case 입출력·재개 지점·진행 단계)
 3. 코드 노드 결과
-4. 에이전트 입력 — 원문·정책은 넘기지 않고 ID만 준다. 내용은 도구로 조회한다.
-5. 에이전트 결과 — LLM 최종 응답 스키마. next_action으로 조정기가 다음 단계를 정한다.
+4. 역할 결과 항목 — ②후보·③질문·④구매안·⑤역제안. 역할 사이에 그대로 전달되므로 형식을 고정한다 (07 6절).
+5. 에이전트 입력 — 원문·정책은 넘기지 않고 ID만 준다. 내용은 도구로 조회한다.
+6. 에이전트 결과 — LLM 최종 응답 스키마. next_action으로 조정기가 다음 단계를 정한다.
+
+금액·수량은 소수 문자열(DecimalStr, 예: "5450000", "12.5")이다. 계산은 도구가 하고 LLM은 결과를 옮겨 적는다.
 
 업무 상태(Waiting/Running/Complete)·revision 검사는 app.features.work_cases.domain.contracts를 따른다.
 API 오류 응답의 next_action(app.core.errors)과는 다른 값이다.
 """
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, StrictBool, model_validator
 
 from app.shared.domain.schemas import StrictModel
 
@@ -23,6 +26,8 @@ from app.shared.domain.schemas import StrictModel
 MAX_ROLE_CALLS_PER_RUN = 6
 MAX_TOOL_CALLS_PER_AGENT_CALL = 8
 READ_RETRY_LIMIT = 1
+
+DecimalStr = Annotated[str, Field(pattern=r'^-?\d+(\.\d+)?$')]
 
 
 # ─────────────────────────────────────────────
@@ -97,7 +102,92 @@ class PriceCheck(StrEnum):
 
 
 # ─────────────────────────────────────────────
-# 4. 에이전트 입력
+# 4. 역할 결과 항목
+# ─────────────────────────────────────────────
+
+class CheckState(StrEnum):
+    PASS = 'PASS'
+    FAIL = 'FAIL'
+    UNKNOWN = 'UNKNOWN'  # 근거 없음 → RFQ 체크리스트로 확인
+
+
+class ConditionCheck(StrictModel):
+    """② 후보의 조건 체크리스트 한 줄."""
+    condition: str = Field(min_length=1)       # 예: HACCP, 품종, 규격
+    required: StrictBool                       # True: 필수 (FAIL이면 후보 제외, 가중치로 상쇄 불가) / False: 선호
+    state: CheckState
+    evidence_refs: list[str] = []
+
+
+class Candidate(StrictModel):
+    """② 문의 대상 후보."""
+    supplier_id: str
+    reason: str = Field(min_length=1, max_length=300)
+    checklist: list[ConditionCheck] = []
+    preference_score: DecimalStr | None = None  # 선호 조건 가중 합 (정렬용)
+    provisional: StrictBool = False             # 웹 탐색 등 잠정 근거
+    evidence_refs: list[str] = []
+
+
+class QuestionPriority(StrEnum):
+    MUST_CONFIRM = 'MUST_CONFIRM'            # 필수 조건 누락
+    CAN_CHANGE_CHOICE = 'CAN_CHANGE_CHOICE'  # 답에 따라 업체 순위·분산 조합이 바뀔 수 있음
+    LOW_VALUE = 'LOW_VALUE'                  # 추가 조사 실익 낮음 (입증된 경우만)
+
+
+class Question(StrictModel):
+    """③ 확인 항목. 보완 요청 초안의 질문이자 ④에 넘기는 미확인 목록."""
+    supplier_id: str
+    field: str = Field(min_length=1)           # 예: shipping_cost
+    priority: QuestionPriority
+    reason: str = Field(min_length=1, max_length=300)
+    evidence_refs: list[str] = []
+    calculation_ref: str | None = None         # calculate_break_even 결과 ID
+    break_even_amount: DecimalStr | None = None
+
+
+class PlanType(StrEnum):
+    KEEP = 'KEEP'      # 기존 업체 유지
+    SWITCH = 'SWITCH'  # 전량 전환
+    SPLIT = 'SPLIT'    # 최대 2개 업체 분산
+
+
+class Allocation(StrictModel):
+    supplier_id: str
+    quote_version_id: str
+    quantity: DecimalStr
+
+
+class Plan(StrictModel):
+    """④ 구매안. 총액·검증은 도구 결과를 옮겨 적는다."""
+    plan_type: PlanType
+    allocations: list[Allocation] = Field(min_length=1, max_length=2)
+    total_amount: DecimalStr | None = None     # validate_purchase_plan 결과
+    calculation_ref: str | None = None         # 도구 결과 ID
+    conditions: list[str] = []                 # 성립 조건 (예: B 공급량 600개 확인 시)
+
+    @model_validator(mode='after')
+    def allocation_count(self):
+        suppliers = {a.supplier_id for a in self.allocations}
+        expected = 2 if self.plan_type == PlanType.SPLIT else 1
+        if len(suppliers) != len(self.allocations) or len(suppliers) != expected:
+            raise ValueError('KEEP/SWITCH need one supplier, SPLIT needs two distinct suppliers')
+        return self
+
+
+class CounterOfferTarget(StrictModel):
+    """⑤ 기존 업체 역제안 조건."""
+    supplier_id: str
+    target_unit_price: DecimalStr
+    conditions: list[str] = []
+    basis_quote_version_ids: list[str] = Field(min_length=1)  # 인상 전·요청 가격 근거
+    alternative_plan_ref: str | None = None    # ④ 대안 비용 참조
+    policy_ref: str | None = None              # 회사 가격 정책
+    validation_ref: str | None = None          # validate_counter_offer 결과 ID
+
+
+# ─────────────────────────────────────────────
+# 5. 에이전트 입력
 # ─────────────────────────────────────────────
 
 class AgentRole(StrEnum):
@@ -115,31 +205,31 @@ class AgentInput(StrictModel):
 
 class ExtractionIn(AgentInput):
     mail_ids: list[str]                  # 최초 메일 또는 새 회신
+    recheck_fields: list[str] = []       # ③④⑤의 RECHECK_SOURCE로 다시 볼 항목
 
 
 class CandidateIn(AgentInput):
-    quote_version_ids: list[str]         # 인상 요청 견적
-    required_conditions: list[str] = []
+    quote_version_ids: list[str]         # 인상 요청 견적. 요청 조건·필수 인증은 get_case_context로 조회
 
 
 class PriorityIn(AgentInput):
     quote_version_ids: list[str]         # 회신 포함 최신 견적
-    pending_questions: list[str] = []    # ④⑤가 넘긴 미확인
+    pending_questions: list[str] = []    # ④⑤·가격 검증이 넘긴 미확인
 
 
 class PlanIn(AgentInput):
     quote_version_ids: list[str]
-    priority_result: dict = {}
-    plan_check_reason: str | None = None  # 검증 실패로 재진입 시 사유
+    questions: list[Question] = []       # ③의 확인 항목 (남은 미확인 표시용)
+    plan_check_reason: str | None = None  # 구매안 검증 FIX로 재진입 시 사유
 
 
 class CounterOfferIn(AgentInput):
-    incumbent_quote_id: str | None = None  # 기존 업체 견적
-    validated_plans: list[dict] = []       # ④의 검증된 대안
+    quote_version_ids: list[str]         # 기존 업체 포함 최신 견적
+    validated_plans: list[Plan] = []     # 구매안 검증을 통과한 ④의 대안
 
 
 # ─────────────────────────────────────────────
-# 5. 에이전트 결과 — next_action은 역할마다 허용 값만 Literal로 둔다
+# 6. 에이전트 결과 — next_action은 역할마다 허용 값만 Literal로 둔다
 # ─────────────────────────────────────────────
 
 class AgentNextAction(StrEnum):
@@ -158,7 +248,7 @@ N = AgentNextAction
 
 
 class AgentOutput(StrictModel):
-    unknown_fields: list[str] = []        # 원문에 없어 null로 둔 항목
+    unknown_fields: list[str] = []        # 원문에 없어 null로 둔 항목. NEEDS_EVIDENCE·RECHECK_SOURCE면 다음 역할에 전달
     reason: str = Field(min_length=1, max_length=500)
 
 
@@ -169,24 +259,24 @@ class ExtractionOut(AgentOutput):
 
 class CandidateOut(AgentOutput):
     next_action: Literal[N.SEND_RFQ, N.HOLD]
-    candidates: list[dict] = []
+    candidates: list[Candidate] = []
     draft_ids: list[str] = []
 
 
 class PriorityOut(AgentOutput):
     next_action: Literal[N.REQUEST_CLARIFICATION, N.BUILD_PLANS, N.RECHECK_SOURCE, N.HOLD]
-    questions: list[dict] = []
+    questions: list[Question] = []
     draft_ids: list[str] = []
 
 
 class PlanOut(AgentOutput):
     next_action: Literal[N.PLANS_PROPOSED, N.NEEDS_EVIDENCE, N.RECHECK_SOURCE, N.HOLD]
-    plans: list[dict] = []                # KEEP / SWITCH / SPLIT
+    plans: list[Plan] = []
 
 
 class CounterOfferOut(AgentOutput):
     next_action: Literal[N.COUNTER_OFFER_PROPOSED, N.NEEDS_EVIDENCE, N.RECHECK_SOURCE, N.HOLD]
-    target: dict | None = None
+    target: CounterOfferTarget | None = None  # HOLD·NEEDS_EVIDENCE면 None
     draft_ids: list[str] = []
 
 

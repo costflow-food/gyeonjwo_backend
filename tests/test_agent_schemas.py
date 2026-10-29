@@ -4,8 +4,8 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from app.agents.schemas import (AGENT_IO, AgentNextAction, AgentRole, ExtractionIn, ExtractionOut, PlanOut,
-                                RunCaseInput)
+from app.agents.schemas import (AGENT_IO, AgentNextAction, AgentRole, Allocation, CounterOfferTarget, ExtractionIn,
+                                ExtractionOut, Plan, PlanOut, RunCaseInput)
 from app.agents.tools import KNOWN_TOOLS, ROLE_TOOLS
 
 
@@ -39,3 +39,21 @@ def test_role_tools_exclude_node_only_and_unsafe_tools():
     assert not KNOWN_TOOLS & {'classify_mail_input', 'preprocess_mail_documents', 'dispatch_mail'}
     assert 'store_structured_mail' in ROLE_TOOLS[AgentRole.INFO_EXTRACTOR]
     assert 'store_structured_mail' not in ROLE_TOOLS[AgentRole.CANDIDATE]
+
+
+def allocation(supplier, quantity='600'):
+    return Allocation(supplier_id=supplier, quote_version_id=f'{supplier}-v1', quantity=quantity)
+
+
+def test_plan_allocations_match_plan_type():
+    Plan(plan_type='SPLIT', allocations=[allocation('B'), allocation('A', '400')], total_amount='5450000')
+    Plan(plan_type='KEEP', allocations=[allocation('A', '1000')])
+    for plan_type, suppliers in [('SPLIT', ['A']), ('SPLIT', ['A', 'A']), ('KEEP', ['A', 'B'])]:
+        with pytest.raises(ValidationError):
+            Plan(plan_type=plan_type, allocations=[allocation(s) for s in suppliers])
+
+
+@pytest.mark.parametrize('amount', ['5,450,000', '5450000원', '1e6', ''])
+def test_amounts_are_plain_decimal_strings(amount):
+    with pytest.raises(ValidationError):
+        CounterOfferTarget(supplier_id='A', target_unit_price=amount, basis_quote_version_ids=['A-v1'])
