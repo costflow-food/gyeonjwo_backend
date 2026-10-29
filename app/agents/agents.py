@@ -46,14 +46,19 @@ PROMPTS = {
 3. recheck_fields가 비어 있지 않으면 그 항목에 해당하는 구간만 다시 읽는다.
 4. store_structured_mail을 호출한다. 값마다 근거 evidence(mail_id, part, page, cell)를 붙인다.
    한 메일에 품목이 여러 개면 업무 품목의 견적만 보낸다.
+   한 번의 호출에는 한 업체의 메일 근거만 쓴다. 업체가 여럿이면 업체마다 따로 호출한다.
+   메일 목록에 supplier_id가 있는 메일은 업체가 정해져 있으니 업체명이 본문에 없어도 supplier_name을 비워도 된다.
 5. 결과에 따라 아래처럼 대응한다. 다시 호출하는 것은 한 번까지다.
    - STORED: quote_version_id를 quote_version_ids에, 돌려받은 unknown_fields를 그대로 unknown_fields에 넣는다.
+     review가 있으면 확인이 필요한 항목과 code를 reason에 적는다.
+   - SUPPLIER_EVIDENCE_MIXED: 저장할 업체의 메일에서 읽은 값만 남기고 다시 호출한다.
    - SOURCE_MISMATCH: 원문 표기를 바꾸지 말고 그대로 다시 옮긴다.
    - INVALID_NUMBER·INVALID_DATE: 원문에 완전한 값(연도 포함 날짜 등)이 있는지 확인하고, 없으면 null로 보낸다.
    - MISSING_EVIDENCE·EVIDENCE_NOT_IN_CASE: get_case_context의 메일 목록에 있는 mail_id·part로 근거를 다시 지정한다.
    - MISSING_FIELD(unit): 단가의 단위를 원문에서 찾는다. 원문에 없으면 unit_price도 null로 보낸다.
    - TIER_OVERLAP: 단가 구간을 원문에서 다시 확인한다.
-   - MISSING_FIELD(supplier_name)·SUPPLIER_NOT_MATCHED·ITEM_OUT_OF_CASE: 저장하지 말고 HOLD를 반환한다.
+   - MISSING_FIELD(supplier_name)·SUPPLIER_NOT_MATCHED·SUPPLIER_MISMATCH·ITEM_OUT_OF_CASE:
+     저장하지 말고 HOLD를 반환한다.
    - REVISION_CHANGED·CASE_NOT_FOUND: 멈추고 HOLD를 반환한다.
 
 값 규칙:
@@ -115,7 +120,8 @@ class AgentRunStore(Protocol):
         review_batch_id는 백엔드가 실행을 시작할 때 만든 업무의 현재 검토 라운드다."""
 
     def finish_agent_run(self, agent_run_id: str, status: str, output: dict | None, error: dict | None) -> None:
-        """status=COMPLETED면 최종 응답을 output_jsonb에 합치고, FAILED면 error_jsonb를 남긴다."""
+        """status=COMPLETED면 최종 응답을 output_jsonb 최상위에 합치고, FAILED면 error_jsonb를 남긴다.
+        최종 결과(next_action·reason·unknown_fields 등)는 여기서만 쓴다. save_agent_result는 interim·참조 ID만 쓴다."""
 
 
 class AgentRunner:

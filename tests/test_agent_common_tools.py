@@ -82,8 +82,12 @@ def test_save_result_writes_agent_run_output(store):
     assert store.agent_runs['run-1']['output_jsonb'] == {}
     assert save('STORED') == {'status': 'SAVED', 'result_id': 'run-1', 'is_latest': True}
     assert store.agent_runs['run-1']['output_jsonb'] == {
-        'next_action': 'STORED', 'reason': '저장', 'unknown_fields': ['valid_until'], 'source_quote_ids': ['qv-1'],
-        'source_run_ids': []}
+        'interim': {'next_action': 'STORED', 'reason': '저장', 'unknown_fields': ['valid_until']},
+        'source_quote_ids': ['qv-1'], 'source_run_ids': []}
+    # 최종 결과는 Runner만 최상위에 쓴다. 도구의 중간 결과와 겹쳐 쓰지 않는다
+    store.finish_agent_run('run-1', 'COMPLETED', {'next_action': 'HOLD', 'reason': '최종'}, None)
+    output = store.agent_runs['run-1']['output_jsonb']
+    assert (output['next_action'], output['interim']['next_action']) == ('HOLD', 'STORED')
 
 
 def test_save_result_needs_a_recorded_run(store):

@@ -58,7 +58,8 @@ def test_first_quote_is_stored_in_06_quote_versions_shape(store):
                 'basis': '1회', 'payer': '귀사 부담', 'included_in_price': False, 'evidence': ev()}],
         notes=[{'text': '12월 물량 중 20%는 입고 지연 가능', 'evidence': ev()}])
     assert result == {'status': 'STORED', 'quote_version_id': 'qv-1', 'version_no': 1, 'supersedes_id': None,
-                      'extraction_status': 'CONFIRMED', 'unknown_fields': ['valid_until'], 'carried_fields': []}
+                      'extraction_status': 'CONFIRMED', 'unknown_fields': ['valid_until'], 'carried_fields': [],
+                      'review': []}
     row = store.quote_versions['qv-1']
     assert (row.work_case_id, row.supplier_id, row.source_mail_id) == (CASE, 'sup-ganna', 'mail-1')
     assert (row.unit_price, row.unit, row.shipping_cost, row.effective_from, row.valid_until) == (
@@ -146,12 +147,82 @@ def test_unit_is_required_with_unit_price(store):
     assert result == {'status': 'REJECTED', 'rejected': [{'field': 'unit', 'code': 'MISSING_FIELD'}]}
 
 
-def test_supplier_must_be_stated_and_registered(store):
-    assert run(store, BASE[1:])['rejected'] == [{'field': 'supplier_name', 'code': 'MISSING_FIELD'}]
+def test_linked_mail_needs_no_supplier_name_but_unlinked_mail_does(store):
+    assert run(store, BASE[1:])['status'] == 'STORED'          # mail-1은 sup-ganna에 연결돼 있다
+    assert store.quote_versions['qv-1'].supplier_id == 'sup-ganna'
     store.add_mail('mail-4', CASE, '새벽상회 냉동 딸기 5,000원/kg')
+    assert run(store, [f('item_name', '냉동 딸기', 'mail-4')])['rejected'] == [
+        {'field': 'supplier_name', 'code': 'MISSING_FIELD'}]
     result = run(store, [f('supplier_name', '새벽상회', 'mail-4'), f('item_name', '냉동 딸기', 'mail-4')])
     assert result == {'status': 'REJECTED', 'rejected': [{'field': 'supplier_name', 'code': 'SUPPLIER_NOT_MATCHED'}]}
     assert store.suppliers.keys() == {'sup-ganna', 'sup-daon'}
+    store.add_mail('mail-5', CASE, '다온푸드입니다. 냉동 딸기 5,100원/kg')   # 연결 없음, 이름으로 찾는다
+    assert run(store, [f('supplier_name', '다온푸드', 'mail-5'), f('unit_price', '5,100원', 'mail-5'),
+                       f('unit', 'kg', 'mail-5')])['status'] == 'STORED'
+    assert store.quote_versions['qv-2'].supplier_id == 'sup-daon'
+
+
+def test_values_from_another_suppliers_mail_are_not_stored_together(store):
+    store.add_mail('mail-d', CASE, '다온푸드 냉동 딸기 49,000원/박스', supplier_id='sup-daon')
+    result = run(store, [f('supplier_name', '가나농산'), f('unit_price', '49,000원', 'mail-d'), f('unit', '박스', 'mail-d')])
+    assert result == {'status': 'REJECTED', 'rejected': [
+        {'field': 'evidence', 'code': 'SUPPLIER_EVIDENCE_MIXED', 'mail_ids': ['mail-1', 'mail-d']}]}
+    store.add_mail('mail-u1', CASE, '새벽상회 냉동 딸기')
+    store.add_mail('mail-u2', CASE, '다른 메일 4,000원/kg')
+    assert run(store, [f('supplier_name', '새벽상회', 'mail-u1'), f('unit_price', '4,000원', 'mail-u2'),
+                       f('unit', 'kg', 'mail-u2')])['rejected'][0]['code'] == 'SUPPLIER_EVIDENCE_MIXED'
+    assert store.quote_versions == {}
+
+
+def test_supplier_name_contradicting_the_mail_link_is_rejected(store):
+    store.add_mail('mail-m', CASE, '다온푸드 견적을 대신 전달합니다. 냉동 딸기 5,000원/kg', supplier_id='sup-ganna')
+    assert run(store, [f('supplier_name', '다온푸드', 'mail-m')])['rejected'] == [
+        {'field': 'supplier_name', 'code': 'SUPPLIER_MISMATCH'}]
+
+
+def test_correction_mail_without_supplier_name_is_the_source_and_keeps_earlier_mail_values(store):
+    run(store, BASE + [f('effective_from', '2026년 12월 1일')])
+    before = dict(store.mail_messages['mail-1']['normalized_jsonb']['fields'])
+    store.add_mail('mail-2', CASE, '앞선 견적 단가를 54,000원/박스로 정정합니다.', supplier_id='sup-ganna',
+                   received_at='2026-10-30T09:00:00+09:00')
+    # 업체명은 이전 메일을 근거로 들어도 원문 메일은 가장 최근 메일이다
+    result = run(store, [f('supplier_name', '가나농산'), f('unit_price', '54,000원', 'mail-2'), f('unit', '박스', 'mail-2')])
+    assert result['status'] == 'STORED' and result['version_no'] == 2 and result['review'] == []
+    row = store.quote_versions['qv-2']
+    assert row.source_mail_id == 'mail-2' and row.unit_price == '54000' and row.effective_from == '2026-12-01'
+    assert store.mail_messages['mail-1']['normalized_jsonb']['fields'] == before       # 덮어쓰지 않음
+    assert store.mail_messages['mail-2']['normalized_jsonb']['fields']['unit_price']['value'] == '54000'
+
+
+def test_normalized_jsonb_keeps_preprocessing_keys(store):
+    store.mail_messages['mail-1']['normalized_jsonb'] = {'document': {'pages': 1}}
+    note = {'text': '12월 물량 중 20%는 입고 지연 가능', 'evidence': ev()}
+    run(store, BASE, notes=[note])
+    run(store, [f('supplier_name', '가나농산'), f('specification', '특품')], notes=[note])
+    normalized = store.mail_messages['mail-1']['normalized_jsonb']
+    assert normalized['document'] == {'pages': 1} and len(normalized['item_notes']) == 1
+    assert {'unit_price', 'specification'} <= set(normalized['fields'])
+
+
+def test_previous_price_is_not_carried_when_the_unit_changes(store):
+    run(store, BASE)                                             # 54,500원/박스
+    store.add_mail('mail-2', CASE, '가나농산 회신: 단가는 kg 기준입니다.', supplier_id='sup-ganna')
+    result = run(store, [f('unit', 'kg', 'mail-2')])
+    assert result['status'] == 'STORED' and result['extraction_status'] == 'NEEDS_REVIEW'
+    assert result['unknown_fields'] == ['unit_price']
+    assert result['review'] == [{'field': 'unit_price', 'code': 'PRICE_BASIS_CHANGED'}]
+    row = store.quote_versions['qv-2']
+    assert (row.unit_price, row.unit) == (None, 'kg') and 'unit_price' not in result['carried_fields']
+    assert len(store.price_history) == 1                          # 54,500원/kg는 만들어지지 않는다
+
+
+def test_new_price_with_carried_unit_needs_review(store):
+    run(store, BASE)
+    store.add_mail('mail-2', CASE, '가나농산 단가를 55,000원으로 정정합니다.', supplier_id='sup-ganna')
+    result = run(store, [f('unit_price', '55,000원', 'mail-2')])
+    assert result['extraction_status'] == 'NEEDS_REVIEW'
+    assert result['review'] == [{'field': 'unit', 'code': 'UNIT_CARRIED'}]
+    assert store.quote_versions['qv-2'].unit == 'box'
 
 
 def test_item_outside_the_case_is_rejected(store):
@@ -168,9 +239,9 @@ def test_foreign_currency_is_stored_for_review(store):
 
 
 def test_free_shipping_needs_free_in_the_source(store):
-    store.add_mail('mail-6', CASE, '다온푸드 냉동 딸기 5,200원/kg, 배송비 무료(단가 별도 청구 없음)', supplier_id='sup-daon')
-    shipping = {'cost_type': 'SHIPPING', 'source_text': '배송비 무료', 'amount': '무료', 'included_in_price': False,
-                'evidence': ev('mail-6')}
+    store.add_mail('mail-6', CASE, '다온푸드 냉동 딸기 5,200원/kg, 배송비는 단가와 별도이며 무료', supplier_id='sup-daon')
+    shipping = {'cost_type': 'SHIPPING', 'source_text': '배송비는 단가와 별도이며 무료', 'amount': '무료',
+                'included_in_price': False, 'evidence': ev('mail-6')}
     result = run(store, [f('supplier_name', '다온푸드', 'mail-6')], costs=[shipping])
     assert result['status'] == 'STORED' and store.quote_versions['qv-1'].shipping_cost == '0'
     bad = shipping | {'source_text': '5,200원/kg', 'amount': '무료'}
@@ -191,8 +262,33 @@ def test_price_tiers_are_checked_for_overlap(store):
 
 def test_same_mail_stored_twice_keeps_one_version(store):
     first, second = run(store, BASE), run(store, BASE)
-    assert first['quote_version_id'] == second['quote_version_id'] == 'qv-1'
+    assert first == second                       # 재사용한 행의 실제 version_no·supersedes_id
+    assert (second['quote_version_id'], second['version_no'], second['supersedes_id']) == ('qv-1', 1, None)
     assert len(store.quote_versions) == 1
+
+
+@pytest.mark.parametrize('text, stated', [
+    ('운송비 80,000원은 별도이며 귀사 부담', False),
+    ('배송비 80,000원은 단가에 포함됩니다', True),
+    ('운송비는 단가에 포함되어 있어 별도 청구하지 않습니다', True),
+    ('운송비 80,000원 미포함', False),
+    ('운송비 포함, 하차비 별도', None),
+    ('운송비 80,000원', None),
+])
+def test_inclusion_is_read_only_from_clear_phrases(text, stated):
+    assert tools._inclusion(text) == stated
+
+
+def test_unverified_inclusion_is_not_stored_as_a_separate_cost(store):
+    store.add_mail('mail-6', CASE, '가나농산 냉동 딸기 54,500원/박스. 배송비 80,000원은 단가에 포함됩니다.',
+                   supplier_id='sup-ganna')
+    shipping = {'cost_type': 'SHIPPING', 'source_text': '배송비 80,000원은 단가에 포함됩니다', 'amount': '80,000원',
+                'included_in_price': False, 'evidence': ev('mail-6')}
+    result = run(store, [f('unit_price', '54,500원', 'mail-6'), f('unit', '박스', 'mail-6')], costs=[shipping])
+    assert result['extraction_status'] == 'NEEDS_REVIEW'
+    assert result['review'] == [{'field': 'cost_terms[0]', 'code': 'INCLUSION_UNVERIFIED'}]
+    row = store.quote_versions['qv-1']
+    assert row.shipping_cost is None and row.cost_terms_jsonb[0]['included_in_price'] is None
 
 
 def test_llm_cannot_pass_case_or_revision():

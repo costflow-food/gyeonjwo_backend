@@ -116,7 +116,8 @@ class CaseStore(Protocol):
 
     def save_agent_output(self, case_id: str, agent_run_id: str, role: str, expected_input_revision: int,
                           output: dict) -> bool:
-        """agent_runs.output_jsonb에 결과를 합친다. 같은 트랜잭션에서 input_revision이 다르면 저장하지 않고 False."""
+        """agent_runs.output_jsonb에 save_agent_result의 {interim, source_quote_ids, source_run_ids}를 합친다.
+        같은 트랜잭션에서 input_revision이 다르면 저장하지 않고 False. 최종 결과 키는 AgentRunStore.finish_agent_run만 쓴다."""
 
 
 _case_store: CaseStore | None = None
@@ -179,7 +180,9 @@ def save_result(store: CaseStore, context: RunContext, role: AgentRole, next_act
     current = store.current_input_revision(context.case_id)
     if current is None:
         return {'status': 'CASE_NOT_FOUND'}
-    output = {'next_action': next_action, 'reason': reason.strip(), 'unknown_fields': unknown_fields,
+    # 최종 결과(next_action·reason·unknown_fields 최상위 키)는 AgentRunner가 검증된 최종 응답으로 저장한다.
+    # 이 도구는 중간 결과를 interim에, 참조 ID를 최상위에 둬서 최종 결과와 겹쳐 쓰지 않는다
+    output = {'interim': {'next_action': next_action, 'reason': reason.strip(), 'unknown_fields': unknown_fields},
               'source_quote_ids': source_quote_ids, 'source_run_ids': source_run_ids}
     if current != context.input_revision or not store.save_agent_output(
             context.case_id, context.agent_run_id, role, context.input_revision, output):
@@ -214,7 +217,8 @@ def read_mail_evidence(mail_id: str, runtime: ToolRuntime[RunContext], part: str
 def save_agent_result(next_action: str, reason: str, runtime: ToolRuntime[RunContext],
                       unknown_fields: list[str] | None = None, source_quote_ids: list[str] | None = None,
                       source_run_ids: list[str] | None = None) -> dict:
-    '''이번 역할 실행의 결과(next_action·reason·unknown_fields·참조한 견적 버전 ID·이전 역할 실행 ID)를 저장한다.
+    '''이번 역할 실행의 중간 결과(next_action·reason·unknown_fields)와 참조한 견적 버전 ID·이전 역할 실행 ID를 저장한다.
+    최종 결과는 마지막 응답으로 저장되므로 이 도구로 대신하지 않는다.
     next_action은 이 역할이 고를 수 있는 값이어야 하고 reason은 1~500자다.
 
     반환 status: SAVED면 result_id·is_latest / REVISION_CHANGED(저장 안 함) / REJECTED(code) / CASE_NOT_FOUND
@@ -257,6 +261,11 @@ QUOTE_FIELDS = {
 }
 _KRW = {'KRW', '원', '₩', '원화', '원(KRW)'}
 _FREE = {'무료', '무상'}
+# 단가의 뜻을 정하는 조건. 이전 버전과 값이 다르면 이전 단가·단가 구간·이 조건들을 이어받지 않는다
+PRICE_BASIS = ('unit', 'currency', 'order_unit', 'quantity_per_order_unit')
+# 단가 포함·별도 표현. 서버가 확신할 수 있는 표현만 보고, 그 밖에는 확정하지 않는다
+_INCLUDED_PHRASES = ('별도청구하지않', '별도로청구하지않', '별도청구없', '별도비용없')   # '별도'가 있어도 포함 뜻
+_EXCLUDED_WORDS = ('별도', '미포함', '불포함')
 
 
 class EvidenceRef(StrictModel):
@@ -320,17 +329,20 @@ class QuoteVersionRecord(StrictModel):
 class QuoteStore(CaseStore, Protocol):
     """store_structured_mail의 저장소 (06 suppliers·quote_versions·mail_messages·work_cases)."""
 
-    def resolve_supplier(self, case_id: str, mail_id: str, supplier_name: str) -> str | None:
-        """메일에 연결된 mail_messages.supplier_id를 먼저, 없으면 suppliers.name이 정확히 같은 업체. 없으면 None.
-        거래처를 새로 만들지 않는다."""
+    def resolve_supplier(self, case_id: str, supplier_name: str) -> str | None:
+        """suppliers.name이 정확히 같은 업체 하나의 id. 없거나 여럿이면 None. 거래처를 새로 만들지 않는다.
+        견적 업체는 메일의 mail_messages.supplier_id로 정하고, 이 조회는 연결이 없는 메일과 업체명 대조에만 쓴다."""
 
     def latest_quote_version(self, case_id: str, supplier_id: str) -> tuple[str, QuoteVersionRecord] | None:
         """이 업무·업체의 최신 quote_versions (id, 행)."""
 
-    def insert_quote_version(self, record: QuoteVersionRecord, expected_input_revision: int) -> str | None:
+    def insert_quote_version(self, record: QuoteVersionRecord,
+                             expected_input_revision: int) -> tuple[str, QuoteVersionRecord] | None:
         """quote_versions·price_history·mail_messages.normalized_jsonb·work_cases 조건·workflow_logs를 한 트랜잭션으로
-        저장하고 quote_versions.id를 돌려준다. input_revision은 올리지 않는다. revision이 다르면 저장하지 않고 None.
-        같은 원문 메일·같은 견적 내용(version_no·supersedes_id·case_conditions 제외)이면 기존 id를 돌려준다."""
+        저장하고 실제로 저장된 (quote_versions.id, 행)을 돌려준다. input_revision은 올리지 않는다.
+        revision이 다르면 저장하지 않고 None.
+        같은 원문 메일·같은 견적 내용(version_no·supersedes_id·case_conditions 제외)이면 새로 저장하지 않고 기존 행을 돌려준다.
+        normalized_jsonb는 덮어쓰지 않는다. fields는 필드별로 새 값으로 바꾸고 item_notes는 없던 것만 더하며 다른 키는 둔다."""
 
 
 _quote_store: QuoteStore | None = None
@@ -414,7 +426,17 @@ def _tiers(check, tiers: list[PriceTier], rejected: list) -> list[dict]:
     return out
 
 
-def _costs(check, costs: list[CostTerm], rejected: list) -> list[dict]:
+def _inclusion(source_text: str) -> bool | None:
+    """원문 구절이 단가 포함(true)·별도(false)를 분명히 말하면 그 값, 둘 다 있거나 없으면 None."""
+    text = _compact(source_text)
+    for phrase in _INCLUDED_PHRASES:
+        text = text.replace(phrase, '포함')
+    excluded = any(word in text for word in _EXCLUDED_WORDS)
+    included = '포함' in text.replace('미포함', '').replace('불포함', '')
+    return None if included == excluded else included
+
+
+def _costs(check, costs: list[CostTerm], rejected: list, review: list) -> list[dict]:
     out = []
     for index, cost in enumerate(costs):
         issue, source = check(cost.evidence, cost.source_text)
@@ -427,9 +449,69 @@ def _costs(check, costs: list[CostTerm], rejected: list) -> list[dict]:
         if issue:
             rejected.append({'field': f'cost_terms[{index}]', 'code': issue})
             continue
-        out.append({'cost_type': cost.cost_type, 'source_text': cost.source_text, 'amount': amount,
-                    'basis': cost.basis, 'payer': cost.payer, 'included_in_price': cost.included_in_price, **source})
+        entry = {'cost_type': cost.cost_type, 'source_text': cost.source_text, 'amount': amount, 'basis': cost.basis,
+                 'payer': cost.payer, 'included_in_price': cost.included_in_price, **source}
+        # 포함·별도는 원문 구절로 확인될 때만 확정한다. 확인되지 않으면 별도 비용으로 더하지 않도록 null로 둔다
+        if cost.included_in_price is not None and cost.included_in_price != _inclusion(cost.source_text):
+            entry |= {'included_in_price': None, 'review': 'INCLUSION_UNVERIFIED'}
+            review.append({'field': f'cost_terms[{index}]', 'code': 'INCLUSION_UNVERIFIED'})
+        out.append(entry)
     return out
+
+
+def _quote_supplier(store: QuoteStore, case_id: str, case_mails: dict, evidence_mails: set,
+                    supplier_name: str | None) -> tuple[str | None, dict | None]:
+    """견적 업체는 근거 메일의 서버 연결(mail_messages.supplier_id)로 정한다. LLM이 적은 업체명은 대조에만 쓴다.
+    반환: (supplier_id, 거절 사유)."""
+    if not evidence_mails:
+        return None, {'field': 'supplier_name', 'code': 'MISSING_FIELD'}
+    linked = {(case_mails.get(mail_id) or {}).get('supplier_id') for mail_id in evidence_mails}
+    named = _read(lambda: store.resolve_supplier(case_id, supplier_name)) if supplier_name else None
+    if None in linked:
+        # 업체가 연결되지 않은 메일은 업체명으로 찾되, 다른 메일 값과 섞이지 않게 한 메일 안의 근거만 묶는다
+        if len(evidence_mails) > 1:
+            return None, {'field': 'evidence', 'code': 'SUPPLIER_EVIDENCE_MIXED', 'mail_ids': sorted(evidence_mails)}
+        if supplier_name is None:
+            return None, {'field': 'supplier_name', 'code': 'MISSING_FIELD'}
+        if named is None:
+            return None, {'field': 'supplier_name', 'code': 'SUPPLIER_NOT_MATCHED'}
+        return named, None
+    if len(linked) > 1:
+        return None, {'field': 'evidence', 'code': 'SUPPLIER_EVIDENCE_MIXED', 'mail_ids': sorted(evidence_mails)}
+    supplier_id = linked.pop()
+    if named is not None and named != supplier_id:
+        return None, {'field': 'supplier_name', 'code': 'SUPPLIER_MISMATCH'}
+    return supplier_id, None
+
+
+def _carry(previous: tuple[str, QuoteVersionRecord], values: dict, tiers: list, costs: list,
+           review: list) -> tuple[list, list, list]:
+    """이번 메일에 없는 값을 이전 버전에서 원래 근거와 함께 이어받는다. 반환: (tiers, costs, 이어받은 항목).
+    단위·통화·발주 단위 등 단가의 뜻이 이전과 달라졌으면 이전 단가·단가 구간·그 조건은 이어받지 않는다."""
+    previous_id, previous_record = previous
+    before = previous_record.evidence_jsonb
+    basis_changed = any(name in values and name in before and values[name]['value'] != before[name]['value']
+                        for name in PRICE_BASIS)
+    price_given = 'unit_price' in values or bool(tiers)
+    skip = {'unit_price', *PRICE_BASIS} if basis_changed else set()
+    carried = []
+    for name, entry in before.items():
+        if name in values or name in skip or QUOTE_FIELDS.get(name, ('', 'mail'))[1] in ('mail', 'supplier'):
+            continue
+        values[name] = {**entry, 'carried_from': entry.get('carried_from', previous_id)}
+        carried.append(name)
+    if not tiers and previous_record.pricing_terms_jsonb.get('price_tiers') and not basis_changed:
+        tiers = previous_record.pricing_terms_jsonb['price_tiers']
+        carried.append('price_tiers')
+    if not costs and previous_record.cost_terms_jsonb:
+        costs = previous_record.cost_terms_jsonb
+        carried.append('cost_terms')
+    had_price = 'unit_price' in before or bool(previous_record.pricing_terms_jsonb.get('price_tiers'))
+    if basis_changed and not price_given and had_price:
+        review.append({'field': 'unit_price', 'code': 'PRICE_BASIS_CHANGED'})
+    if 'unit_price' in values and 'unit_price' not in carried and 'unit' in carried:
+        review.append({'field': 'unit', 'code': 'UNIT_CARRIED'})     # 새 단가의 단위는 이번 메일에서 확인되지 않았다
+    return tiers, costs, carried
 
 
 def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[QuoteField],
@@ -442,7 +524,7 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
     if case.get('input_revision') != context.input_revision:
         return {'status': 'REVISION_CHANGED'}
 
-    check, rejected, values, sent_null, seen = _SourceCheck(store, case_id), [], {}, [], set()
+    check, rejected, review, values, sent_null, seen = _SourceCheck(store, case_id), [], [], {}, [], set()
     for field in fields:
         if field.field_name not in QUOTE_FIELDS:
             rejected.append({'field': field.field_name, 'code': 'UNKNOWN_FIELD'})
@@ -465,7 +547,7 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
             continue
         values[field.field_name] = {'raw_value': field.raw_value, 'value': value, **source}
     tiers = _tiers(check, price_tiers, rejected)
-    costs = _costs(check, cost_terms, rejected)
+    costs = _costs(check, cost_terms, rejected, review)
     notes = []
     for index, note in enumerate(item_notes):
         issue, source = check(note.evidence, note.text)
@@ -474,34 +556,27 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         else:
             notes.append({'text': note.text, **source})
 
-    if 'supplier_name' not in values:
-        rejected.append({'field': 'supplier_name', 'code': 'MISSING_FIELD'})
     case_item = case.get('item_name')
     if case_item and 'item_name' in values and _compact(values['item_name']['value']) != _compact(case_item):
         rejected.append({'field': 'item_name', 'code': 'ITEM_OUT_OF_CASE'})
     if rejected:
         return {'status': 'REJECTED', 'rejected': rejected}
 
-    source_mail_id = values['supplier_name']['mail_id']
-    supplier_id = _read(lambda: store.resolve_supplier(case_id, source_mail_id, values['supplier_name']['value']))
-    if supplier_id is None:
-        return {'status': 'REJECTED', 'rejected': [{'field': 'supplier_name', 'code': 'SUPPLIER_NOT_MATCHED'}]}
+    # 이번 호출의 모든 근거는 한 업체의 메일이어야 한다
+    case_mails = {mail['mail_id']: mail for mail in _read(lambda: store.list_case_mails(case_id))}
+    evidence_mails = {entry['mail_id'] for entry in [*values.values(), *tiers, *costs, *notes]}
+    supplier_name = values['supplier_name']['value'] if 'supplier_name' in values else None
+    supplier_id, issue = _quote_supplier(store, case_id, case_mails, evidence_mails, supplier_name)
+    if issue:
+        return {'status': 'REJECTED', 'rejected': [issue]}
+    # 원문 메일은 근거 메일 중 가장 최근에 받은 메일이다 (회신이 이전 메일의 값을 함께 근거로 써도 회신이 원문)
+    source_mail_id = max(evidence_mails, key=lambda mail_id: (case_mails[mail_id].get('received_at') or '', mail_id))
 
     current = dict(values)
     previous = _read(lambda: store.latest_quote_version(case_id, supplier_id))
     carried = []
     if previous:
-        previous_id, previous_record = previous
-        for name, entry in previous_record.evidence_jsonb.items():
-            if name not in values and QUOTE_FIELDS.get(name, ('', 'mail'))[1] not in ('mail', 'supplier'):
-                values[name] = {**entry, 'carried_from': entry.get('carried_from', previous_id)}
-                carried.append(name)
-        if not tiers and previous_record.pricing_terms_jsonb.get('price_tiers'):
-            tiers = previous_record.pricing_terms_jsonb['price_tiers']
-            carried.append('price_tiers')
-        if not costs and previous_record.cost_terms_jsonb:
-            costs = previous_record.cost_terms_jsonb
-            carried.append('cost_terms')
+        tiers, costs, carried = _carry(previous, values, tiers, costs, review)
     if 'unit_price' in values and 'unit' not in values:
         return {'status': 'REJECTED', 'rejected': [{'field': 'unit', 'code': 'MISSING_FIELD'}]}
 
@@ -521,6 +596,7 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         mails[note['mail_id']]['item_notes'].append(note)
     shipping = next((cost['amount'] for cost in costs if cost['cost_type'] == 'SHIPPING'
                      and cost['amount'] is not None and cost['included_in_price'] is False), None)
+    foreign = value('currency') not in (None, 'KRW')
     record = QuoteVersionRecord(
         work_case_id=case_id, supplier_id=supplier_id, source_mail_id=source_mail_id,
         version_no=previous[1].version_no + 1 if previous else 1, supersedes_id=previous[0] if previous else None,
@@ -531,16 +607,20 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         pricing_terms_jsonb=grouped('pricing') | ({'price_tiers': tiers} if tiers else {}),
         cost_terms_jsonb=costs, item_notes_jsonb=notes,
         evidence_jsonb={name: entry for name, entry in values.items() if QUOTE_FIELDS[name][1] != 'mail'},
-        extraction_status='NEEDS_REVIEW' if value('currency') not in (None, 'KRW') else 'CONFIRMED',
+        extraction_status='NEEDS_REVIEW' if foreign or review else 'CONFIRMED',
         mail_normalized=mails,
         case_conditions={'item_name': value('item_name'), 'specification': value('specification')}
         if not case_item and 'item_name' in current else None)
-    quote_version_id = store.insert_quote_version(record, context.input_revision)
-    if quote_version_id is None:
+    saved = store.insert_quote_version(record, context.input_revision)
+    if saved is None:
         return {'status': 'REVISION_CHANGED'}
-    return {'status': 'STORED', 'quote_version_id': quote_version_id, 'version_no': record.version_no,
-            'supersedes_id': record.supersedes_id, 'extraction_status': record.extraction_status,
-            'unknown_fields': [name for name in sent_null if name not in values], 'carried_fields': carried}
+    quote_version_id, row = saved            # 같은 내용이 이미 있으면 기존 행이다. 응답은 실제 행 기준
+    unknown = [name for name in sent_null if name not in values]
+    if any(item['code'] == 'PRICE_BASIS_CHANGED' for item in review) and 'unit_price' not in unknown:
+        unknown.append('unit_price')
+    return {'status': 'STORED', 'quote_version_id': quote_version_id, 'version_no': row.version_no,
+            'supersedes_id': row.supersedes_id, 'extraction_status': row.extraction_status,
+            'unknown_fields': unknown, 'carried_fields': carried, 'review': review}
 
 
 @register
@@ -552,17 +632,21 @@ def store_structured_mail(fields: list[QuoteField], runtime: ToolRuntime[RunCont
 
     입력: 모든 값은 원문에 적힌 그대로, 근거 evidence{mail_id, part('body' 또는 attachment_ref), page, cell}와 함께 준다.
     fields: field_name과 raw_value. 원문에서 찾았지만 값이 없으면 raw_value를 null로 둔다.
-      supplier_name(필수), item_name, specification, origin, certifications, tax_terms, lead_time, delivery_date,
-      unit_price, unit(unit_price가 있으면 필수), available_quantity, effective_from, valid_until, currency,
-      order_unit, quantity_per_order_unit, moq, pack_multiple, previous_unit_price(인상 전 단가), increase_reason(인상 사유)
+      supplier_name(메일이 업체에 연결돼 있지 않으면 필수), item_name, specification, origin, certifications, tax_terms,
+      lead_time, delivery_date, unit_price, unit(unit_price가 있으면 필수), available_quantity, effective_from,
+      valid_until, currency, order_unit, quantity_per_order_unit, moq, pack_multiple,
+      previous_unit_price(인상 전 단가), increase_reason(인상 사유)
     price_tiers: 단가 구간 min_quantity·max_quantity·unit_price
     cost_terms: 비용 cost_type(SHIPPING/HANDLING/OTHER)·source_text(그 비용이 적힌 원문 구절)·amount·basis·payer·
       included_in_price(원문에 단가 포함·별도가 적혀 있을 때만 true/false)
     item_notes: 품목 비고 원문
+    한 번의 호출에는 한 업체의 메일 근거만 쓴다. 업체는 메일의 업체 연결로 정해진다.
     같은 업체의 이전 견적에 있던 값은 도구가 이어받으므로 이번 메일에 없는 값을 다시 적지 않는다.
+    단위·통화가 이전 견적과 달라졌으면 이전 단가는 이어받지 않는다.
 
     반환 status:
-    - STORED: quote_version_id·version_no·extraction_status·unknown_fields(null로 보낸 필드 중 여전히 값이 없는 것)
+    - STORED: quote_version_id·version_no·extraction_status·unknown_fields(값이 없는 필드)·
+      review(field·code: 확인이 필요해 NEEDS_REVIEW로 저장한 항목)
     - REJECTED: rejected(field·code). 아무것도 저장하지 않았다.
     - REVISION_CHANGED / CASE_NOT_FOUND: 저장하지 않았다.
     '''

@@ -19,10 +19,11 @@ class MemoryStore:
     def add_supplier(self, supplier_id, name):
         self.suppliers[supplier_id] = {'name': name}
 
-    def add_mail(self, mail_id, case_id, body, supplier_id=None, attachments=(), message_role='INITIAL'):
+    def add_mail(self, mail_id, case_id, body, supplier_id=None, attachments=(), message_role='INITIAL',
+                 received_at='2026-10-29T09:00:00+09:00'):
         self.mail_messages[mail_id] = {
             'work_case_id': case_id, 'supplier_id': supplier_id, 'message_role': message_role, 'direction': 'IN',
-            'subject': f'{mail_id} 제목', 'received_at': '2026-10-29T09:00:00+09:00', 'body_text': body,
+            'subject': f'{mail_id} 제목', 'received_at': received_at, 'body_text': body,
             'normalized_jsonb': {}, 'attachments': [dict(a) for a in attachments]}
 
     # CaseStore
@@ -71,10 +72,7 @@ class MemoryStore:
         return True
 
     # QuoteStore
-    def resolve_supplier(self, case_id, mail_id, supplier_name):
-        mail = self.mail_messages.get(mail_id)
-        if mail and mail['work_case_id'] == case_id and mail['supplier_id']:
-            return mail['supplier_id']
+    def resolve_supplier(self, case_id, supplier_name):
         matches = [sid for sid, row in self.suppliers.items() if row['name'] == supplier_name]
         return matches[0] if len(matches) == 1 else None
 
@@ -91,7 +89,7 @@ class MemoryStore:
         content = record.model_dump(exclude=same)
         for qid, row in self.quote_versions.items():
             if row.model_dump(exclude=same) == content:
-                return qid
+                return qid, row
         if any(row.work_case_id == record.work_case_id and row.supplier_id == record.supplier_id
                and row.version_no == record.version_no for row in self.quote_versions.values()):
             raise ValueError('UNIQUE(work_case_id, supplier_id, version_no)')
@@ -101,13 +99,17 @@ class MemoryStore:
             self.price_history.append({'quote_version_id': quote_id, 'unit_price': record.unit_price,
                                        'unit': record.unit, 'effective_from': record.effective_from})
         for mail_id, normalized in record.mail_normalized.items():
-            self.mail_messages[mail_id]['normalized_jsonb'] = normalized
+            stored = self.mail_messages[mail_id]['normalized_jsonb']
+            notes = stored.get('item_notes', [])
+            stored |= {'schema_version': normalized['schema_version'],
+                       'fields': stored.get('fields', {}) | normalized['fields'],
+                       'item_notes': notes + [n for n in normalized['item_notes'] if n not in notes]}
         if record.case_conditions:
             for key, value in record.case_conditions.items():
                 if case.get(key) is None:
                     case[key] = value
         self.workflow_logs.append({'event_type': 'TOOL_RESULT', 'quote_version_id': quote_id})
-        return quote_id
+        return quote_id, record
 
     # AgentRunStore
     def start_agent_run(self, case_id, role, input_revision, input_snapshot, model_id, prompt_version):
