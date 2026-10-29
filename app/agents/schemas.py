@@ -209,6 +209,8 @@ class RunContext:
     """도구에 넘기는 실행 정보. LLM 인자가 아니라 AgentRunner가 넣고, 도구는 runtime.context로 읽는다."""
     case_id: str
     input_revision: int
+    agent_run_id: str | None = None      # 06 agent_runs.id. 실행 기록 저장소가 없으면 None
+    review_batch_id: str | None = None   # 06 agent_runs.review_batch_id
 
 
 class ExtractionIn(AgentInput):
