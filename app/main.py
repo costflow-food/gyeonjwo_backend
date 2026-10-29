@@ -26,6 +26,7 @@ from app.features.mailboxes.application.worker import ConnectedMailboxWorker
 from app.features.system.application.diagnostics import require_startup_configuration
 
 logger = logging.getLogger('gyeonjwo')
+mail_logger = logging.getLogger('uvicorn.error.gmail_receive')
 RATE_WINDOW_SECONDS = 60
 RATE_LIMIT_PER_WINDOW = 120
 RATE_LIMIT_EXEMPT_PATHS = frozenset({'/api/v1/webhooks/gmail'})
@@ -38,6 +39,10 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     async def lifespan(app):
         worker = None
         connected_worker = None
+        mail_logger.info('gmail diagnostics_ready version=1 connected_receiver=%s legacy_receiver=%s push_configured=%s',
+                         settings.google_mailbox_worker_enabled, settings.worker_enabled, settings.gmail_push_configured)
+        if not settings.worker_enabled and not settings.google_mailbox_worker_enabled:
+            mail_logger.warning('gmail receiver_disabled reason=WORKER_FLAGS_FALSE incoming_mail_will_not_be_polled=true')
         if settings.worker_enabled and settings.google_mailbox_worker_enabled:
             raise RuntimeError('Legacy and connected-mailbox workers cannot run together')
         if settings.worker_enabled:

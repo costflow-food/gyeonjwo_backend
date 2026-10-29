@@ -10,7 +10,8 @@ router = APIRouter(tags=['system'])
 @router.get('/health')
 def health(request: Request):
     return {'status': 'ok', 'schema_contract': 'notion-06-v2.2',
-            'api_contract':'google-mailbox-v1', 'build_revision':request.app.state.settings.app_build_revision}
+            'api_contract':'google-mailbox-v1', 'build_revision':request.app.state.settings.app_build_revision,
+            'mail_logging_contract': 'gmail-stages-v1'}
 
 
 @router.get('/ready')
