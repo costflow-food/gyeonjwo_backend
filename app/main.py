@@ -23,6 +23,7 @@ from app.features.mail.api.router import router as mail_router
 from app.features.review.api.router import router as review_router
 from app.features.mailboxes.api.router import router as mailbox_router, make_mailbox_service
 from app.features.mailboxes.application.worker import ConnectedMailboxWorker
+from app.features.system.application.diagnostics import require_startup_configuration
 
 logger = logging.getLogger('gyeonjwo')
 RATE_WINDOW_SECONDS = 60
@@ -31,6 +32,7 @@ RATE_LIMIT_EXEMPT_PATHS = frozenset({'/api/v1/webhooks/gmail'})
 
 def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_service=None):
     settings = settings or get_settings()
+    require_startup_configuration(settings)
 
     @asynccontextmanager
     async def lifespan(app):

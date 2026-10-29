@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, HttpUrl, SecretStr, field_validator
+from pydantic import Field, HttpUrl, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -77,4 +77,11 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    try:
+        return Settings()
+    except ValidationError as error:
+        fields = sorted({str(item['loc'][0]).upper() for item in error.errors(include_input=False) if item['loc']})
+        raise SystemExit(', '.join(fields) or 'ENV_CONFIGURATION') from None
+    except Exception:
+        # Invalid dotenv/JSON settings may include raw input in their exception text.
+        raise SystemExit('ENV_CONFIGURATION') from None
