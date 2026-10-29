@@ -12,6 +12,7 @@
 업무 상태(Waiting/Running/Complete)·revision 검사는 app.features.work_cases.domain.contracts를 따른다.
 API 오류 응답의 next_action(app.core.errors)과는 다른 값이다.
 """
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import UUID
@@ -203,6 +204,15 @@ class AgentRole(StrEnum):
 class AgentInput(StrictModel):
     case_id: UUID
     input_revision: int = Field(strict=True, ge=0)
+
+
+@dataclass(frozen=True)
+class RunContext:
+    """도구에 넘기는 실행 정보. LLM 인자가 아니라 AgentRunner가 넣고, 도구는 runtime.context로 읽는다."""
+    case_id: str
+    input_revision: int
+    agent_run_id: str | None = None      # 06 agent_runs.id. 실행 기록 저장소가 없으면 None
+    review_batch_id: str | None = None   # 06 agent_runs.review_batch_id
 
 
 class ExtractionIn(AgentInput):
