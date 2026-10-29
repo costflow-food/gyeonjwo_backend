@@ -84,6 +84,7 @@ class RunCaseOutput(StrictModel):
     draft_ids: list[str] = []                       # RFQ·보완 질문·역제안 초안 → 백엔드 발송
     card_id: str | None = None                      # COMPLETE일 때만
     unresolved: list[str] = []                      # 미확인 항목, 보류·실패 사유
+    steps: list['AgentStep'] = []                   # 역할 호출 기록 → 백엔드가 실행 기록으로 저장 (07 9절)
 
 
 # ─────────────────────────────────────────────
@@ -98,6 +99,7 @@ class PlanCheck(StrEnum):
 
 class PriceCheck(StrEnum):
     PASS = 'PASS'            # → 검토 카드
+    FIX = 'FIX'              # 정책 범위 밖 목표 조건·허용되지 않는 생략 → ⑤
     NEED_INFO = 'NEED_INFO'  # → ③
 
 
@@ -226,6 +228,7 @@ class PlanIn(AgentInput):
 class CounterOfferIn(AgentInput):
     quote_version_ids: list[str]         # 기존 업체 포함 최신 견적
     validated_plans: list[Plan] = []     # 구매안 검증을 통과한 ④의 대안
+    price_check_reason: str | None = None  # 가격 검증 FIX로 재진입 시 사유
 
 
 # ─────────────────────────────────────────────
@@ -239,6 +242,7 @@ class AgentNextAction(StrEnum):
     BUILD_PLANS = 'BUILD_PLANS'                        # ③ 검토 가능 → ④
     PLANS_PROPOSED = 'PLANS_PROPOSED'                  # ④ 구매안 구성 → 구매안 검증 노드
     COUNTER_OFFER_PROPOSED = 'COUNTER_OFFER_PROPOSED'  # ⑤ 역제안 → 가격 검증 노드
+    COUNTER_OFFER_SKIPPED = 'COUNTER_OFFER_SKIPPED'    # ⑤ 정책상 역제안 불필요 → 가격 검증 노드가 생략 허용 확인
     NEEDS_EVIDENCE = 'NEEDS_EVIDENCE'                  # ④⑤ 추가 근거 필요 → ③
     RECHECK_SOURCE = 'RECHECK_SOURCE'                  # ③④⑤ 문서 재확인 필요 → ①
     HOLD = 'HOLD'                                      # 후보·정책·근거 부족으로 보류
@@ -275,9 +279,24 @@ class PlanOut(AgentOutput):
 
 
 class CounterOfferOut(AgentOutput):
-    next_action: Literal[N.COUNTER_OFFER_PROPOSED, N.NEEDS_EVIDENCE, N.RECHECK_SOURCE, N.HOLD]
-    target: CounterOfferTarget | None = None  # HOLD·NEEDS_EVIDENCE면 None
+    next_action: Literal[N.COUNTER_OFFER_PROPOSED, N.COUNTER_OFFER_SKIPPED, N.NEEDS_EVIDENCE, N.RECHECK_SOURCE,
+                         N.HOLD]
+    target: CounterOfferTarget | None = None  # PROPOSED가 아니면 None
     draft_ids: list[str] = []
+
+    @model_validator(mode='after')
+    def skipped_has_no_offer(self):
+        if self.next_action == N.COUNTER_OFFER_SKIPPED and (self.target or self.draft_ids):
+            raise ValueError('COUNTER_OFFER_SKIPPED must not include target or draft_ids')
+        return self
+
+
+class AgentStep(StrictModel):
+    """역할 호출 한 번의 기록. 그래프가 만들어 RunCaseOutput.steps에 쌓는다."""
+    role: AgentRole
+    next_action: AgentNextAction
+    reason: str
+    unknown_fields: list[str] = []
 
 
 AGENT_IO = {
@@ -287,3 +306,5 @@ AGENT_IO = {
     AgentRole.RESPONSE_PLAN: (PlanIn, PlanOut),
     AgentRole.COUNTER_OFFER: (CounterOfferIn, CounterOfferOut),
 }
+
+RunCaseOutput.model_rebuild()

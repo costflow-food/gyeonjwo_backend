@@ -1,3 +1,4 @@
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
@@ -22,7 +23,8 @@ class ScriptedAgents:
         self.inputs.append(data)
         action = self.scripts[role].pop(0)
         output = AGENT_IO[role][1]
-        extra = {'draft_ids': [f'{role}-draft']} if 'draft_ids' in output.model_fields else {}
+        drafting = action in ('SEND_RFQ', 'REQUEST_CLARIFICATION', 'COUNTER_OFFER_PROPOSED')
+        extra = {'draft_ids': [f'{role}-draft']} if drafting else {}
         return output(next_action=action, reason='근거', unknown_fields=[f'{role}-unknown'], **extra)
 
 
@@ -77,6 +79,57 @@ def test_price_validation_need_info_returns_to_priority():
     out = run(agents, 'PLAN', node_set=nodes(price=[PriceCheck.NEED_INFO]))
     assert agents.calls == [R.RESPONSE_PLAN, R.COUNTER_OFFER, R.INFO_PRIORITY]
     assert out.status == RunStatus.WAITING_REPLY
+
+
+@pytest.mark.parametrize('check,status', [(PriceCheck.PASS, RunStatus.COMPLETE),
+                                          (PriceCheck.NEED_INFO, RunStatus.WAITING_REPLY)])
+def test_skipped_counter_offer_is_checked_by_price_validation(check, status):
+    seen = []
+
+    def price_validation(state):
+        seen.append(state)
+        return {'price_check': check}
+
+    agents = ScriptedAgents(INFO_PRIORITY=['REQUEST_CLARIFICATION'], RESPONSE_PLAN=['PLANS_PROPOSED'],
+                            COUNTER_OFFER=['COUNTER_OFFER_SKIPPED'])
+    out = run(agents, 'PLAN', node_set=replace(nodes(), price_validation=price_validation))
+    assert seen[0]['counter_offer'] is None and seen[0]['counter_offer_skip_reason'] == '근거'
+    assert out.status == status
+    if check == PriceCheck.PASS:
+        assert out.processing_step == ProcessingStep.REVIEW_READY and out.draft_ids == []
+
+
+def test_price_fix_returns_to_counter_offer_with_reason():
+    agents = ScriptedAgents(RESPONSE_PLAN=['PLANS_PROPOSED'],
+                            COUNTER_OFFER=['COUNTER_OFFER_PROPOSED', 'COUNTER_OFFER_PROPOSED'])
+    checks = [{'price_check': PriceCheck.FIX, 'price_check_reason': 'TARGET_ABOVE_POLICY'},
+              {'price_check': PriceCheck.PASS}]
+    out = run(agents, 'PLAN', node_set=replace(nodes(), price_validation=lambda s: checks.pop(0)))
+    assert agents.calls == [R.RESPONSE_PLAN, R.COUNTER_OFFER, R.COUNTER_OFFER]
+    assert agents.inputs[1].price_check_reason is None
+    assert agents.inputs[2].price_check_reason == 'TARGET_ABOVE_POLICY'
+    assert out.status == RunStatus.COMPLETE
+
+
+def test_steps_record_each_role_call_and_hold_reason():
+    out = run(ScriptedAgents(INFO_EXTRACTOR=['STORED'], INFO_PRIORITY=['HOLD']))
+    assert [(step.role, step.next_action, step.reason) for step in out.steps] == [
+        (R.INFO_EXTRACTOR, 'STORED', '근거'), (R.INFO_PRIORITY, 'HOLD', '근거')]
+    assert out.status == RunStatus.ON_HOLD and 'INFO_PRIORITY HOLD: 근거' in out.unresolved
+
+
+def test_revision_change_before_review_card_marks_run_stale():
+    calls = []
+
+    def revision(case_id):
+        calls.append(case_id)
+        return 3 if len(calls) <= 2 else 4   # ④⑤ 뒤에는 같고, 카드 직전에 바뀜
+
+    cards = []
+    agents = ScriptedAgents(RESPONSE_PLAN=['PLANS_PROPOSED'], COUNTER_OFFER=['COUNTER_OFFER_PROPOSED'])
+    out = run(agents, 'PLAN', node_set=replace(nodes(), review_card=lambda s: cards.append(s) or {'card_id': 'c'}),
+              revision=revision)
+    assert out.status == RunStatus.STALE and out.card_id is None and cards == []
 
 
 def test_counter_offer_needs_evidence_returns_to_priority():

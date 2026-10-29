@@ -5,13 +5,15 @@
                                      └─ (REPLY) ③ ─ REQUEST_CLARIFICATION ─ wait_reply
     PLAN ──────────────────────────────────────┐   └ BUILD_PLANS ─ ④ ─ PLANS_PROPOSED ─ plan_validation
                                                └─────────────────┘          FIX → ④ · NEED_INFO → ③ · PASS ↓
-                         ⑤ ─ COUNTER_OFFER_PROPOSED ─ price_validation ─ PASS ─ review_card (COMPLETE)
-                                                                      └ NEED_INFO → ③
+                         ⑤ ─ COUNTER_OFFER_PROPOSED ─┬ price_validation ─ PASS ─ review_card (COMPLETE)
+                           └ COUNTER_OFFER_SKIPPED ──┘                 FIX → ⑤ · NEED_INFO → ③
+    COUNTER_OFFER_SKIPPED: 정책상 역제안 불필요. 가격 검증이 생략 허용을 확인하고, 카드에 생략 사유를 남긴다.
     ③④⑤ RECHECK_SOURCE → ① · ④⑤ NEEDS_EVIDENCE → ③ · 모든 역할 HOLD → hold (ON_HOLD)
 
 회신·승인 대기에서는 그래프를 끝낸다(WAITING_REPLY). 백엔드가 발송하고, 회신이 오면 start_from=REPLY로 다시 실행한다.
 역할 호출이 MAX_ROLE_CALLS_PER_RUN을 넘거나, 에이전트·노드 오류·형식 위반이면 FAILED,
-실행 중 input_revision이 바뀌면 STALE로 끝낸다.
+실행 중 input_revision이 바뀌면 STALE로 끝낸다. revision은 에이전트 호출마다, 그리고 검토 카드 저장 직전에 확인한다.
+역할 호출마다 next_action·reason을 steps에 쌓아 백엔드가 실행 기록으로 남긴다. HOLD 사유는 unresolved에도 넣는다.
 """
 import logging
 import operator
@@ -21,9 +23,9 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.nodes import Nodes
 from app.agents.schemas import (AGENT_IO, MAX_ROLE_CALLS_PER_RUN, AgentInput, AgentNextAction as N, AgentOutput,
-                                AgentRole, Candidate, CandidateIn, CounterOfferIn, CounterOfferTarget, ExtractionIn,
-                                Plan, PlanCheck, PlanIn, PriceCheck, PriorityIn, ProcessingStep, Question,
-                                RunCaseInput, RunCaseOutput, RunStatus, StartFrom)
+                                AgentRole, AgentStep, Candidate, CandidateIn, CounterOfferIn, CounterOfferTarget,
+                                ExtractionIn, Plan, PlanCheck, PlanIn, PriceCheck, PriorityIn, ProcessingStep,
+                                Question, RunCaseInput, RunCaseOutput, RunStatus, StartFrom)
 
 logger = logging.getLogger('gyeonjwo')
 
@@ -47,17 +49,20 @@ class CaseState(TypedDict, total=False):
     recheck_fields: list[str]                         # ③④⑤가 ①에 넘긴 재확인 항목
     plans: list[Plan]                                 # ④
     counter_offer: CounterOfferTarget | None          # ⑤
+    counter_offer_skip_reason: str | None             # ⑤ COUNTER_OFFER_SKIPPED 사유
     # 분기 기준
     last_action: N
     plan_check: PlanCheck
     plan_check_reason: str | None
     price_check: PriceCheck
+    price_check_reason: str | None
     # 실행 관리
     role_calls: int
     processing_step: ProcessingStep
     status: RunStatus
     card_id: str | None
     unresolved: Annotated[list[str], operator.add]    # 미확인·보류·실패 사유 누적
+    steps: Annotated[list[AgentStep], operator.add]   # 역할 호출 기록 누적
 
 
 ROLE_STEPS = {
@@ -83,7 +88,8 @@ INPUTS = {
                                               questions=s.get('questions', []),
                                               plan_check_reason=s.get('plan_check_reason')),
     AgentRole.COUNTER_OFFER: lambda s: CounterOfferIn(**_ids(s), quote_version_ids=s.get('quote_version_ids', []),
-                                                      validated_plans=s.get('plans', [])),
+                                                      validated_plans=s.get('plans', []),
+                                                      price_check_reason=s.get('price_check_reason')),
 }
 
 OUTPUTS = {
@@ -91,7 +97,9 @@ OUTPUTS = {
     AgentRole.CANDIDATE: lambda o: {'candidates': o.candidates, 'draft_ids': o.draft_ids},
     AgentRole.INFO_PRIORITY: lambda o: {'questions': o.questions, 'draft_ids': o.draft_ids, 'pending_questions': []},
     AgentRole.RESPONSE_PLAN: lambda o: {'plans': o.plans},
-    AgentRole.COUNTER_OFFER: lambda o: {'counter_offer': o.target, 'draft_ids': o.draft_ids},
+    AgentRole.COUNTER_OFFER: lambda o: {
+        'counter_offer': o.target, 'draft_ids': o.draft_ids,
+        'counter_offer_skip_reason': o.reason if o.next_action == N.COUNTER_OFFER_SKIPPED else None},
 }
 
 
@@ -99,8 +107,14 @@ def _failed(reason, step=ProcessingStep.FAILED):
     return {'status': RunStatus.FAILED, 'processing_step': step, 'unresolved': [reason]}
 
 
+STALE = {'status': RunStatus.STALE, 'unresolved': ['INPUT_REVISION_CHANGED']}
+
+
 def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: Nodes = Nodes()):
     """run_agent: agents.AgentRunner 또는 테스트용 가짜. current_revision: 업무의 현재 input_revision 조회(백엔드)."""
+
+    def changed(state):
+        return current_revision(state['case_id']) != state['input_revision']
 
     def agent_node(role):
         def node(state):
@@ -114,10 +128,15 @@ def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: N
             update = {'role_calls': state.get('role_calls', 0) + 1, 'processing_step': ROLE_STEPS[role]}
             if not isinstance(output, AGENT_IO[role][1]):
                 return update | _failed(f'{role}: INVALID_OUTPUT')
-            if current_revision(state['case_id']) != state['input_revision']:
-                return update | {'status': RunStatus.STALE, 'unresolved': ['INPUT_REVISION_CHANGED']}
-            update |= OUTPUTS[role](output) | {'last_action': output.next_action, 'unresolved': output.unknown_fields}
-            if output.next_action == N.NEEDS_EVIDENCE:
+            if changed(state):
+                return update | STALE
+            step = AgentStep(role=role, next_action=output.next_action, reason=output.reason,
+                             unknown_fields=output.unknown_fields)
+            update |= OUTPUTS[role](output) | {'last_action': output.next_action, 'steps': [step],
+                                               'unresolved': output.unknown_fields}
+            if output.next_action == N.HOLD:
+                update['unresolved'] = output.unknown_fields + [f'{role} HOLD: {output.reason}']
+            elif output.next_action == N.NEEDS_EVIDENCE:
                 update['pending_questions'] = output.unknown_fields
             elif output.next_action == N.RECHECK_SOURCE:
                 update['recheck_fields'] = output.unknown_fields
@@ -141,8 +160,12 @@ def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: N
         graph.add_node(name, agent_node(role))
     for name in ('preprocess', 'plan_validation', 'price_validation'):
         graph.add_node(name, code_node(name, getattr(nodes, name)))
-    graph.add_node('review_card', code_node('review_card', lambda s: nodes.review_card(s) | {
-        'status': RunStatus.COMPLETE, 'processing_step': ProcessingStep.REVIEW_READY}))
+    def review_card(state):
+        if changed(state):
+            return STALE
+        return nodes.review_card(state) | {'status': RunStatus.COMPLETE, 'processing_step': ProcessingStep.REVIEW_READY}
+
+    graph.add_node('review_card', code_node('review_card', review_card))
     graph.add_node('wait_reply', lambda s: {'status': RunStatus.WAITING_REPLY})
     graph.add_node('hold', lambda s: {'status': RunStatus.ON_HOLD, 'processing_step': ProcessingStep.ON_HOLD})
 
@@ -158,8 +181,8 @@ def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: N
         'candidate': {N.SEND_RFQ: 'wait_reply'},
         'priority': {N.REQUEST_CLARIFICATION: 'wait_reply', N.BUILD_PLANS: 'plan', N.RECHECK_SOURCE: 'extraction'},
         'plan': {N.PLANS_PROPOSED: 'plan_validation', N.NEEDS_EVIDENCE: 'priority', N.RECHECK_SOURCE: 'extraction'},
-        'counter_offer': {N.COUNTER_OFFER_PROPOSED: 'price_validation', N.NEEDS_EVIDENCE: 'priority',
-                          N.RECHECK_SOURCE: 'extraction'},
+        'counter_offer': {N.COUNTER_OFFER_PROPOSED: 'price_validation', N.COUNTER_OFFER_SKIPPED: 'price_validation',
+                          N.NEEDS_EVIDENCE: 'priority', N.RECHECK_SOURCE: 'extraction'},
     }
     for name, table in routes.items():
         def route(state, table=table):
@@ -169,7 +192,8 @@ def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: N
     graph.add_conditional_edges('plan_validation', stopped(lambda s: {
         PlanCheck.PASS: 'counter_offer', PlanCheck.FIX: 'plan', PlanCheck.NEED_INFO: 'priority'}[s['plan_check']]))
     graph.add_conditional_edges('price_validation', stopped(lambda s: {
-        PriceCheck.PASS: 'review_card', PriceCheck.NEED_INFO: 'priority'}[s['price_check']]))
+        PriceCheck.PASS: 'review_card', PriceCheck.FIX: 'counter_offer',
+        PriceCheck.NEED_INFO: 'priority'}[s['price_check']]))
     for name in ('review_card', 'wait_reply', 'hold'):
         graph.add_edge(name, END)
     return graph.compile()
@@ -178,9 +202,10 @@ def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: N
 def run_case(graph, data: RunCaseInput) -> RunCaseOutput:
     state = graph.invoke({'case_id': str(data.case_id), 'start_from': data.start_from,
                           'input_revision': data.input_revision, 'mail_ids': data.mail_ids,
-                          'role_calls': 0, 'draft_ids': [], 'unresolved': []},
+                          'role_calls': 0, 'draft_ids': [], 'unresolved': [], 'steps': []},
                          {'recursion_limit': 4 * MAX_ROLE_CALLS_PER_RUN + 4})
     return RunCaseOutput(case_id=data.case_id, status=state['status'],
                          processing_step=state.get('processing_step', ProcessingStep.PENDING_START),
                          input_revision=data.input_revision, draft_ids=state.get('draft_ids', []),
-                         card_id=state.get('card_id'), unresolved=state.get('unresolved', []))
+                         card_id=state.get('card_id'), unresolved=state.get('unresolved', []),
+                         steps=state.get('steps', []))
