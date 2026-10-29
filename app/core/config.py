@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, HttpUrl, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -16,6 +17,8 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr | None = None
     llm_model: str = ''
     llm_classification_model: str = ''
+    # Empty sends nothing. Supported values depend on the classification model.
+    llm_classification_reasoning_effort: Literal['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] = ''
     llm_timeout_seconds: int = Field(default=60, ge=5, le=180)
     analysis_timeout_seconds: int = Field(default=600, ge=30, le=1800)
     calculation_rounds: int = Field(default=3, ge=2, le=5)
