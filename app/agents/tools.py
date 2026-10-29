@@ -6,7 +6,8 @@
 도구 작성 규칙
 - 이름은 ROLE_TOOLS에 있는 이름 그대로 쓴다. 목록에 없는 이름은 register가 거부한다 (추가는 오케스트레이션 담당과 협의).
 - docstring이 LLM에게 보이는 도구 설명이다. 언제 쓰는지·입력·출력을 짧게 적는다.
-- 인자는 LLM이 채운다. case_id 등 범위 값을 믿지 말고 소유·업무 범위·revision을 도구 안에서 검사한다.
+- 인자는 LLM이 채운다. case_id·input_revision은 인자로 받지 않고 runtime.context(RunContext)에서 읽는다.
+  그 밖의 인자(근거 ID 등)도 믿지 말고 소유·업무 범위·revision을 도구 안에서 검사한다.
 - 결과는 근거 ID·값·미확인 목록처럼 작게 돌려준다. 원문 전체를 돌려주지 않는다.
 - 금액·수량 계산은 LLM에게 맡기지 않고 도구가 Decimal로 계산한다.
   계산은 app.features.review.domain.calculations, 숫자·단위 검증은 app.features.review.domain.validation을 재사용한다.
@@ -14,12 +15,11 @@
 
 예시 — 이 파일 맨 아래 역할별 구역에 추가한다.
 
-    from langchain_core.tools import tool
-
     @register
     @tool
-    def read_mail_evidence(case_id: str, evidence_id: str) -> dict:
+    def read_mail_evidence(evidence_id: str, runtime: ToolRuntime[RunContext]) -> dict:
         '''업무 범위 안의 메일·첨부 원문 구간을 읽는다. 반환: {evidence_id, text, location}'''
+        case_id = runtime.context.case_id   # runtime 인자는 LLM에게 보이지 않는다
         ...
 
 도구별 입력 → 출력 (07 4절)
@@ -27,7 +27,7 @@
 | get_case_context          | 공통  | case_id → 요청 조건·회사 정책·revision                          | 소유·업무 범위 제한               |
 | read_mail_evidence        | 공통  | 근거 ID → 원문 구간·위치(페이지/셀)                             | 소유·업무 범위 제한               |
 | save_agent_result         | 공통  | 역할 결과·근거·revision → 결과 ID·최신 여부                     | 입력 revision 확인                |
-| store_structured_mail     | ①     | 필드·품목 비고·근거·expected_revision → 견적 버전 ID            | 서버 검증 후 저장, 임의 SQL 불가  |
+| store_structured_mail     | ①     | 필드·품목 비고·근거 → 견적 버전 ID                              | 서버 검증 후 저장, 임의 SQL 불가  |
 | search_supplier_evidence  | ②     | 품목·규격·필수 조건 → 취급 근거·후보                            | 과거 단가를 현재 가격으로 안 줌   |
 | crawl_supplier_candidates | ②     | 허용 출처·조건 → 잠정 후보·연락처·출처 시점 (Should)            | 잠정 후보, 회신으로 확인          |
 | check_comparability       | ③④⑤   | 견적 버전·정책 → 누락·불일치·비교 범위                          | 필수·가중 조건 구분               |
@@ -41,10 +41,11 @@
 import re
 from typing import Protocol
 
+from langchain.tools import ToolRuntime
 from langchain_core.tools import BaseTool, tool
 from pydantic import Field
 
-from app.agents.schemas import AgentRole
+from app.agents.schemas import AgentRole, RunContext
 from app.core.errors import ReviewRequired
 from app.features.review.domain.schemas import FIELD_NAMES
 from app.features.review.domain.validation import decimal_value, explicit_date, unit_name
@@ -157,31 +158,14 @@ def _source_issue(store: QuoteStore, case_id: str, evidence_id: str | None, raw:
     return None
 
 
-@register
-@tool
-def store_structured_mail(case_id: str, expected_revision: int, fields: list[QuoteField],
-                          item_notes: list[ItemNote] | None = None) -> dict:
-    '''메일에서 읽은 견적 필드를 원문과 대조·검증한 뒤 견적 버전으로 저장한다.
-
-    입력: expected_revision에는 입력으로 받은 input_revision을 넣는다.
-    fields는 필드마다 원문 그대로의 raw_value와 근거 evidence_id·location이다. 원문에 없는 값은 raw_value를 null로 둔다.
-    field_name: supplier_name, item_name, order_unit, net_kg_per_order_unit, origin, grade, processing,
-    old_unit_price, new_unit_price, unit, currency, effective_date, reason, requested_quantity,
-    requested_delivery_date, transport_amount, other_logistics_amount, cost_basis, cost_payer, cost_included_in_price.
-    supplier_name은 필수다. item_notes는 품목 비고 원문과 근거다.
-
-    반환 status:
-    - STORED: quote_version_id와 unknown_fields(값이 없는 필드)
-    - REJECTED: rejected(field·code). 아무것도 저장하지 않았다. 원문을 다시 확인해 고친 뒤 다시 호출한다.
-    - REVISION_CHANGED / CASE_NOT_FOUND: 저장하지 않았다.
-    '''
-    store = _quote_store
-    if store is None:
-        raise RuntimeError('quote store is not configured')
+def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[QuoteField],
+                          item_notes: list[ItemNote]) -> dict:
+    """store_structured_mail의 본체. 업무·revision은 실행 정보(context)에서만 받는다."""
+    case_id = context.case_id
     current = store.current_revision(case_id)
     if current is None:
         return {'status': 'CASE_NOT_FOUND'}
-    if current != expected_revision:
+    if current != context.input_revision:
         return {'status': 'REVISION_CHANGED'}
 
     texts, seen, stored, rejected, unknown = {}, set(), [], [], []
@@ -212,7 +196,7 @@ def store_structured_mail(case_id: str, expected_revision: int, fields: list[Quo
         rejected.append({'field': 'supplier_name', 'code': 'MISSING_FIELD'})
 
     notes = []
-    for index, note in enumerate(item_notes or []):
+    for index, note in enumerate(item_notes):
         issue = _source_issue(store, case_id, note.evidence_id, note.text, texts)
         if issue:
             rejected.append({'field': f'item_notes[{index}]', 'code': issue})
@@ -221,8 +205,30 @@ def store_structured_mail(case_id: str, expected_revision: int, fields: list[Quo
 
     if rejected:
         return {'status': 'REJECTED', 'rejected': rejected}
-    quote_version_id = store.save_quote_version(case_id, expected_revision, stored, notes, unknown)
+    quote_version_id = store.save_quote_version(case_id, current, stored, notes, unknown)
     return {'status': 'STORED', 'quote_version_id': quote_version_id, 'unknown_fields': unknown}
+
+
+@register
+@tool
+def store_structured_mail(fields: list[QuoteField], runtime: ToolRuntime[RunContext],
+                          item_notes: list[ItemNote] | None = None) -> dict:
+    '''메일에서 읽은 견적 필드를 원문과 대조·검증한 뒤 이 업무의 견적 버전으로 저장한다.
+
+    입력: fields는 필드마다 원문 그대로의 raw_value와 근거 evidence_id·location이다. 원문에 없는 값은 raw_value를 null로 둔다.
+    field_name: supplier_name, item_name, order_unit, net_kg_per_order_unit, origin, grade, processing,
+    old_unit_price, new_unit_price, unit, currency, effective_date, reason, requested_quantity,
+    requested_delivery_date, transport_amount, other_logistics_amount, cost_basis, cost_payer, cost_included_in_price.
+    supplier_name은 필수다. item_notes는 품목 비고 원문과 근거다.
+
+    반환 status:
+    - STORED: quote_version_id와 unknown_fields(값이 없는 필드)
+    - REJECTED: rejected(field·code). 아무것도 저장하지 않았다. 원문을 다시 확인해 고친 뒤 다시 호출한다.
+    - REVISION_CHANGED / CASE_NOT_FOUND: 저장하지 않았다.
+    '''
+    if _quote_store is None or runtime.context is None:
+        raise RuntimeError('quote store or run context is not configured')
+    return save_structured_quote(_quote_store, runtime.context, fields, item_notes or [])
 
 
 # ② CANDIDATE: search_supplier_evidence, crawl_supplier_candidates, create_mail_draft

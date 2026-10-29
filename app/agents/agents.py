@@ -24,7 +24,8 @@ from langchain.agents.structured_output import ToolStrategy
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 
-from app.agents.schemas import AGENT_IO, MAX_TOOL_CALLS_PER_AGENT_CALL, AgentInput, AgentOutput, AgentRole
+from app.agents.schemas import (AGENT_IO, MAX_TOOL_CALLS_PER_AGENT_CALL, AgentInput, AgentOutput, AgentRole,
+                                RunContext)
 from app.agents.tools import tools_for
 from app.shared.infrastructure.llm import POLICY
 
@@ -38,7 +39,7 @@ PROMPTS = {
 1. 먼저 get_case_context로 요청 조건(품목·규격·물량·필수 인증), 현재 input_revision, 이미 저장된 견적을 확인한다.
 2. read_mail_evidence로 필요한 본문·첨부 구간만 골라 읽는다. 도구 호출 수에 한도가 있으니 모든 구간을 읽지 않는다.
 3. recheck_fields가 비어 있지 않으면 그 항목에 해당하는 구간만 다시 읽는다.
-4. store_structured_mail을 호출한다. expected_revision에는 입력으로 받은 input_revision을 넣는다.
+4. store_structured_mail을 호출한다.
 5. store_structured_mail이 필드를 거부하면 원문을 한 번만 다시 확인한다. 그래도 근거가 없으면 null로 보낸다.
    input_revision이 바뀌었다고 하면 멈추고 그 사유로 HOLD를 반환한다.
 
@@ -79,6 +80,7 @@ def build_agent(role: AgentRole, model: BaseChatModel):
     return create_agent(
         model, tools_for(role), system_prompt=POLICY + '\nRole: ' + role + '\n' + PROMPTS[role],
         response_format=ToolStrategy(output),
+        context_schema=RunContext,
         middleware=[ToolCallLimitMiddleware(run_limit=MAX_TOOL_CALLS_PER_AGENT_CALL, exit_behavior='error')],
         name=role.lower(),
     )
@@ -96,5 +98,6 @@ class AgentRunner:
             raise TypeError(f'{role} expects {expected_in.__name__}')
         if role not in self.agents:
             self.agents[role] = build_agent(role, self.model)
-        result = self.agents[role].invoke({'messages': [('user', data.model_dump_json())]})
+        result = self.agents[role].invoke({'messages': [('user', data.model_dump_json())]},
+                                          context=RunContext(str(data.case_id), data.input_revision))
         return result['structured_response']
