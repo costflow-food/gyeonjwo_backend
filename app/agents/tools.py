@@ -38,9 +38,17 @@
 | validate_counter_offer    | ⑤     | 목표 조건 → 가격 범위·정책 검증 결과                            | 위와 같음                         |
 | create_mail_draft         | ②③⑤   | 목적(RFQ/CLARIFICATION/COUNTER_OFFER)·대상·근거·스타일 → 초안 ID | 내부 저장만, 발송은 백엔드        |
 """
-from langchain_core.tools import BaseTool
+import re
+from typing import Protocol
+
+from langchain_core.tools import BaseTool, tool
+from pydantic import Field
 
 from app.agents.schemas import AgentRole
+from app.core.errors import ReviewRequired
+from app.features.review.domain.schemas import FIELD_NAMES
+from app.features.review.domain.validation import decimal_value, explicit_date, unit_name
+from app.shared.domain.schemas import StrictModel
 
 _COMMON = ('get_case_context', 'read_mail_evidence', 'save_agent_result')
 
@@ -78,6 +86,144 @@ def tools_for(role: AgentRole) -> list[BaseTool]:
 # 공통: get_case_context, read_mail_evidence, save_agent_result
 
 # ① INFO_EXTRACTOR: store_structured_mail
+#   필드 이름은 06 quote_versions 필드가 확정될 때까지 구 추출 20필드(review.domain.schemas.FIELD_NAMES)를 쓴다.
+
+class QuoteField(StrictModel):
+    field_name: str
+    raw_value: str | None              # 원문에 적힌 그대로. 원문에 없으면 null
+    evidence_id: str | None = None     # raw_value가 있으면 필수
+    location: str | None = None        # 페이지·셀 등 원문 위치
+
+
+class ItemNote(StrictModel):
+    text: str = Field(min_length=1)    # 품목 비고 원문 그대로
+    evidence_id: str
+    location: str | None = None
+
+
+class QuoteStore(Protocol):
+    """store_structured_mail의 저장소. quote_versions 테이블·RPC가 정해지면 DB 구현을 붙인다."""
+
+    def current_revision(self, case_id: str) -> int | None:
+        """업무의 현재 input_revision. 업무가 없거나 범위 밖이면 None."""
+
+    def evidence_text(self, case_id: str, evidence_id: str) -> str | None:
+        """이 업무에 속한 근거의 원문. 업무 밖 근거면 None."""
+
+    def save_quote_version(self, case_id: str, input_revision: int, fields: list[dict], item_notes: list[dict],
+                           unknown_fields: list[str]) -> str:
+        """불변 견적 버전을 저장하고 견적 버전 ID를 돌려준다."""
+
+
+_quote_store: QuoteStore | None = None
+
+
+def use_quote_store(store: QuoteStore | None) -> None:
+    global _quote_store
+    _quote_store = store
+
+
+_NUMBER_FIELDS = frozenset({'net_kg_per_order_unit', 'old_unit_price', 'new_unit_price', 'requested_quantity',
+                            'transport_amount', 'other_logistics_amount'})
+_DATE_FIELDS = frozenset({'effective_date', 'requested_delivery_date'})
+_UNIT_FIELDS = frozenset({'order_unit', 'unit'})
+
+
+def _compact(text: str) -> str:
+    return re.sub(r'\s+', '', text)
+
+
+def _parse(field_name: str, raw: str) -> str:
+    """원문 값을 저장 값으로 바꾼다. 숫자는 소수 문자열, 날짜는 ISO, 단위는 표준 이름."""
+    if field_name in _NUMBER_FIELDS:
+        return str(decimal_value(raw, field_name))
+    if field_name in _DATE_FIELDS:
+        return explicit_date(raw, field_name).isoformat()
+    if field_name in _UNIT_FIELDS:
+        return unit_name(raw.strip())
+    return raw.strip()
+
+
+def _source_issue(store: QuoteStore, case_id: str, evidence_id: str | None, raw: str, texts: dict) -> str | None:
+    """원문 대조. 근거가 이 업무 것이고 값이 원문에 그대로 있으면 None, 아니면 사유 코드."""
+    if not evidence_id:
+        return 'MISSING_EVIDENCE'
+    if evidence_id not in texts:
+        texts[evidence_id] = store.evidence_text(case_id, evidence_id)
+    if texts[evidence_id] is None:
+        return 'EVIDENCE_NOT_IN_CASE'
+    if _compact(raw) not in _compact(texts[evidence_id]):
+        return 'SOURCE_MISMATCH'
+    return None
+
+
+@register
+@tool
+def store_structured_mail(case_id: str, expected_revision: int, fields: list[QuoteField],
+                          item_notes: list[ItemNote] | None = None) -> dict:
+    '''메일에서 읽은 견적 필드를 원문과 대조·검증한 뒤 견적 버전으로 저장한다.
+
+    입력: expected_revision에는 입력으로 받은 input_revision을 넣는다.
+    fields는 필드마다 원문 그대로의 raw_value와 근거 evidence_id·location이다. 원문에 없는 값은 raw_value를 null로 둔다.
+    field_name: supplier_name, item_name, order_unit, net_kg_per_order_unit, origin, grade, processing,
+    old_unit_price, new_unit_price, unit, currency, effective_date, reason, requested_quantity,
+    requested_delivery_date, transport_amount, other_logistics_amount, cost_basis, cost_payer, cost_included_in_price.
+    supplier_name은 필수다. item_notes는 품목 비고 원문과 근거다.
+
+    반환 status:
+    - STORED: quote_version_id와 unknown_fields(값이 없는 필드)
+    - REJECTED: rejected(field·code). 아무것도 저장하지 않았다. 원문을 다시 확인해 고친 뒤 다시 호출한다.
+    - REVISION_CHANGED / CASE_NOT_FOUND: 저장하지 않았다.
+    '''
+    store = _quote_store
+    if store is None:
+        raise RuntimeError('quote store is not configured')
+    current = store.current_revision(case_id)
+    if current is None:
+        return {'status': 'CASE_NOT_FOUND'}
+    if current != expected_revision:
+        return {'status': 'REVISION_CHANGED'}
+
+    texts, seen, stored, rejected, unknown = {}, set(), [], [], []
+    for field in fields:
+        if field.field_name not in FIELD_NAMES:
+            rejected.append({'field': field.field_name, 'code': 'UNKNOWN_FIELD'})
+            continue
+        if field.field_name in seen:
+            rejected.append({'field': field.field_name, 'code': 'DUPLICATE_FIELD'})
+            continue
+        seen.add(field.field_name)
+        if field.raw_value is None or not field.raw_value.strip():
+            unknown.append(field.field_name)
+            continue
+        issue = _source_issue(store, case_id, field.evidence_id, field.raw_value, texts)
+        if issue is None:
+            try:
+                value = _parse(field.field_name, field.raw_value)
+            except ReviewRequired as error:
+                issue = error.issue['code']
+        if issue:
+            rejected.append({'field': field.field_name, 'code': issue})
+            continue
+        stored.append({'field_name': field.field_name, 'raw_value': field.raw_value, 'value': value,
+                       'evidence_id': field.evidence_id, 'location': field.location})
+    unknown += [name for name in FIELD_NAMES if name not in seen]
+    if 'supplier_name' in unknown:
+        rejected.append({'field': 'supplier_name', 'code': 'MISSING_FIELD'})
+
+    notes = []
+    for index, note in enumerate(item_notes or []):
+        issue = _source_issue(store, case_id, note.evidence_id, note.text, texts)
+        if issue:
+            rejected.append({'field': f'item_notes[{index}]', 'code': issue})
+        else:
+            notes.append(note.model_dump())
+
+    if rejected:
+        return {'status': 'REJECTED', 'rejected': rejected}
+    quote_version_id = store.save_quote_version(case_id, expected_revision, stored, notes, unknown)
+    return {'status': 'STORED', 'quote_version_id': quote_version_id, 'unknown_fields': unknown}
+
 
 # ② CANDIDATE: search_supplier_evidence, crawl_supplier_candidates, create_mail_draft
 
