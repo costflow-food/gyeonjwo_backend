@@ -1,0 +1,16 @@
+"""Canonical work_cases.processing_step values; graph imports this contract."""
+from enum import StrEnum
+
+
+class ProcessingStep(StrEnum):
+    PENDING_START = 'PENDING_START'
+    EXTRACTING = 'EXTRACTING'
+    SELECTING_CANDIDATES = 'SELECTING_CANDIDATES'
+    AWAITING_APPROVAL = 'AWAITING_APPROVAL'
+    WAITING_REPLY = 'WAITING_REPLY'
+    NEEDS_INFO = 'NEEDS_INFO'
+    BUILDING_PLANS = 'BUILDING_PLANS'
+    BUILDING_COUNTER_OFFER = 'BUILDING_COUNTER_OFFER'
+    ON_HOLD = 'ON_HOLD'
+    FAILED = 'FAILED'
+    REVIEW_READY = 'REVIEW_READY'

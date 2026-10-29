@@ -1,0 +1,79 @@
+{
+  "contract_version": 1,
+  "status": "PROPOSED_NOT_DEPLOYED",
+  "source": "Latest integrated cards 4 and 5 supplied by the requester on 2026-10-29",
+  "remote_changes_performed": false,
+  "enable_only_after_db_owner_review": true,
+  "known_gaps_observed": [
+    "Remote public.work_cases has no requester_name column.",
+    "accept_and_delete_work_case and extraction transaction/job RPCs below are not deployed.",
+    "Unregistered sender: quote_versions requires supplier_id. DB owner must support unlinked request evidence without inserting a synthetic supplier. No backend workaround or supplier insert is permitted."
+  ],
+  "all_mutations": {
+    "authorization": "service_role only, user ID from server-verified JWT; every case/mail/supplier reference must match the owner",
+    "atomicity": "Each mutation RPC runs on one database connection and one transaction. Never implement by sequencing independent REST mutations.",
+    "errors": {"kind": "ERROR", "code": "RESOURCE_NOT_FOUND | WORK_ALREADY_STARTED | REVISION_CONFLICT | ACTION_NOT_ALLOWED | REQUEST_IN_PROGRESS | IDEMPOTENCY_KEY_REUSED", "current_revision": "integer or null"}
+  },
+  "rpc": {
+    "case_extraction_health": {
+      "args": {},
+      "returns": {"contract_version": 1, "ready": true},
+      "requires": "Only ready after the columns, all RPCs, durable jobs, atomic deletion/receipt semantics and unregistered-sender storage are deployed and verified."
+    },
+    "accept_and_delete_work_case": {
+      "args": {"p_owner": "uuid", "p_case": "uuid", "p_revision": "integer", "p_key": "text", "p_hash": "sha256 text", "p_request_id": "text"},
+      "transaction": [
+        "begin_api_request for POST /api/v1/work-cases/{canonical UUID}/accept-increase; replay is checked BEFORE case lookup",
+        "lock owner case, require Waiting/PENDING_START with no decision and matching input_revision; reject Running before any deletion",
+        "Keep provider-key receipts for ALL removed mail messages, outcome ACCEPTED and mail_id NULL, with no subject/body/attachment metadata; foreign-owner rows must never be touched",
+        "Delete the owned case, associated mail_messages and case-specific logs/runs/drafts/jobs after checking all FK constraints; do not delete suppliers or shared histories",
+        "complete_api_request with the entire immutable 200 response in the SAME transaction; keep api_requests even though the case is gone"
+      ],
+      "returns": {"kind": "ACCEPTED or REPLAY", "http_status": 200, "response": {"data": {"case_id": "uuid", "deleted": true}, "meta": {"request_id": "first request ID"}}},
+      "receipt_requirement": "Initial sync, history reset and repeated push must all honor ACCEPTED provider-key receipts and never recreate a deleted request. No Gmail delete call."
+    },
+    "submit_work_case_start": {
+      "args": {"p_owner": "uuid", "p_case": "uuid", "p_revision": "integer", "p_key": "text", "p_hash": "sha256 text", "p_request_id": "text"},
+      "transaction": [
+        "begin_api_request for POST /api/v1/work-cases/{canonical UUID}/start; replay before state guards",
+        "lock owned case and verify Waiting/PENDING_START, not archived/accepted, revision; otherwise appropriate ERROR",
+        "start_review, status Running, processing_step EXTRACTING, current_batch_id, INFO_EXTRACTOR run and short workflow log",
+        "Create ONE durable extraction job keyed by owner/case/batch, containing owner, revision, first mail and run IDs; no mail body/token in job",
+        "complete_api_request stores the entire 202 response atomically; 202 only after durable job commit"
+      ],
+      "returns": {"kind": "ACCEPTED or REPLAY", "http_status": 202, "response": {"data": {"case_id": "uuid", "input_revision": "integer", "batch_id": "uuid", "progress_url": "/api/v1/work-cases/{case_id}/progress"}, "meta": {"request_id": "first request ID"}}}
+    },
+    "claim_case_extraction": {
+      "args": {},
+      "returns": "null or {job_id, claim_token, owner_user_id, case_id, input_revision, batch_id, mail_ids}",
+      "requires": "Atomic durable claim (SKIP LOCKED or equivalent); only one unexpired owner per job; lease >= 60 seconds, heartbeat renews it. Claims do not reexecute expired jobs."
+    },
+    "heartbeat_case_extraction": {
+      "args": {"p_job": "uuid", "p_token": "uuid"},
+      "returns": "boolean",
+      "requires": "Renew only a live owned lease whose case/batch/revision remains valid."
+    },
+    "complete_case_extraction": {
+      "args": {"p_job": "uuid", "p_token": "uuid", "p_revision": "integer", "p_batch": "uuid", "p_output": "RunCaseOutput JSON", "p_result": "ExtractionResult JSON or null for HOLD", "p_model": "text", "p_prompt_version": "text"},
+      "transaction": [
+        "Lock job and case; verify live lease, owner, Running/EXTRACTING, no archive, batch and current input_revision. If obsolete, mark only the old run/job STALE and return STALE without writing case/quotes.",
+        "Revalidate source-mail ownership, evidence IDs, decimal/date values and allowed fields. No client/LLM-supplied owner, run IDs or supplier IDs.",
+        "Match sender email to same-owner REGISTERED/VERIFIED_WEB supplier; on exactly one match link mail_messages.supplier_id. Ambiguous matches must not be chosen arbitrarily. Do not INSERT suppliers.",
+        "Persist immutable quote_versions with source_mail_id/evidence and old/new price references, or the DB-reviewed unlinked-request representation for unknown suppliers. Do not fabricate a supplier FK or return synthetic quote IDs.",
+        "Save work_cases.requester_name/item_name/standardized_item_key/specification/unit/quantity; keep status Running. STORED+item null => NEEDS_INFO, STORED+item present => SELECTING_CANDIDATES, HOLD => ON_HOLD.",
+        "Save agent_runs structured output, current revisions, source refs and short workflow_logs; finish the durable job atomically. Never store private model reasoning or raw provider credentials."
+      ],
+      "returns": {"kind": "STORED or STALE", "quote_version_ids": ["actual stored UUIDs"]}
+    },
+    "fail_case_extraction": {
+      "args": {"p_job": "uuid", "p_token": "uuid", "p_code": "EXTRACTION_FAILED | INPUT_REVISION_CHANGED | WORKER_INTERRUPTED"},
+      "requires": "Owned matching job only. On matching case/batch/revision retain Running and set FAILED + short error_jsonb, failed agent run/log. On changed revision/batch mark old run STALE, never overwrite newer case state. Duplicate finalization is harmless. Never Complete.",
+      "returns": "boolean"
+    },
+    "recover_case_extractions": {
+      "args": {},
+      "requires": "Fail only expired PROCESSING leases as WORKER_INTERRUPTED; preserve pending durable jobs, other live workers and newer case batches. Never reset/reexecute an expired job automatically.",
+      "returns": "nonnegative integer"
+    }
+  }
+}

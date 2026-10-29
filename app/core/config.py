@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     google_mailbox_worker_enabled: bool = False
     google_mailbox_poll_seconds: int = Field(default=90, ge=60, le=120)
     app_build_revision: str = 'development'
+    agent_stop_after_extraction: bool = True
+    agent_extraction_enabled: bool = False
+    agent_extraction_worker_enabled: bool = False
 
     @field_validator('supabase_url', 'llm_base_url', 'supabase_secret_key', 'supabase_publishable_key',
                      'llm_api_key', 'gmail_client_secret', 'gmail_refresh_token', 'google_token_encryption_key', mode='before')
