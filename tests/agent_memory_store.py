@@ -65,11 +65,12 @@ class MemoryStore:
 
     def save_agent_output(self, case_id, agent_run_id, role, expected_input_revision, output):
         run = self.agent_runs.get(agent_run_id)
-        if run is None or run['work_case_id'] != case_id or run['agent_role'] != role \
-                or self.current_input_revision(case_id) != expected_input_revision:
-            return False
+        if run is None or run['work_case_id'] != case_id or run['agent_role'] != role:
+            return 'RUN_MISMATCH'
+        if self.current_input_revision(case_id) != expected_input_revision:
+            return 'REVISION_CHANGED'
         run['output_jsonb'] |= output
-        return True
+        return 'SAVED'
 
     # QuoteStore
     def resolve_supplier(self, case_id, supplier_name):

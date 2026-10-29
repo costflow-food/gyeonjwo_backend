@@ -88,6 +88,17 @@ PLAN ─────────────────────────
 - 공통 도구 3개(`get_case_context`, `read_mail_evidence`, `save_agent_result`)는 한 사람이 먼저 만든다. 누가 만들지 정하고 시작한다.
 - `create_mail_draft`는 ②③⑤가 같이 쓰므로 한 사람이 만든다.
 
+#### 공통 도구 계약 (구현됨, `feature/agents-1-2`)
+
+| 항목 | 계약 |
+|---|---|
+| 업무·revision·실행 ID | LLM 인자가 아니라 `RunContext`(`AgentRunner`가 주입)에서 읽는다. 역할은 에이전트 이름에서 읽는다. |
+| `agent_runs.output_jsonb` 최상위 | 최종 결과(`…Out` 전체)는 `AgentRunner`만 쓴다(`finish_agent_run`). |
+| `save_agent_result` | 중간 결과를 `output_jsonb.interim`(`next_action`·`reason`·`unknown_fields`)에, 참조 ID를 `source_quote_ids`·`source_run_ids`에 쓴다. 최종 결과를 대신하지 않는다. |
+| `CaseStore.save_agent_output` 반환 | `SAVED` / `REVISION_CHANGED` / `RUN_MISMATCH`(실행 기록이 없거나 업무·역할이 다름). 도구는 각각 `SAVED` / `REVISION_CHANGED` / `REJECTED(RUN_MISMATCH)`로 돌려준다. |
+| ①의 `unknown_fields` | `tools.EXTRACTION_FIELD_NAMES`의 필드 이름만 남는다(Runner가 걸러 냄). ③④⑤가 `RECHECK_SOURCE`로 넘기는 `unknown_fields`도 이 이름을 쓴다. |
+| ①의 최종 응답 검증 | `STORED`의 `quote_version_ids`는 이번 실행에서 실제 저장된 ID여야 하고 `HOLD`는 ID가 없어야 한다. 아니면 `FAILED`. |
+
 ### 4. 테스트
 
 ```bash

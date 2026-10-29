@@ -99,6 +99,22 @@ def test_save_result_writes_agent_run_output(store):
     assert (output['next_action'], output['interim']['next_action']) == ('HOLD', 'STORED')
 
 
+def test_save_result_for_another_role_is_rejected_as_run_mismatch(store):
+    started = store.start_agent_run(CASE, AgentRole.CANDIDATE, 3, {}, 'fake', 'p1')
+    context = RunContext(CASE, 3, started['agent_run_id'], started['review_batch_id'])
+    result = save_result(store, context, AgentRole.INFO_EXTRACTOR, 'STORED', '저장', [], [], [])
+    assert result == {'status': 'REJECTED', 'code': 'RUN_MISMATCH'}         # revision 문제가 아니다
+    assert store.agent_runs['run-1']['output_jsonb'] == {}
+    missing = RunContext(CASE, 3, 'run-9', started['review_batch_id'])
+    assert save_result(store, missing, AgentRole.INFO_EXTRACTOR, 'STORED', '저장', [], [], [])['code'] == 'RUN_MISMATCH'
+
+
+def test_page_without_text_is_marked_empty(store):
+    store.mail_messages['mail-1']['attachments'][0]['pages'][0] = '  '
+    assert load_evidence(store, CONTEXT, 'mail-1', 'att-1', 1)['empty'] is True
+    assert load_evidence(store, CONTEXT, 'mail-1', 'body', None)['empty'] is False
+
+
 def test_save_result_needs_a_recorded_run(store):
     with pytest.raises(RuntimeError, match='not recorded'):
         save_result(store, CONTEXT, AgentRole.INFO_EXTRACTOR, 'STORED', '저장', [], [], [])
