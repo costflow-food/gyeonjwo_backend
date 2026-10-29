@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     google_token_encryption_key: SecretStr | None = None
     google_mailbox_worker_enabled: bool = False
     google_mailbox_poll_seconds: int = Field(default=90, ge=60, le=120)
+    app_build_revision: str = 'development'
 
     @field_validator('supabase_url', 'llm_base_url', 'supabase_secret_key', 'supabase_publishable_key',
                      'llm_api_key', 'gmail_client_secret', 'gmail_refresh_token', 'google_token_encryption_key', mode='before')
@@ -46,6 +47,10 @@ class Settings(BaseSettings):
         if not self.llm_base_url or not self.llm_api_key or not self.llm_api_key.get_secret_value() or not self.llm_model:
             raise RuntimeError('LLM endpoint, key and model must be configured')
 
+    def require_classification(self):
+        if not self.llm_base_url or not self.llm_api_key or not (self.llm_classification_model or self.llm_model):
+            raise RuntimeError('Classification endpoint, key and model must be configured')
+
     def require_gmail(self):
         names = ('gmail_email', 'gmail_client_id', 'gmail_client_secret', 'gmail_refresh_token',
                  'gmail_topic', 'gmail_subscription', 'pubsub_audience', 'pubsub_service_account')
@@ -55,13 +60,19 @@ class Settings(BaseSettings):
     def require_server(self) -> None:
         if not self.supabase_url or not self.supabase_secret_key or not self.supabase_secret_key.get_secret_value():
             raise RuntimeError('SUPABASE_URL and SUPABASE_SECRET_KEY must be configured locally.')
+        if self.supabase_url.host.casefold() == 'your_project.supabase.co':
+            raise RuntimeError('Supabase project URL is still a template')
 
     def require_google_connect(self):
         self.require_server()
         if not self.gmail_client_id or not self.gmail_client_secret or not self.google_token_encryption_key:
             raise RuntimeError('Google OAuth client and token encryption key must be configured')
-        if self.worker_enabled and self.google_mailbox_worker_enabled:
-            raise RuntimeError('Legacy and connected-mailbox workers cannot run together')
+        if self.worker_enabled:
+            raise RuntimeError('Disable the legacy receiver before using connected Google mailboxes')
+
+    @property
+    def gmail_push_configured(self):
+        return all((self.gmail_topic,self.gmail_subscription,self.pubsub_audience,self.pubsub_service_account))
 
 
 @lru_cache
