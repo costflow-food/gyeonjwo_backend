@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Annotated
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
@@ -15,9 +16,11 @@ from app.features.mailboxes.api.router import get_mailbox_service
 
 router = APIRouter(tags=['mail'])
 protected = [Depends(require_member)]
+receive_logger = logging.getLogger('uvicorn.error.gmail_receive')
 
 @router.post('/api/v1/webhooks/gmail', status_code=204)
 async def gmail_webhook(request: Request, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]):
+    receive_logger.info('gmail push_received')
     settings = request.app.state.settings
     # Pausing the worker must not send connected-mailbox pushes into the legacy DB path.
     # A verified notification can still be durably queued while processing is paused.
@@ -25,23 +28,41 @@ async def gmail_webhook(request: Request, credentials: Annotated[HTTPAuthorizati
         not settings.worker_enabled and bool(settings.google_token_encryption_key))
     if (not settings.pubsub_audience or not settings.pubsub_service_account or not settings.gmail_subscription
             or (not connected and not settings.gmail_email)):
+        receive_logger.warning('gmail push_rejected code=CONFIGURATION_REQUIRED')
         raise ServiceError('INGEST_UNAVAILABLE', '메일 수신 설정이 필요합니다.', 503)
     if not credentials:
+        receive_logger.warning('gmail push_rejected code=UNAUTHORIZED_PUSH')
         raise ServiceError('UNAUTHORIZED_PUSH', 'Pub/Sub 인증이 필요합니다.', 401)
-    await run_in_threadpool(request.app.state.push_verifier, credentials.credentials, settings)
+    try:
+        await run_in_threadpool(request.app.state.push_verifier, credentials.credentials, settings)
+    except ServiceError:
+        receive_logger.warning('gmail push_rejected code=UNAUTHORIZED_PUSH')
+        raise
+    receive_logger.info('gmail push_authenticated')
     raw = bytearray()
     async for chunk in request.stream():
         raw.extend(chunk)
         if len(raw) > 65536:
+            receive_logger.warning('gmail push_rejected code=PAYLOAD_TOO_LARGE')
             raise ServiceError('INVALID_NOTIFICATION', '알림 본문이 너무 큽니다.', 400)
     try:
         payload = json.loads(raw)
     except (ValueError, TypeError):
+        receive_logger.warning('gmail push_rejected code=INVALID_JSON')
         raise ServiceError('INVALID_NOTIFICATION', '잘못된 알림 JSON입니다.', 400) from None
-    notification_id, email, history_id = parse_notification(payload, settings, connected=connected)
+    try:
+        notification_id, email, history_id = parse_notification(payload, settings, connected=connected)
+    except ServiceError:
+        receive_logger.warning('gmail push_rejected code=INVALID_NOTIFICATION_OR_SUBSCRIPTION')
+        raise
     if connected:
         mailbox = get_mailbox_service(request)
-        await run_in_threadpool(mailbox.repo.enqueue_push, settings.gmail_subscription, notification_id, email, history_id)
+        try:
+            await run_in_threadpool(mailbox.repo.enqueue_push, settings.gmail_subscription, notification_id, email, history_id)
+        except Exception:
+            receive_logger.warning('gmail push_enqueue_failed mode=connected')
+            raise
+        receive_logger.info('gmail push_enqueued mode=connected')
         worker = request.app.state.connected_mailbox_worker
         if worker:
             worker.wake.set()
@@ -51,7 +72,9 @@ async def gmail_webhook(request: Request, credentials: Annotated[HTTPAuthorizati
         await run_in_threadpool(service.rpc.call, 'enqueue_gmail_notification', p_subscription=settings.gmail_subscription,
                                 p_pubsub_message_id=notification_id, p_email=email, p_history_id=history_id)
     except Exception:
+        receive_logger.warning('gmail push_enqueue_failed mode=legacy')
         raise ServiceError('INGEST_UNAVAILABLE', '알림을 영속 접수하지 못했습니다.', 503) from None
+    receive_logger.info('gmail push_enqueued mode=legacy')
     return Response(status_code=204)
 
 

@@ -5,12 +5,33 @@ at INFO. TLS certificate verification remains enabled and redirects are not foll
 """
 import http.client
 import json
+import logging
 import ssl
+import time
+from uuid import uuid4
 from dataclasses import dataclass
 from urllib.parse import quote, urlencode
 
 from app.core.errors import ServiceError
 from app.features.mailboxes.domain.schemas import READ_SCOPE, SEND_SCOPE
+
+logger = logging.getLogger('uvicorn.error.gmail_receive')
+
+
+def operation_name(host, path):
+    """Only fixed labels may be logged: paths/queries can contain credentials."""
+    route = path.split('?', 1)[0]
+    if host == 'oauth2.googleapis.com':
+        return 'token_refresh' if route == '/token' else 'token_inspect'
+    if host == 'openidconnect.googleapis.com':
+        return 'identity_read'
+    if host == 'gmail.googleapis.com':
+        if '/attachments/' in route:
+            return 'attachment_read'
+        return {'watch': 'watch_register', 'history': 'history_read',
+                'messages': 'message_list', 'profile': 'profile_read'}.get(
+                    route.rsplit('/', 1)[-1], 'message_read')
+    return 'google_request'
 
 
 class GoogleRejected(Exception):
@@ -45,6 +66,10 @@ class GoogleAPI:
         self.settings, self.transport = settings, transport
 
     def _call(self, method, host, path, *, token=None, form=None, payload=None, oauth=False):
+        operation = operation_name(host, path)
+        operation_id = uuid4().hex
+        started = time.monotonic()
+        logger.info('gmail provider_started operation=%s operation_id=%s', operation, operation_id)
         headers, body = {'Accept': 'application/json'}, None
         if token:
             headers['Authorization'] = 'Bearer ' + token
@@ -57,7 +82,15 @@ class GoogleAPI:
         try:
             status, data = self.transport(method, host, path, headers, body)
         except Exception:
+            logger.warning('gmail provider_failed operation=%s operation_id=%s code=TRANSPORT_OR_RESPONSE_ERROR',
+                           operation, operation_id)
             raise ServiceError('GOOGLE_UNAVAILABLE', 'Google 서비스에 연결할 수 없습니다.', 503) from None
+        if not isinstance(status, int) or isinstance(status, bool):
+            logger.warning('gmail provider_failed operation=%s operation_id=%s code=INVALID_RESPONSE', operation, operation_id)
+            raise ServiceError('GOOGLE_UNAVAILABLE', 'Google 응답을 확인할 수 없습니다.', 503)
+        if not 200 <= status < 300 or not isinstance(data, dict):
+            logger.warning('gmail provider_failed operation=%s operation_id=%s http_status=%d',
+                           operation, operation_id, status)
         if status == 429 or status >= 500:
             raise ServiceError('GOOGLE_UNAVAILABLE', 'Google 요청을 잠시 후 다시 시도해 주세요.', 503)
         if oauth and status in (400, 401, 403):
@@ -68,6 +101,8 @@ class GoogleAPI:
             raise GoogleRejected() from None
         if not 200 <= status < 300 or not isinstance(data, dict):
             raise ServiceError('GOOGLE_UNAVAILABLE', 'Google 응답을 확인할 수 없습니다.', 503)
+        logger.info('gmail provider_completed operation=%s operation_id=%s http_status=%d elapsed_ms=%d',
+                    operation, operation_id, status, int((time.monotonic() - started) * 1000))
         return data
 
     def inspect(self, access_token, principal):
@@ -111,8 +146,12 @@ class GoogleAPI:
         sending = path.split('?', 1)[0].rstrip('/') == 'messages/send'
         required = SEND_SCOPE if sending else READ_SCOPE
         if required not in grant.scopes:
+            logger.warning('gmail operation_blocked operation=%s code=GMAIL_SCOPE_REQUIRED',
+                           'send' if sending else 'read')
             raise ServiceError('GMAIL_SCOPE_REQUIRED', '허용된 Gmail 권한이 필요합니다.', 403, retryable=False)
         if sending or (method != 'GET' and not (method == 'POST' and path == 'watch')):
+            logger.warning('gmail operation_blocked operation=%s code=APPROVED_SEND_NODE_REQUIRED',
+                           'send' if sending else 'write')
             # An OAuth connection is not approval to send; only the future approved-send node may do that.
             raise ServiceError('ACTION_NOT_ALLOWED', '메일은 승인 설정을 검사하는 발송 노드를 통해 보내야 합니다.', 409)
         return self._call(method, 'gmail.googleapis.com', '/gmail/v1/users/me/' + path,

@@ -1,12 +1,15 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID
+import logging
 
 from app.core.errors import ServiceError, error_payload
 from app.core.idempotency import request_in_progress
 from app.core.request_context import current_request_id
 from app.features.mailboxes.domain.schemas import GoogleConnection, READ_SCOPE, SEND_SCOPE, GooglePrincipal
 from app.features.mailboxes.infrastructure.google import GoogleRejected
+
+logger = logging.getLogger('uvicorn.error.gmail_receive')
 
 
 @dataclass(frozen=True)
@@ -53,11 +56,14 @@ class GoogleConnectionService:
         claim = self.repo.claim(principal.user_id, key, self.cipher.body_hash(access, refresh))
         kind = claim['kind']
         if kind == 'REPLAY':
+            logger.info('gmail connect_replayed')
             response = claim['response']
             return StoredResponse(response['status'], response['body'])
         if kind == 'IN_PROGRESS':
+            logger.info('gmail connect_blocked code=REQUEST_IN_PROGRESS')
             raise request_in_progress()
         if kind == 'CONFLICT':
+            logger.warning('gmail connect_blocked code=IDEMPOTENCY_KEY_REUSED')
             raise ServiceError('IDEMPOTENCY_KEY_REUSED', '같은 키에 다른 요청 본문을 사용할 수 없습니다.', 409, retryable=False)
         request_id = str(UUID(claim['request_id']))
         try:
@@ -87,6 +93,7 @@ class GoogleConnectionService:
                     watch = watch_result(self.google.watch(grant))
                 except (ServiceError, GoogleRejected, ValueError, KeyError, TypeError, OverflowError):
                     # Watch setup failure falls back to the durable periodic sync job.
+                    logger.warning('gmail connect_watch_failed fallback=polling')
                     pass
             # mailbox_ref is allocated by the claim transaction; stable across reconnects.
             mailbox_ref = str(UUID(claim['mailbox_ref']))
@@ -108,6 +115,8 @@ class GoogleConnectionService:
         # Finish atomically persists ciphertext + public state + first response + first-sync job.
         # If acknowledgement is lost, never release the claim or call Google again automatically.
         self.repo.finish(request_id, principal.user_id, {'status': result.status, 'body': result.body}, connection)
+        logger.info('gmail connection_saved read_allowed=%s send_allowed=%s sync_requested=%s watch_started=%s',
+                    read, send, connection['sync_requested'], watch['started'])
         return result
 
     def authorized(self, user_id, capability):
@@ -116,8 +125,10 @@ class GoogleConnectionService:
             raise ValueError('Unknown capability')
         row = self.repo.get(user_id)
         if not row or row['public']['status'] not in {'CONNECTED', 'PARTIAL'}:
+            logger.warning('gmail access_blocked code=GOOGLE_RECONNECT_REQUIRED')
             raise ServiceError('GOOGLE_RECONNECT_REQUIRED', 'Gmail을 다시 연결해 주세요.', 401)
         if row['public']['capabilities'].get(capability) is not True:
+            logger.warning('gmail access_blocked capability=%s code=GMAIL_SCOPE_REQUIRED', capability)
             raise ServiceError('GMAIL_SCOPE_REQUIRED', '허용된 Gmail 권한이 필요합니다.', 403)
         principal = GooglePrincipal(user_id, row['google_sub'], row['email'])
         refresh = self.cipher.decrypt(user_id, principal.google_sub, row['encrypted_refresh_token'])

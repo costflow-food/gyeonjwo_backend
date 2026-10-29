@@ -9,7 +9,7 @@ from app.features.review.infrastructure.documents import parse_mail, safe_attach
 from app.core.errors import ServiceError
 from app.core.leases import LeaseHeartbeat
 
-logger = logging.getLogger('gyeonjwo')
+logger = logging.getLogger('uvicorn.error.gmail_receive')
 
 
 class GmailWorker:
@@ -30,7 +30,7 @@ class GmailWorker:
             mail = parse_mail(raw)
         except ValueError:
             # Explicitly excluded malformed mail; do not fabricate missing title/body.
-            logger.warning('ingest excluded mailbox_id=%s code=INVALID_MAIL', claim['mailbox_id'])
+            logger.warning('gmail message_skipped mode=legacy code=INVALID_MAIL')
             return
         work_id = rpc.call('issue_work_id')
         attachments = []
@@ -60,14 +60,17 @@ class GmailWorker:
                 paths = [work_id + '/mail.eml'] + [row['storage_path'] for row in attachments]
                 self.s.storage.bucket.remove(paths)
             return
+        logger.info('gmail classification_started mode=legacy')
         result = classify(self.s.agent, mail['subject'], mail['body'])
         rpc.call('finish_classification', p_work_id=work_id, p_classification_token=registered['classification_token'],
                  p_status=result.status, p_reason=result.reason)
+        logger.info('gmail message_saved mode=legacy classification_completed=true')
 
     def process_once(self):
         claim = self.s.rpc.call('claim_gmail_notification')
         if not claim:
             return False
+        logger.info('gmail sync_started mode=legacy')
         params = {'p_notification_id': claim['notification_id'], 'p_claim_token': claim['claim_token']}
         try:
             with LeaseHeartbeat(lambda: self.s.rpc.call('heartbeat_gmail_notification', **params)) as lease:
@@ -80,6 +83,7 @@ class GmailWorker:
                     if error.code != 'GMAIL_NOT_FOUND':
                         raise
                     ids, latest = self.s.gmail.full_ids()
+                logger.info('gmail messages_found mode=legacy count=%d', len(ids))
                 for message_id in ids:
                     lease.check()
                     try:
@@ -90,8 +94,10 @@ class GmailWorker:
                         logger.info('ingest excluded code=GMAIL_DELETED')
                 lease.check()
                 self.s.rpc.call('finish_gmail_notification', **params, p_last_history_id=latest)
+            logger.info('gmail sync_completed mode=legacy')
             return True
         except Exception:
+            logger.warning('gmail sync_failed mode=legacy code=GMAIL_SYNC_FAILED')
             # No exception/body text in the diagnostic DB error field.
             self.s.rpc.call('fail_gmail_notification', **params, p_error_code='GMAIL_SYNC_FAILED', p_retry=True)
             # Backoff is bounded, interruptible, and does not acknowledge unpersisted work.
