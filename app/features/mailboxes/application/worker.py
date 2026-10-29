@@ -72,7 +72,7 @@ class ConnectedMailboxWorker:
                     if error.code != 'GMAIL_NOT_FOUND':
                         raise
                     ids, latest = self.s.google.message_ids(grant, None)
-                    logger.info('gmail history_reset sync_id=%s', sync_id)
+                    logger.warning('gmail history_reset sync_id=%s recovery=LIMITED_RECENT_MESSAGES older_history_not_replayed=true', sync_id)
                 logger.info('gmail messages_found sync_id=%s count=%d', sync_id, len(ids))
                 for message_id in ids:
                     phase = 'deduplicate'

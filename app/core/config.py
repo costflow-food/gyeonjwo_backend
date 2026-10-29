@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     google_token_encryption_key: SecretStr | None = None
     google_mailbox_worker_enabled: bool = False
     google_mailbox_poll_seconds: int = Field(default=90, ge=60, le=120)
+    gmail_initial_sync_limit: int = Field(default=10, ge=1, le=500)
     app_build_revision: str = 'development'
 
     @field_validator('supabase_url', 'llm_base_url', 'supabase_secret_key', 'supabase_publishable_key',

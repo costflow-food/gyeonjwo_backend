@@ -173,27 +173,38 @@ class GoogleAPI:
     def attachment(self, grant, message_id, attachment_id):
         return self.gmail(grant, 'messages/' + quote(message_id, safe='') + '/attachments/' + quote(attachment_id, safe=''))
 
-    def message_ids(self, grant, history_id):
+    def message_ids(self, grant, history_id, *, initial_limit=None):
+        """Bound initial inbox import; never truncate incremental history pages.
+
+        Sample the history cursor BEFORE listing so arrivals during import remain
+        eligible for the next incremental pass. Do not follow initial nextPageToken:
+        maxResults alone is only a page size and otherwise imports the whole inbox.
+        The same bound applies when the caller recovers an expired history cursor.
+        """
         ids, token, seen_tokens = set(), None, set()
         if history_id is None:
+            limit = self.settings.gmail_initial_sync_limit if initial_limit is None else initial_limit
+            if type(limit) is not int or not 1 <= limit <= 500:
+                raise ValueError('Initial sync limit must be an integer between 1 and 500')
             latest = str(self.profile(grant)['historyId'])
-        else:
-            latest = str(history_id)
+            logger.info('gmail initial_sync_started limit=%d', limit)
+            page = self.gmail(grant, 'messages?' + urlencode({'labelIds': 'INBOX', 'maxResults': limit}))
+            # Gmail's first list page is its most recent messages; preserve that
+            # order, rather than lexicographically sorting opaque provider IDs.
+            recent = list(dict.fromkeys(row['id'] for row in page.get('messages', [])))[:limit]
+            logger.info('gmail initial_sync_selected count=%d limit=%d older_pages_skipped=%s',
+                        len(recent), limit, bool(page.get('nextPageToken')))
+            return recent, latest
+        latest = str(history_id)
         while True:
-            if history_id is None:
-                path, params = 'messages', {'labelIds': 'INBOX', 'maxResults': 100}
-            else:
-                path, params = 'history', {'startHistoryId': str(history_id), 'historyTypes': 'messageAdded', 'maxResults': 100}
+            path, params = 'history', {'startHistoryId': str(history_id), 'historyTypes': 'messageAdded', 'maxResults': 100}
             if token:
                 params['pageToken'] = token
             page = self.gmail(grant, path + '?' + urlencode(params))
-            if history_id is None:
-                ids.update(row['id'] for row in page.get('messages', []))
-            else:
-                for entry in page.get('history', []):
-                    ids.update(row['message']['id'] for row in entry.get('messagesAdded', [])
-                               if 'INBOX' in row['message'].get('labelIds', []))
-                latest = str(max(int(latest), int(page['historyId'])))
+            for entry in page.get('history', []):
+                ids.update(row['message']['id'] for row in entry.get('messagesAdded', [])
+                           if 'INBOX' in row['message'].get('labelIds', []))
+            latest = str(max(int(latest), int(page['historyId'])))
             token = page.get('nextPageToken')
             if not token:
                 return sorted(ids), latest
