@@ -97,7 +97,9 @@ class ConnectedMailboxWorker:
                 while not self.stop.is_set():
                     try:
                         now = time.monotonic()
-                        if not self.last_poll or now - self.last_poll >= self.s.settings.google_mailbox_poll_seconds:
+                        # DB owns the per-mailbox 90s due time. A second 90s gate here
+                        # could miss a just-not-due job and delay it another full interval.
+                        if not self.last_poll or now - self.last_poll >= 5:
                             self.repo.schedule_poll()
                             self.last_poll = now
                         if self.process_once():
