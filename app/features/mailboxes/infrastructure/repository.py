@@ -13,7 +13,10 @@ class MailboxRepository:
     def call(self, name, **params):
         try:
             return self.client.rpc(name, params).execute().data
-        except Exception:
+        except Exception as error:
+            if getattr(error,'code',None) == 'PGRST202':
+                raise ServiceError('MAILBOX_SCHEMA_REQUIRED','계정 연결용 DB 함수를 적용해야 합니다.',503,
+                                   retryable=False,next_action='CONTACT_SERVER_ADMIN') from None
             raise ServiceError('MAILBOX_STORAGE_UNAVAILABLE', '메일함 저장소를 확인할 수 없습니다.', 503) from None
 
     def claim(self, user_id, key, body_hash):

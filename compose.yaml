@@ -5,12 +5,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        BUILD_REVISION: ${BUILD_REVISION:-unknown}
     image: gyeonjwo-backend:local
     env_file:
       - .env
     environment:
       # One process owns the Gmail receiver. Enable only after credentials/DB are ready.
       WORKER_ENABLED: ${WORKER_ENABLED:-false}
+      GOOGLE_MAILBOX_WORKER_ENABLED: ${GOOGLE_MAILBOX_WORKER_ENABLED:-false}
     ports:
       - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
     init: true

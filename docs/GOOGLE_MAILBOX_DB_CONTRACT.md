@@ -2,6 +2,8 @@
 
 2026-10-28 · 서버 브랜치 `feature/google-mailbox-connection`
 
+후속 로컬 작업은 [연동 마무리 기록](INTEGRATION_COMPLETION_2026-10-28.md)을 따른다. `feature/backend-integration-completion`에서 실제 관측 스키마에 맞춘 `migrations/001_google_mailbox.sql` 초안과 격리 SQL 검증을 추가했다. 사용자 지시로 실제 Supabase에는 적용하지 않았으며, 아래 인터페이스 계약을 유지한다.
+
 이 문서는 Python에서 호출하는 **신규 RPC 제안**이다. 현재 Supabase에 존재하거나 실행을 검증한 함수 목록이 아니다. 배포된 DDL을 조회·변경하지 않았다. DB 담당자는 최신 06의 `mail_sync_states`, `mail_ingestion_events`, `mail_messages`, `work_cases`와 매핑하고 함수명·인자 변경이 필요하면 서버 담당자와 맞춘다. API URL·프론트 필드는 변경하지 않는다.
 
 대상 프로젝트: `gyeonjwo-dev`, ref `qlabhitzpdiawtbdmlgw`. 모든 함수는 public 스키마에서 service_role 서버 전용이어야 한다. anon/authenticated 호출과 토큰 테이블 직접 SELECT/INSERT/UPDATE/DELETE를 금지하고 RLS를 켠다. 함수에 전달되는 user_id는 서버가 Supabase `/auth/v1/user`로 확인한 값이다. 클라이언트 본문의 user_id를 전달하지 않는다.
@@ -117,7 +119,7 @@ outcome 허용값: `NEW_CASE`, `LINKED_REPLY`, `ARCHIVED_REPLY`, `INTAKE`, `NON_
 
 1. 본혁: 이 RPC 계약을 실제 06 스키마에 매핑한 SQL·RLS·테스트 결과를 공유한다. 서버는 임의 새 물리 테이블을 배포하지 않았다.
 2. 정훈: 승인한 null/오류 계약, 같은 OAuth 클라이언트, refresh token 확보와 추가 scope 동의 흐름을 확인한다. Secret은 안전한 서버 설정으로만 전달한다.
-3. 성찬: `ClassificationNode`의 3분기 결과와 실패 예외 인터페이스를 확정/교체한다. 현재 기본 어댑터는 기존 JsonAgent를 호출하며 성찬의 실제 코드를 가져온 상태는 아니다.
+3. 성찬: 후속 브랜치에서 `14d8d8b`의 `classify_or_raise`와 팀 INSTRUCTION을 연결했다. 3분기 결과와 실패 예외를 유지하며 실제 모델 품질·계정 테스트는 별도다.
 4. 서버: RPC 적용 후 `GOOGLE_MAILBOX_WORKER_ENABLED=true`, 기존 `WORKER_ENABLED=false`로 실행한다. 실제 연결·부분 동의·철회·push/폴링·중복·재시작을 함께 인수한다.
 
 API 코드는 DB가 없어도 모의 검증할 수 있다. 실제 계정 수집·DB 저장의 완료 판정에는 위 적용/통합 테스트가 필요하다.

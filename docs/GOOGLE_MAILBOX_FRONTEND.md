@@ -2,6 +2,8 @@
 
 2026-10-28 · 로컬 구현, 아직 공개 HTTPS 서버에 배포하지 않음.
 
+후속 연동 작업·진단·HTTPS 구성과 현재 검증 결과는 [연동 마무리 기록](INTEGRATION_COMPLETION_2026-10-28.md)을 따른다. 팀 분류 함수 연결과 SQL 초안은 추가했지만, 사용자 지시로 실제 Supabase와 외부 공개는 실행하지 않았다.
+
 ## API 계약
 
 - POST `/api/v1/mailboxes/google/connect`
@@ -45,7 +47,7 @@ Supabase `https://qlabhitzpdiawtbdmlgw.supabase.co`의 publishable key와 서버
 
 자동 수집은 [DB 계약](GOOGLE_MAILBOX_DB_CONTRACT.md)의 RPC 적용 후 `GOOGLE_MAILBOX_WORKER_ENABLED=true`로 켠다. 기존 고정 계정 워커와 동시에 켜면 시작을 거절한다. Pub/Sub 미설정/실패 시 기본 90초 폴링으로 수집하므로 시연 지연을 알린다. 기본 false에서는 자동 수집을 실행하지 않는다.
 
-수신·분류·저장·회신 분기는 Python 코드와 RPC 인터페이스를 작성했다. 새 Supabase RPC, 성찬의 실제 분류 모듈, 후속 상세 추출/견적·재검토 큐, 실제 Google 계정은 통합 미검증이다. 실제 메일 발송은 구현/실행하지 않으며 승인 설정 검사 노드가 붙기 전 직접 발송을 차단한다.
+수신·분류·저장·회신 분기는 Python 코드와 RPC 인터페이스를 작성했다. 후속 브랜치에서 팀 분류 모듈을 연결하고 실제 격리 SQL까지 통합 검증했다. 실제 Supabase RPC 적용, 후속 상세 추출/견적 큐 소비자, 실제 Google 계정 인수는 남아 있다. 실제 메일 발송은 구현/실행하지 않으며 승인 설정 검사 노드가 붙기 전 직접 발송을 차단한다.
 
 ## 로컬 검증 기록
 

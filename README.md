@@ -1,5 +1,7 @@
 # 견줘 Python 백엔드
 
+**연동 마무리 브랜치:** [진단·팀 HTTPS 구성·DB 초안·검증 범위](docs/INTEGRATION_COMPLETION_2026-10-28.md). 팀 분류 함수 통합, 격리 PostgreSQL로 검증한 저장 RPC 초안, 설정/오래된 서버/CORS 진단과 개발용 HTTPS 실행 구성을 추가했습니다. 실제 Supabase 변경 및 외부 공개는 실행하지 않았습니다.
+
 **Google 로그인 계정 연결 작업:** [프론트 계약·설정](docs/GOOGLE_MAILBOX_FRONTEND.md), [DB 담당자 RPC 계약](docs/GOOGLE_MAILBOX_DB_CONTRACT.md). `POST /api/v1/mailboxes/google/connect`, `GET /api/v1/mailboxes/google/connection`과 연결 사용자용 수신 워커를 추가했습니다. 새 DB RPC·자격증명·HTTPS 배포 및 실제 계정 통합 인수는 별도입니다.
 
 **2026-10-28 API 공통 계약:** JSON 성공 응답은 `{data, meta}`, 오류는 `{error, meta}`이며 `meta.request_id`와 `X-Request-ID`가 같습니다. 파일 스트림·204 웹훅·운영 `/health`, `/ready`는 각 기존 응답을 유지합니다. 프론트는 기존 JSON 본문 필드를 `data` 안에서 읽어야 합니다. [적용 범위·다음 단계·DB 연동 계약](docs/COMMON_CONTRACT_NEXT_STEPS.md)을 확인하세요. `/work-cases` 전환·비동기 처리·지속 멱등성은 아직 연결되지 않았습니다.
@@ -31,7 +33,7 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 
 ```powershell
 py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 ```powershell
@@ -56,8 +58,10 @@ py -3.12 -m venv .venv
 - `docs/openapi.json`: Flutter 팀에 전달할 현재 HTTP 계약.
 - `docs/AUDIT_RESULTS.md`: 전체 재점검에서 수정한 문제·테스트 142개·남은 실연동 확인 항목.
 
-VS Code에서는 `gyeonjwo-backend.code-workspace`를 열면 됩니다. 테스트: `.\.venv\Scripts\python.exe -m pytest -q`.
+VS Code에서는 `gyeonjwo-backend.code-workspace`를 열면 됩니다.
 
 자동 테스트는 네트워크·실키 없이 실행되며 실제 외부 서비스를 통과했다는 의미가 아닙니다. 텍스트 PDF·텍스트/HTML 메일을 지원합니다. 스캔/OCR·기타 첨부는 검토 필요로 중단합니다. MVP2 크롤링·외부 시세·초안·증빙 반영 및 MVP3 발주는 구현 범위에 포함하지 않습니다.
 
 `docs/FINAL_REVIEW.md`와 `docs/IMPLEMENTATION.md`는 이번 전체 구현 전 점검 기록입니다. 현재 상태는 `docs/CURRENT_IMPLEMENTATION.md`를 확인하세요. 커밋·푸시는 아직 수행하지 않았습니다.
+
+테스트 파일과 테스트 전용 의존성은 사용자 요청으로 제거했습니다. 문서의 테스트 통과 수치는 제거 전 검증 기록입니다. 실행 설정 진단 scripts/check_integration.py는 유지합니다.

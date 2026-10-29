@@ -82,7 +82,7 @@ class GoogleConnectionService:
             # PDF Auth flow (pages 5/11): both granted => CONNECTED; any missing => PARTIAL.
             status = 'NEEDS_RECONNECT' if needs_reconnect else 'CONNECTED' if read and send else 'PARTIAL'
             watch = {'started': False, 'expiration': None}
-            if read and not needs_reconnect and self.settings.gmail_topic:
+            if read and not needs_reconnect and self.settings.gmail_push_configured:
                 try:
                     watch = watch_result(self.google.watch(grant))
                 except (ServiceError, GoogleRejected, ValueError, KeyError, TypeError, OverflowError):

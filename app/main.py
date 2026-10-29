@@ -49,7 +49,7 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
             worker.start()
         if settings.google_mailbox_worker_enabled:
             settings.require_google_connect()
-            settings.require_llm()
+            settings.require_classification()
             if app.state.mailbox_service is None:
                 app.state.mailbox_service = make_mailbox_service(settings)
             connected_worker = ConnectedMailboxWorker(app.state.mailbox_service)
