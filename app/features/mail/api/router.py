@@ -13,10 +13,32 @@ from app.shared.infrastructure.llm import JsonAgent
 from app.features.mail.domain.schemas import Classification, MailClassificationRequest
 from app.features.mail.application.classification import classify_or_raise
 from app.features.mailboxes.api.router import get_mailbox_service
+from app.features.mailboxes.api.router import require_google_user
+from app.features.mail.application.attachments import fetch_gmail_attachment
+from app.features.mail.infrastructure.attachments import AttachmentRepository
+from app.shared.infrastructure.db.client import make_server_client
+from uuid import UUID
+from io import BytesIO
+from fastapi.responses import StreamingResponse
 
 router = APIRouter(tags=['mail'])
 protected = [Depends(require_member)]
 receive_logger = logging.getLogger('uvicorn.error.gmail_receive')
+
+
+@router.get('/api/v1/mail-messages/{mail_id}/attachments/{attachment_id}/content',
+            summary='소유 메일의 Gmail 원본 첨부 조회',
+            responses={200: {'content': {'application/pdf': {}, 'application/octet-stream': {}}},
+                       404: {'description': 'RESOURCE_NOT_FOUND'},
+                       409: {'description': 'MAILBOX_RECONNECT_REQUIRED'},
+                       502: {'description': 'SOURCE_READ_FAILED'}})
+def attachment_content(mail_id: UUID, attachment_id: str, request: Request,
+                       principal=Depends(require_google_user), mailbox=Depends(get_mailbox_service)):
+    repo = AttachmentRepository(make_server_client(request.app.state.settings))
+    result = fetch_gmail_attachment(repo, mailbox, principal.user_id, mail_id, attachment_id)
+    # In-memory chunks only; never spool to a temporary file or persist the body.
+    stream = BytesIO(result.content)
+    return StreamingResponse(iter(lambda: stream.read(65536), b''), headers=result.headers())
 
 @router.post('/api/v1/webhooks/gmail', status_code=204)
 async def gmail_webhook(request: Request, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]):

@@ -23,6 +23,7 @@ from app.features.mail.api.router import router as mail_router
 from app.features.review.api.router import router as review_router
 from app.features.mailboxes.api.router import router as mailbox_router, make_mailbox_service
 from app.features.mailboxes.application.worker import ConnectedMailboxWorker
+from app.features.work_cases.api.router import router as work_cases_router
 from app.features.system.application.diagnostics import require_startup_configuration
 
 logger = logging.getLogger('gyeonjwo')
@@ -38,6 +39,7 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     async def lifespan(app):
         worker = None
         connected_worker = None
+        extraction_worker = None
         if settings.worker_enabled and settings.google_mailbox_worker_enabled:
             raise RuntimeError('Legacy and connected-mailbox workers cannot run together')
         if settings.worker_enabled:
@@ -58,12 +60,25 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
             app.state.connected_mailbox_worker = connected_worker
             connected_worker.start()
         try:
+            if settings.agent_extraction_worker_enabled:
+                if not settings.agent_extraction_enabled or not settings.agent_stop_after_extraction:
+                    raise RuntimeError('Enable extraction-only integration before starting its worker')
+                from app.features.work_cases.application.extraction_worker import ExtractionWorker
+                from app.features.work_cases.infrastructure.runtime_repository import CaseRuntimeRepository
+                if app.state.mailbox_service is None:
+                    app.state.mailbox_service = make_mailbox_service(settings)
+                repo = CaseRuntimeRepository(make_server_client(settings))
+                extraction_worker = ExtractionWorker(settings, repo, app.state.mailbox_service)
+                app.state.extraction_worker = extraction_worker
+                extraction_worker.start()
             yield
         finally:
             if worker:
                 worker.close()
             if connected_worker:
                 connected_worker.close()
+            if extraction_worker:
+                extraction_worker.close()
 
     # Explicitly override FastAPI's default HTTPValidationError schema: runtime uses ErrorEnvelope.
     common_errors = {status: {'model': ErrorEnvelope} for status in
@@ -73,6 +88,7 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     app.state.settings, app.state.services, app.state.worker = settings, services, None
     app.state.mailbox_service = mailbox_service
     app.state.connected_mailbox_worker = None
+    app.state.extraction_worker = None
     app.state.service_lock = threading.Lock()
     app.state.push_verifier = push_verifier
     app.add_middleware(BodyLimitMiddleware)
@@ -115,7 +131,7 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False,
                        allow_methods=['GET', 'POST', 'PATCH', 'PUT'],
                        allow_headers=['Authorization', 'Content-Type', 'Idempotency-Key', 'Cache-Control'],
-                       expose_headers=['X-Request-ID', 'Retry-After'])
+                       expose_headers=['X-Request-ID', 'Retry-After', 'Content-Disposition'])
 
     @app.exception_handler(ServiceError)
     async def service_error(request, error):
@@ -151,6 +167,7 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     app.include_router(mail_router)
     app.include_router(review_router)
     app.include_router(mailbox_router)
+    app.include_router(work_cases_router)
     return app
 
 

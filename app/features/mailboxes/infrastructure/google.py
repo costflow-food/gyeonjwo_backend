@@ -53,8 +53,11 @@ def https_json(method, host, path, headers, body):
     try:
         conn.request(method, path, body=body, headers=headers)
         response = conn.getresponse()
-        raw = response.read(4 * 1024 * 1024 + 1)
-        if len(raw) > 4 * 1024 * 1024:
+        # Full messages can embed attachment data; attachment JSON is base64 encoded.
+        # Do not apply the small control-response cap to either content endpoint.
+        content = host == 'gmail.googleapis.com' and '/messages/' in path
+        raw = response.read() if content else response.read(4 * 1024 * 1024 + 1)
+        if not content and len(raw) > 4 * 1024 * 1024:
             raise ValueError('Response limit exceeded')
         return response.status, json.loads(raw)
     finally:
