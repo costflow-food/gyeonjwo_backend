@@ -9,7 +9,7 @@ from test_agents45_product_registration import ToolDrivenModel
 from app.agents import tools
 from app.agents.agents import AgentRunner
 from app.agents.schemas import AgentRole as R, CounterOfferIn
-from app.agents.kan60.team_bridge.team_data import MissingTeamData
+from app.agents.tools import MissingReviewData as MissingTeamData
 
 ALL_UNITS = '주문 총수량에 해당하는 단가를 전량에 적용합니다.'
 GRADUATED = '각 구간에 속한 물량에 각 구간 단가를 적용합니다.'
@@ -213,13 +213,13 @@ def test_off_grid_boundaries_are_disclosed_not_silently_added_or_claimed_optimal
 
 
 def test_independent_checker_rejects_wrong_operating_selector(team_storage,monkeypatch):
-    from app.agents.kan60.purchase_plans import tools as operating
+    from app.agents import tools as operating
     stored_tiers(team_storage,[(None,'500kg 미만','5600'),('500kg 이상',None,'5300')])
-    original=operating.quoted_price
+    original=operating.quantity_price
     def wrong(q,quantity):
         price,index=original(q,quantity)
         return (price+Fraction(1),index) if q.get('price_tiers') else (price,index)
-    monkeypatch.setattr(operating,'quoted_price',wrong)
+    monkeypatch.setattr(operating,'quantity_price',wrong)
     result=run_plan(team_storage)
     assert result.next_action=='HOLD' and result.unknown_fields==['INDEPENDENT_PLAN_COST_MISMATCH']
     assert not team_storage[3].records

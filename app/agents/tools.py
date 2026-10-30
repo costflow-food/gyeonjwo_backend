@@ -39,19 +39,52 @@
 | validate_counter_offer    | ⑤     | 목표 조건 → 가격 범위·정책 검증 결과                            | 위와 같음                         |
 | create_mail_draft         | ②③⑤   | 목적(RFQ/CLARIFICATION/COUNTER_OFFER)·대상·근거·스타일 → 초안 ID | 내부 저장만, 발송은 백엔드        |
 """
+from __future__ import annotations
+import hashlib
+import json
 import re
-from datetime import date
-from decimal import Decimal
+from copy import deepcopy
+from dataclasses import dataclass, replace
+from datetime import date, datetime
+from decimal import Decimal, localcontext
+from fractions import Fraction
+from itertools import combinations
 from typing import Literal, Protocol, get_args
 
 from langchain.tools import ToolRuntime
 from langchain_core.tools import BaseTool, tool
-from pydantic import Field, StrictBool
+from pydantic import Field, StrictBool, ValidationError
 
-from app.agents.schemas import AGENT_IO, READ_RETRY_LIMIT, AgentRole, DecimalStr, RunContext
+from app.agents import agents as agent_validation
+from app.agents.schemas import (
+    AGENT_IO,
+    AgentRole,
+    BreakEvenRecord,
+    ClarificationDraftBinding,
+    CounterOfferIn,
+    CounterOfferTarget,
+    DecimalStr,
+    DraftBinding,
+    Plan,
+    PlanCalculationRecord,
+    PlanIn,
+    PlanSetRecord,
+    PolicyRecord,
+    PriceCalculationRecord,
+    PriceValidationRecord,
+    PriorityIn,
+    PurchaseReviewInput,
+    Question,
+    READ_RETRY_LIMIT,
+    ReviewFactsRecord,
+    RunContext
+)
 from app.core.errors import ReviewRequired
+from app.features.review.domain.calculations import evaluate, money
+from app.features.review.domain.schemas import CalculationProposal
 from app.features.review.domain.validation import decimal_value, explicit_date, unit_name
 from app.shared.domain.schemas import StrictModel
+
 
 _COMMON = ('get_case_context', 'read_mail_evidence', 'save_agent_result')
 
@@ -953,62 +986,2145 @@ def store_structured_mail(fields: list[QuoteField], runtime: ToolRuntime[RunCont
     return save_structured_quote(_quote_store, context, fields, price_tiers or [], cost_terms or [], item_notes or [])
 
 
-# ④ RESPONSE_PLAN: build_plan_candidates, validate_purchase_plan
-# Only our private repository port is configured here. Shared tools/stores above
-# remain owned by their original implementation; no registry replacement occurs.
-from app.agents.kan60.team_bridge.product import (
-    use_review_repository, dispatch_review, validate_plans as _validate_review_plans,
-    calculate_offer as _calculate_review_offer,
-)
-from app.agents.kan60.team_bridge.team_data import TeamReviewRepository
+# Shared review implementation: counter_offer.contract
+"""Shared exact numeric and evidence validation helpers."""
 
 
-def use_team_review_stores(*, supplements=None, references=None) -> None:
-    """Bind existing CaseStore/QuoteStore after their normal startup configuration.
+class CalculationError(ValueError):
 
-    Missing supplemental facts/reference persistence explicitly HOLD. These private
-    ports do not redefine the shared interfaces or supply an in-memory fallback.
+    def __init__(self, code: str, field: str, message: str, decision: str='REVIEW_REQUIRED'):
+        super().__init__(message)
+        self.issue = {'code': code, 'field_name': field, 'message': message}
+        self.decision = decision
+
+def counter_offer_contract_require(ok: bool, code: str, field: str, message: str, decision: str='REVIEW_REQUIRED') -> None:
+    if not ok:
+        raise CalculationError(code, field, message, decision)
+
+def counter_offer_contract_shape(value, path: str, required: str, optional: str='') -> dict:
+    counter_offer_contract_require(isinstance(value, dict), 'INVALID_FIELD_VALUE', path, 'JSON 객체가 필요합니다.')
+    keys, allowed = (set(required.split()), set((required + ' ' + optional).split()))
+    missing = keys - value.keys()
+    counter_offer_contract_require(not missing, 'MISSING_REQUIRED_FIELD', path, f"필수 항목 누락: {', '.join(sorted(missing))}")
+    counter_offer_contract_require(not value.keys() - allowed, 'UNSUPPORTED_FIELD', path, f"지원하지 않는 항목: {', '.join(sorted(value.keys() - allowed))}. 계약 확장이 필요합니다.")
+    return value
+
+def counter_offer_contract_string(value, path: str) -> str:
+    counter_offer_contract_require(isinstance(value, str) and bool(value.strip()) and (len(value) <= 4000), 'MISSING_REQUIRED_FIELD', path, '비어 있지 않은 문자열이 필요합니다.')
+    return value
+
+def counter_offer_contract_number(value, path: str, *, positive: bool=False) -> Decimal:
+    counter_offer_contract_require(isinstance(value, str) and re.fullmatch('(?:0|[1-9][0-9]{0,14})(?:\\.[0-9]{1,6})?', value) is not None, 'INVALID_FIELD_VALUE', path, '0 이상의 십진수 문자열(정수 15자리·소수 6자리 이내)이 필요합니다.')
+    result = Decimal(value)
+    counter_offer_contract_require(not positive or result > 0, 'INVALID_FIELD_VALUE', path, '0보다 큰 값이 필요합니다.')
+    return result
+
+def counter_offer_contract_day(value, path: str) -> date:
+    counter_offer_contract_require(isinstance(value, str) and re.fullmatch('[0-9]{4}-[0-9]{2}-[0-9]{2}', value) is not None, 'INVALID_FIELD_VALUE', path, 'YYYY-MM-DD 날짜가 필요합니다.')
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise CalculationError('INVALID_FIELD_VALUE', path, '존재하지 않는 날짜입니다.') from exc
+
+def counter_offer_contract_money(value: Decimal) -> str:
+    text = format(value, 'f')
+    return text.rstrip('0').rstrip('.') if '.' in text else text
+
+def calculation_digest(data: dict) -> str:
+    return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode('utf-8')).hexdigest()
+
+def counter_offer_contract_terms(value, path: str) -> dict:
+    result = counter_offer_contract_shape(value, path, 'delivery_location delivery_terms payment_terms tax_basis')
+    for key, val in result.items():
+        counter_offer_contract_string(val, f'{path}.{key}')
+    counter_offer_contract_require(result['tax_basis'] in ('INCLUDED', 'EXCLUDED', 'EXEMPT'), 'INVALID_FIELD_VALUE', path + '.tax_basis', '세금 포함/별도/면세 기준을 명시해야 합니다.')
+    return result
+
+def counter_offer_contract_item(value, path: str) -> dict:
+    result = counter_offer_contract_shape(value, path, 'item_id name origin grade processing specification')
+    for key, val in result.items():
+        counter_offer_contract_string(val, f'{path}.{key}')
+    return result
+
+
+# Shared review implementation: counter_offer.pricing
+"""Shared exact price-grid selection; no plan selection or provider dependency."""
+
+
+def counter_offer_pricing_select_price(ceiling, increment, minimum=Decimal(0), explicit=None):
+    cap, step = (Fraction(ceiling), Fraction(increment))
+    chosen = Fraction(explicit) if explicit is not None else cap // step * step
+    counter_offer_contract_require(chosen > 0, 'NO_FEASIBLE_PRICE', 'policy', '확인된 비용·정책으로 양수 목표 단가를 만들 수 없습니다.', 'HOLD')
+    counter_offer_contract_require(chosen >= Fraction(minimum), 'NO_FEASIBLE_PRICE', 'policy.min_unit_price', '비교/정책 상한을 만족하는 목표가가 정책 하한보다 낮습니다.', 'HOLD')
+    counter_offer_contract_require(chosen <= cap and chosen % step == 0, 'POLICY_VIOLATION', 'policy.explicit_target_price', '명시된 목표가 상한·요청가·가격 증분 조건을 위반합니다. 임의로 고치지 않고 보류합니다.', 'HOLD')
+    with localcontext() as ctx:
+        ctx.prec = 80
+        return Decimal(chosen.numerator) / Decimal(chosen.denominator)
+
+
+# Shared review implementation: purchase_plans.contract
+"""kan.plan.v0 / prototype-1. Explicit fixed contracts and price application scopes."""
+
+
+def purchase_plans_contract_item(value, path):
+    """Team name/specification plus only explicitly supplied matching conditions.
+
+    A calculator's opaque item_id is not a supplier fact. Optional business
+    attributes remain constraints when specified; absence does not assert a value.
     """
-    use_review_repository(TeamReviewRepository(_case_store, _quote_store, supplements, references))
+    result = counter_offer_contract_shape(value, path, 'name specification', 'item_id origin grade processing')
+    for key, val in result.items():
+        counter_offer_contract_string(val, path + '.' + key)
+    return result
+
+def calculation_number(value, path='number', positive=False):
+    """External input: keep the existing 15 integer / 6 fractional digit limit."""
+    return Fraction(counter_offer_contract_number(value, path, positive=positive))
+
+def purchase_plans_contract_calculated_number(value, path='calculated_number'):
+    """Exact finite decimal from checked tool output; never apply input precision caps.
+
+    These values are still compared with recomputed results before being trusted.
+    The size bound is a resource limit, not a rounding/precision operation.
+    """
+    counter_offer_contract_require(type(value) is str and len(value) <= 256 and (re.fullmatch('-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?', value) is not None), 'INVALID_FIELD_VALUE', path, '계산값은 유한 십진수 문자열이어야 합니다.')
+    return Fraction(value)
+
+def calculation_text(value):
+    f = Fraction(value)
+    denominator = f.denominator
+    twos = fives = 0
+    while denominator % 2 == 0:
+        denominator //= 2
+        twos += 1
+    while denominator % 5 == 0:
+        denominator //= 5
+        fives += 1
+    counter_offer_contract_require(denominator == 1, 'NON_TERMINATING_DECIMAL', 'calculation', '순환 소수를 임의 반올림해 기록할 수 없습니다.')
+    scale = max(twos, fives)
+    numerator = abs(f.numerator) * 2 ** (scale - twos) * 5 ** (scale - fives)
+    digits = str(numerator).zfill(scale + 1)
+    result = (digits[:-scale] + '.' + digits[-scale:]).rstrip('0').rstrip('.') if scale else digits
+    return ('-' if f < 0 else '') + result
+
+def purchase_plans_contract_validate_price_tiers(tiers):
+    """Canonical all-units intervals, retaining open/closed endpoints."""
+    counter_offer_contract_require(isinstance(tiers, list) and 1 <= len(tiers) <= 100, 'TIER_TABLE_INVALID', 'price_tiers', '1~100개 구간이 필요합니다.')
+    previous = None
+    for t in tiers:
+        counter_offer_contract_shape(t, 'price_tiers', 'min_quantity max_quantity min_inclusive max_inclusive unit_price source_ref')
+        counter_offer_contract_require(type(t['min_inclusive']) is bool and type(t['max_inclusive']) is bool, 'TIER_BOUNDARY_AMBIGUOUS', 'price_tiers', '경계 포함 여부가 필요합니다.')
+        lo = calculation_number(t['min_quantity']) if t['min_quantity'] is not None else None
+        hi = calculation_number(t['max_quantity']) if t['max_quantity'] is not None else None
+        counter_offer_contract_require(lo is not None or hi is not None, 'TIER_BOUNDARY_AMBIGUOUS', 'price_tiers', '경계 없는 구간은 해석하지 않습니다.')
+        counter_offer_contract_require(lo is None or hi is None or lo < hi or (lo == hi and t['min_inclusive'] and t['max_inclusive']), 'TIER_INTERVAL_EMPTY', 'price_tiers', '빈 구간/역전된 경계입니다.')
+        calculation_number(t['unit_price'], positive=True)
+        counter_offer_contract_string(t['source_ref'], 'price_tiers.source_ref')
+        if previous is not None:
+            end = calculation_number(previous['max_quantity']) if previous['max_quantity'] is not None else None
+            counter_offer_contract_require(end is not None and lo is not None and (end < lo or (end == lo and (not (previous['max_inclusive'] and t['min_inclusive'])))), 'TIER_OVERLAP', 'price_tiers', '정렬된 단가 구간이 겹칩니다(경계 포함 여부 포함).')
+        previous = t
+
+def purchase_plans_contract_validate_tier_coverage(tiers, lower, upper):
+    """No unknown prices anywhere in the feasible comparison quantity range.
+
+    Zero is not an order. Out-of-MOQ/capacity/comparison quantities are not
+    extrapolated and need not be covered by this invocation.
+    """
+    if lower > upper or upper <= 0:
+        return
+    cursor, included = (lower, lower == 0)
+    for t in tiers:
+        lo = calculation_number(t['min_quantity']) if t['min_quantity'] is not None else None
+        hi = calculation_number(t['max_quantity']) if t['max_quantity'] is not None else None
+        if hi is not None and (hi < cursor or (hi == cursor and (not t['max_inclusive']))):
+            continue
+        counter_offer_contract_require(lo is None or lo < cursor or (lo == cursor and (included or t['min_inclusive'])), 'TIER_GAP', 'price_tiers', '가능 주문 수량에 단가가 없는 구간/경계가 있습니다.')
+        if hi is None or hi > upper or (hi == upper and t['max_inclusive']):
+            return
+        if hi > cursor:
+            cursor, included = (hi, t['max_inclusive'])
+        elif hi == cursor:
+            included = included or t['max_inclusive']
+    counter_offer_contract_require(False, 'TIER_GAP', 'price_tiers', '가능 주문 수량의 끝까지 단가가 제시되지 않았습니다.')
+
+def quantity_price(q, quantity):
+    """Operating selector. The independent checker does not call this function."""
+    if not q.get('price_tiers'):
+        return (calculation_number(q['unit_price'], 'quote.unit_price', True), None)
+    found = []
+    for i, t in enumerate(q['price_tiers']):
+        lo = calculation_number(t['min_quantity']) if t['min_quantity'] is not None else None
+        hi = calculation_number(t['max_quantity']) if t['max_quantity'] is not None else None
+        if (lo is None or quantity > lo or (quantity == lo and t['min_inclusive'])) and (hi is None or quantity < hi or (quantity == hi and t['max_inclusive'])):
+            found.append((calculation_number(t['unit_price'], positive=True), i))
+    counter_offer_contract_require(len(found) == 1, 'TIER_GAP' if not found else 'TIER_OVERLAP', 'price_tiers', '배분 수량에 적용할 구간이 정확히 하나여야 합니다.')
+    return found[0]
+
+def validate_purchase_inputs(data: PurchaseReviewInput):
+    try:
+        d = PurchaseReviewInput.model_validate(data).model_dump(mode='json', by_alias=True, exclude_unset=True)
+    except ValidationError as exc:
+        field = str(exc.errors()[0]['loc'][0]) if exc.errors()[0]['loc'] else 'input'
+        raise CalculationError('INVALID_FIELD_VALUE', field, 'Shared purchase input validation failed') from exc
+    counter_offer_contract_require(d['data_kind'] in ('SYNTHETIC', 'LIVE'), 'INVALID_FIELD_VALUE', 'data_kind', '자료 종류가 필요합니다.')
+    counter_offer_contract_string(d['request_id'], 'request_id')
+    counter_offer_contract_require(type(d['revision']) is int and d['revision'] >= 0, 'INVALID_FIELD_VALUE', 'revision', '0 이상의 정수 revision이 필요합니다.')
+    asof = counter_offer_contract_day(d['as_of'], 'as_of')
+    period = counter_offer_contract_shape(d['period'], 'period', 'from to')
+    start, end = (counter_offer_contract_day(period['from'], 'period.from'), counter_offer_contract_day(period['to'], 'period.to'))
+    counter_offer_contract_require(asof <= start <= end, 'INVALID_COMPARISON_DATE', 'period', '판단일 이후 비교기간이 필요합니다.')
+    purchase_plans_contract_item(d['item'], 'item')
+    counter_offer_contract_terms(d['terms'], 'terms')
+    counter_offer_contract_string(d['unit'], 'unit')
+    counter_offer_contract_require(d['currency'] == 'KRW', 'CURRENCY_NOT_SUPPORTED', 'currency', 'KRW만 지원합니다.')
+    inc = counter_offer_contract_shape(d['incumbent'], 'incumbent', 'supplier_id old_unit_price requested_unit_price effective_date source_ref verified')
+    for k in ('supplier_id', 'source_ref'):
+        counter_offer_contract_string(inc[k], 'incumbent.' + k)
+    counter_offer_contract_require(inc['verified'] is True, 'MISSING_EVIDENCE', 'incumbent.verified', '인상 원문 검증 근거가 필요합니다.')
+    counter_offer_contract_require(calculation_number(inc['requested_unit_price'], positive=True) > calculation_number(inc['old_unit_price'], positive=True), 'NOT_PRICE_INCREASE', 'incumbent', '인상 요청만 지원합니다.')
+    counter_offer_contract_require(counter_offer_contract_day(inc['effective_date'], 'incumbent.effective_date') <= start, 'EFFECTIVE_DATE_MISMATCH', 'period', '인상 적용일 이후 기간이 필요합니다.')
+    fixed = counter_offer_contract_shape(d['fixed_commitment'], 'fixed_commitment', 'supplier_id quantity source_ref verified', 'unit_price period')
+    counter_offer_contract_require(fixed['supplier_id'] == inc['supplier_id'], 'SUPPLIER_MISMATCH', 'fixed_commitment', '기존 거래처 고정 계약만 지원합니다.')
+    fixed_qty = calculation_number(fixed['quantity'], 'fixed_commitment.quantity')
+    counter_offer_contract_require(fixed['verified'] is True, 'FIXED_CONTRACT_UNVERIFIED', 'fixed_commitment', '고정 물량 유무의 명시 근거가 필요합니다.')
+    if fixed_qty:
+        calculation_number(fixed.get('unit_price'), 'fixed_commitment.unit_price', True)
+        counter_offer_contract_require(fixed.get('period') == d['period'], 'FIXED_CONTRACT_UNVERIFIED', 'fixed_commitment', '양수 고정 계약의 단가/기간 근거가 필요합니다.')
+    counter_offer_contract_string(fixed['source_ref'], 'fixed_commitment.source_ref')
+    change = calculation_number(d['changeable_quantity'], 'changeable_quantity', True)
+    p = counter_offer_contract_shape(d['policy'], 'policy', 'policy_id source_ref approved valid_from valid_to allow_split max_suppliers allocation_step min_unit_price max_unit_price max_total_cost price_increment skip_if_request_not_more_than_alternative allow_partial_comparison', 'max_increase_rate')
+    counter_offer_contract_require(d['repricing_scope'] in ('ALL_INCUMBENT_CHANGEABLE', 'KEEP_ONLY') or (d['repricing_scope'] is None and (p['allow_split'] is False or p['max_suppliers'] == 1)), 'PRICE_SCOPE_UNCONFIRMED', 'repricing_scope', '분산안의 기존 업체 물량에 적용할 가격 범위를 명시하세요.')
+    counter_offer_contract_string(p['policy_id'], 'policy.policy_id')
+    counter_offer_contract_string(p['source_ref'], 'policy.source_ref')
+    counter_offer_contract_require(p['approved'] is True, 'POLICY_UNAPPROVED', 'policy.approved', '명시 승인 정책이 필요합니다.', 'HOLD')
+    counter_offer_contract_require(counter_offer_contract_day(p['valid_from'], 'policy.valid_from') <= asof and end <= counter_offer_contract_day(p['valid_to'], 'policy.valid_to'), 'POLICY_NOT_CURRENT', 'policy', '정책 유효기간 확인 필요.', 'HOLD')
+    for k in ('allow_split', 'skip_if_request_not_more_than_alternative', 'allow_partial_comparison'):
+        counter_offer_contract_require(type(p[k]) is bool, 'INVALID_FIELD_VALUE', 'policy.' + k, '명시 bool 정책이 필요합니다.')
+    counter_offer_contract_require(type(p['max_suppliers']) is int and 1 <= p['max_suppliers'] <= 2, 'UNSUPPORTED_POLICY', 'policy.max_suppliers', '최대 2개 업체 지원.')
+    step = calculation_number(p['allocation_step'], 'policy.allocation_step', True)
+    counter_offer_contract_require(change % step == 0, 'QUANTITY_GRID_MISMATCH', 'changeable_quantity', '변경 물량이 배정 단위의 정수배여야 합니다.')
+    counter_offer_contract_require(change / step <= 1000, 'SEARCH_LIMIT', 'policy.allocation_step', '1000개 배정 단위 초과; 일부 탐색을 최적이라고 보고하지 않습니다.', 'HOLD')
+    counter_offer_contract_require(calculation_number(p['min_unit_price']) <= calculation_number(p['max_unit_price'], positive=True), 'POLICY_VIOLATION', 'policy', '하한이 상한을 초과합니다.', 'HOLD')
+    calculation_number(p['price_increment'], positive=True)
+    calculation_number(p['max_total_cost'], positive=True)
+    if p.get('max_increase_rate') is not None:
+        calculation_number(p['max_increase_rate'])
+    counter_offer_contract_require(type(d['quotes']) is list and 1 <= len(d['quotes']) <= 8, 'INVALID_FIELD_VALUE', 'quotes', '현재 견적 1~8개가 필요합니다.')
+    suppliers = set()
+    ids = set()
+    for i, q in enumerate(d['quotes']):
+        path = f'quotes[{i}]'
+        counter_offer_contract_shape(q, path, 'supplier_id quote_id version received_on valid_from valid_until supply_from supply_to item unit currency terms unit_price moq available_quantity lead_days costs cost_scope cost_source_ref source_ref source_verified eligibility', 'price_tiers pricing_method tier_method_ref pack_multiple pack_multiple_unit pack_multiple_source_ref cost_rates')
+        if 'pack_multiple' in q:
+            calculation_number(q['pack_multiple'], path + '.pack_multiple', True)
+            counter_offer_contract_require(q.get('pack_multiple_unit') == q['unit'], 'PACK_MULTIPLE_UNIT_UNSUPPORTED', path, '포장 배수 단위 환산은 지원하지 않습니다.')
+            counter_offer_contract_string(q.get('pack_multiple_source_ref'), path + '.pack_multiple_source_ref')
+        if q.get('price_tiers'):
+            counter_offer_contract_require(not fixed_qty, 'TIER_FIXED_QUANTITY_BASIS_UNSUPPORTED', path, '양수 고정 물량의 구간 판정 합산 범위가 필요합니다.')
+            counter_offer_contract_require(q.get('pricing_method') == 'ALL_UNITS', 'TIER_METHOD_UNSUPPORTED', path, '명시된 전량 단가 방식만 지원합니다.')
+            purchase_plans_contract_validate_price_tiers(q['price_tiers'])
+            counter_offer_contract_string(q.get('tier_method_ref'), path + '.tier_method_ref')
+            counter_offer_contract_require(q['unit_price'] is None, 'TIER_FLAT_PRICE_CONFLICT', path, '구간/단일 단가를 동시에 임의 선택하지 않습니다.')
+        for k in ('supplier_id', 'quote_id'):
+            counter_offer_contract_string(q[k], path + '.' + k)
+        counter_offer_contract_require(q['supplier_id'] not in suppliers and q['quote_id'] not in ids, 'DUPLICATE_CURRENT_QUOTE', path, '업체별 현재 버전 하나만 전달하세요.')
+        suppliers.add(q['supplier_id'])
+        ids.add(q['quote_id'])
+        counter_offer_contract_require(type(q['version']) is int and q['version'] >= 1, 'INVALID_FIELD_VALUE', path + '.version', '양의 견적 버전이 필요합니다.')
+        counter_offer_contract_require(q['eligibility'] in ('CONFIRMED', 'NEEDS_INFO', 'INVALID'), 'INVALID_FIELD_VALUE', path + '.eligibility', '조건 확인 상태가 필요합니다.')
+        counter_offer_contract_require(q['source_verified'] in (True, False, None) and type(q['source_verified']) in (bool, type(None)), 'INVALID_FIELD_VALUE', path + '.source_verified', '검증 여부가 필요합니다.')
+    counter_offer_contract_require(inc['supplier_id'] in suppliers, 'MISSING_EVIDENCE', 'quotes', '유지안 비용/공급량을 확인할 기존 거래처 견적이 필요합니다.')
+    return deepcopy(d)
+
+def purchase_plans_contract_failure(exc):
+    return {'outcome': 'REVIEW_REQUIRED', 'decision': exc.decision, 'issues': [exc.issue]}
+
+
+# Shared review implementation: purchase_plans.tools
+"""Shared deterministic plan construction, verification and exact repricing."""
+
+
+def purchase_plans_tools_price_scope(d, supplier, kind):
+    if supplier != d['incumbent']['supplier_id']:
+        return 'QUOTE_PRICE'
+    return 'PROPOSED_PRICE' if kind == 'KEEP' or d['repricing_scope'] == 'ALL_INCUMBENT_CHANGEABLE' else 'REQUESTED_PRICE'
+
+def purchase_plans_tools_proposal(d, quantities):
+    inc = d['incumbent']['supplier_id']
+    quotes = {q['supplier_id']: q for q in d['quotes']}
+    active = set(quantities) | ({inc} if calculation_number(d['fixed_commitment']['quantity']) else set())
+    kind = 'KEEP' if active == {inc} else 'SWITCH' if inc not in active and len(active) == 1 else 'SPLIT'
+    allocations = [{'supplier_id': sid, 'quantity': calculation_text(qty), 'price_scope': purchase_plans_tools_price_scope(d, sid, kind), 'quote_id': quotes[sid]['quote_id'], 'quote_version': quotes[sid]['version']} for sid, qty in sorted(quantities.items()) if qty > 0]
+    return {'plan_id': 'PLAN-' + calculation_digest(allocations)[:20], 'type': kind, 'allocations': allocations}
+
+def purchase_plans_tools_proposals(d):
+    qty = calculation_number(d['changeable_quantity'])
+    step = calculation_number(d['policy']['allocation_step'])
+    ids = sorted((q['supplier_id'] for q in d['quotes']))
+    rows = [purchase_plans_tools_proposal(d, {sid: qty}) for sid in ids]
+    if d['policy']['allow_split'] and d['policy']['max_suppliers'] >= 2:
+        for left, right in combinations(ids, 2):
+            rows.extend((purchase_plans_tools_proposal(d, {left: i * step, right: qty - i * step}) for i in range(1, int(qty / step))))
+    return rows
+
+def purchase_plans_tools_quote(d, q, qty, *, require_costs=True, comparison_only=False):
+    counter_offer_contract_require(q['eligibility'] != 'INVALID', 'ITEM_SPEC_MISMATCH', 'quote.eligibility', '후보 필수 조건 불충족.')
+    counter_offer_contract_require(q['source_verified'] is True and q['eligibility'] == 'CONFIRMED', 'MISSING_EVIDENCE', 'quote.source_verified', '후보 조건/원문 검증 확인 필요.')
+    for k in ('source_ref', 'cost_source_ref'):
+        counter_offer_contract_string(q[k], 'quote.' + k)
+    for k in ('received_on', 'valid_until', 'supply_from', 'supply_to', 'moq', 'available_quantity'):
+        counter_offer_contract_require(q[k] is not None, 'MISSING_EVIDENCE', 'quote.' + k, '미확인 견적값을 추정할 수 없습니다.')
+    as_of = counter_offer_contract_day(d['as_of'], 'as_of')
+    counter_offer_contract_require(counter_offer_contract_day(q['received_on'], 'quote.received_on') <= as_of, 'QUOTE_NOT_CURRENT', 'quote.received_on', '검토 시점 이후 수신 견적은 사용할 수 없습니다.')
+    counter_offer_contract_require((q['valid_from'] is None or counter_offer_contract_day(q['valid_from'], 'quote.valid_from') <= as_of) and as_of <= counter_offer_contract_day(q['valid_until'], 'quote.valid_until'), 'QUOTE_NOT_CURRENT', 'quote.valid_until', '현재 판단일의 유효 견적이 아닙니다.')
+    counter_offer_contract_require(counter_offer_contract_day(q['supply_from'], 'quote.supply_from') <= counter_offer_contract_day(d['period']['from'], 'period.from') <= counter_offer_contract_day(d['period']['to'], 'period.to') <= counter_offer_contract_day(q['supply_to'], 'quote.supply_to'), 'SUPPLY_PERIOD_MISMATCH', 'quote.supply_from', '견적 공급기간이 비교기간을 포함하지 않습니다.')
+    if q['lead_days'] is not None:
+        counter_offer_contract_require(type(q['lead_days']) is int and 0 <= q['lead_days'] <= 36500, 'INVALID_FIELD_VALUE', 'quote.lead_days', '정수 납기 필요.')
+        counter_offer_contract_require((counter_offer_contract_day(d['period']['from'], 'period.from') - counter_offer_contract_day(d['as_of'], 'as_of')).days >= q['lead_days'], 'LEAD_TIME_MISMATCH', 'quote.lead_days', '납기 충족 불가.')
+    quoted_item = purchase_plans_contract_item(q['item'], 'quote.item')
+    counter_offer_contract_require(all((quoted_item.get(k) == v for k, v in d['item'].items() if k != 'item_id')) and q['unit'] == d['unit'] and (q['currency'] == d['currency']), 'ITEM_SPEC_MISMATCH', 'quote.item', '정규화 품목·단위·통화가 다릅니다.')
+    counter_offer_contract_require(counter_offer_contract_terms(q['terms'], 'quote.terms') == d['terms'], 'TRADE_TERMS_MISMATCH', 'quote.terms', '납품/결제/세금 조건 불일치.')
+    available = calculation_number(q['available_quantity'], 'quote.available_quantity')
+    moq = calculation_number(q['moq'], 'quote.moq')
+    if qty > 0 and not comparison_only:
+        counter_offer_contract_require(moq <= qty <= available, 'QUANTITY_NOT_FEASIBLE', 'quote.available_quantity', '배정량이 MOQ/추가 공급량 범위 밖입니다.')
+    if qty > 0 and 'pack_multiple' in q:
+        counter_offer_contract_require(qty % calculation_number(q['pack_multiple'], positive=True) == 0, 'PACK_MULTIPLE_VIOLATION', 'quote.pack_multiple', '배정량은 견적에 명시된 포장 배수의 정수배여야 합니다.')
+    selected = quantity_price(q, qty)
+    if q['supplier_id'] == d['incumbent']['supplier_id']:
+        basis = quantity_price(q, calculation_number(d['changeable_quantity']))[0] if q.get('price_tiers') else selected[0]
+        counter_offer_contract_require(basis == calculation_number(d['incumbent']['requested_unit_price']), 'NOTICE_QUOTE_MISMATCH', 'quote.unit_price', '업무 전체 물량의 인상 요청 근거와 현재 견적이 다릅니다.')
+    counter_offer_contract_require(q['cost_scope'] == 'PER_SUPPLIER_PER_PERIOD', 'COST_SCOPE_MISMATCH', 'quote.cost_scope', '업체별 1회 전체 기간 추가 비용이 필요합니다.')
+    cs = counter_offer_contract_shape(q['costs'], 'quote.costs', 'transport other_logistics switching')
+    for k, v in cs.items():
+        if k == 'switching' and q['supplier_id'] == d['incumbent']['supplier_id'] and (v is None):
+            continue
+        if v is None and (not require_costs):
+            continue
+        counter_offer_contract_require(v is not None, 'MISSING_EVIDENCE', 'quote.costs.' + k, '미확인 비용을 0으로 채우지 않습니다.')
+        calculation_number(v, 'quote.costs.' + k)
+    if q['supplier_id'] == d['incumbent']['supplier_id']:
+        counter_offer_contract_require(cs['switching'] is None or calculation_number(cs['switching']) == 0, 'COST_SCOPE_MISMATCH', 'quote.costs.switching', '기존 업체의 전환 비용은 비적용이거나 명시된 0이어야 합니다.')
+
+def allocation_warnings(quote, quantity):
+    """Numerically comparable quantities may still be impossible to allocate."""
+    warnings = []
+    for key, code, exceeds in [('available_quantity', 'SUPPLY_SHORTAGE', True), ('moq', 'BELOW_MOQ', False)]:
+        limit = calculation_number(quote[key])
+        if quantity > limit if exceeds else quantity < limit:
+            warnings.append({'quote_version_id': quote['quote_id'], 'code': code,
+                             'comparison_quantity': calculation_text(quantity), 'limit': calculation_text(limit)})
+    return warnings
+
+
+def verify_comparison_quote(data, quote_id, quantity, *, allow_unknown_costs=False):
+    """Keep source/unit/period/tier checks; capacity/MOQ warn for conditional comparison."""
+    d = validate_purchase_inputs(data)
+    q = next((q for q in d['quotes'] if q['quote_id'] == quote_id), None)
+    counter_offer_contract_require(q is not None, 'QUOTE_SCOPE_MISMATCH', 'quote_id', '현재 비교 견적만 사용할 수 있습니다.')
+    purchase_plans_tools_quote(d, q, calculation_number(quantity, positive=True),
+                              require_costs=not allow_unknown_costs, comparison_only=True)
+    return q
+
+def allocation_costs(quote, quantity):
+    """Supplier fixed charges once, source-confirmed unit charges at this allocation."""
+    result = deepcopy(quote['costs'])
+    for key, rate in quote.get('cost_rates', {}).items():
+        result[key] = calculation_text(calculation_number(rate) * quantity)
+    return result
+
+
+def purchase_plans_tools_assess(d, plan, price, *, quote_prices=False):
+    counter_offer_contract_shape(plan, 'plan', 'plan_id type allocations')
+    counter_offer_contract_require(type(plan['allocations']) is list and 1 <= len(plan['allocations']) <= 2, 'INVALID_ALLOCATION', 'plan.allocations', '1~2개 업체 변경 물량 배정 필요.')
+    quotes = {q['supplier_id']: q for q in d['quotes']}
+    amounts = {}
+    for row in plan['allocations']:
+        counter_offer_contract_shape(row, 'allocation', 'supplier_id quantity price_scope quote_id quote_version')
+        sid = counter_offer_contract_string(row['supplier_id'], 'allocation.supplier_id')
+        counter_offer_contract_require(sid in quotes and sid not in amounts, 'INVALID_ALLOCATION', 'allocation.supplier_id', '후보에 없는 업체 또는 중복 배정입니다.')
+        qty = calculation_number(row['quantity'], 'allocation.quantity', True)
+        amounts[sid] = qty
+        counter_offer_contract_require(qty % calculation_number(d['policy']['allocation_step']) == 0, 'QUANTITY_GRID_MISMATCH', 'allocation.quantity', '배정 단위 위반.')
+        counter_offer_contract_require(row['quote_id'] == quotes[sid]['quote_id'] and type(row['quote_version']) is int and (row['quote_version'] == quotes[sid]['version']), 'STALE_QUOTE_VERSION', 'allocation.quote_version', '현재 견적 버전과 다릅니다.')
+    counter_offer_contract_require(sum(amounts.values()) == calculation_number(d['changeable_quantity']), 'QUANTITY_MISMATCH', 'plan.allocations', '변경 배정 합계가 변경 가능 물량과 다릅니다.')
+    expected = purchase_plans_tools_proposal(d, amounts)
+    counter_offer_contract_require(plan == expected, 'PRICE_SCOPE_MISMATCH', 'plan', '안 유형/ID/가격 적용 범위가 명시 계약과 다릅니다.')
+    inc = d['incumbent']['supplier_id']
+    fixed = calculation_number(d['fixed_commitment']['quantity'])
+    fixed_price = calculation_number(d['fixed_commitment']['unit_price']) if fixed else None
+    active = set(amounts) | ({inc} if fixed else set())
+    counter_offer_contract_require(len(active) <= d['policy']['max_suppliers'] and (d['policy']['allow_split'] or len(active) == 1), 'SPLIT_POLICY_VIOLATION', 'plan.allocations', '고정 계약을 포함한 업체 수/분산 정책 위반.')
+    a = 0
+    b = fixed * fixed_price if fixed else 0
+    lines = []
+    extra = {'transport': 0, 'other_logistics': 0, 'switching': 0}
+    cost_rows = []
+    actual_goods = b
+    refs = [d['incumbent']['source_ref'], d['fixed_commitment']['source_ref'], d['policy']['source_ref']]
+    if fixed:
+        lines.append({'supplier_id': inc, 'quantity': calculation_text(fixed), 'price_scope': 'FIXED_CONTRACT', 'unit_price': calculation_text(fixed_price), 'goods_amount': calculation_text(fixed * fixed_price), 'source_ref': d['fixed_commitment']['source_ref']})
+    for sid in sorted(active):
+        q = quotes[sid]
+        qty = amounts.get(sid, 0)
+        purchase_plans_tools_quote(d, q, qty)
+        scope = purchase_plans_tools_price_scope(d, sid, plan['type'])
+        quote_unit, tier_index = quantity_price(q, qty)
+        unit = price if scope == 'PROPOSED_PRICE' and (not quote_prices) else quote_unit
+        if scope == 'PROPOSED_PRICE':
+            a += qty
+        else:
+            b += qty * quote_unit
+        actual_goods += qty * unit
+        if qty:
+            lines.append({'supplier_id': sid, 'quantity': calculation_text(qty), 'price_scope': scope, 'unit_price': calculation_text(unit), 'goods_amount': calculation_text(qty * unit), 'quote_id': q['quote_id'], 'quote_version': q['version'], 'source_ref': q['source_ref']})
+        if qty and tier_index is not None:
+            lines[-1].update(quoted_unit_price=calculation_text(quote_unit), tier_index=tier_index, tier_quantity=calculation_text(qty), tier_source_ref=q['price_tiers'][tier_index]['source_ref'], unit_price_basis='PROPOSED_PRICE' if scope == 'PROPOSED_PRICE' and (not quote_prices) else 'QUOTE_TIER')
+            refs.extend([q['price_tiers'][tier_index]['source_ref'], q['tier_method_ref']])
+        applicable = {k: v for k, v in allocation_costs(q, qty + (fixed if sid == inc else 0)).items() if not (k == 'switching' and sid == inc and (v is None))}
+        for key, val in applicable.items():
+            extra[key] += calculation_number(val)
+            b += calculation_number(val)
+        cost_rows.append({'supplier_id': sid, 'costs': deepcopy(applicable), 'source_ref': q['cost_source_ref']})
+        refs.extend([q['source_ref'], q['cost_source_ref']])
+        if 'pack_multiple' in q:
+            refs.append(q['pack_multiple_source_ref'])
+    shared = evaluate_cost_lines(lines, cost_rows)
+    total = Fraction(shared['total_cost'])
+    policy = d['policy']
+    price_ok = calculation_number(policy['min_unit_price']) <= price <= calculation_number(policy['max_unit_price']) and price <= calculation_number(d['incumbent']['requested_unit_price']) and (price % calculation_number(policy['price_increment']) == 0) and (policy.get('max_increase_rate') is None or price <= calculation_number(d['incumbent']['old_unit_price']) * (1 + calculation_number(policy['max_increase_rate'])))
+    return {**deepcopy(plan), 'status': 'VALID', 'issues': [], 'evaluated_unit_price': calculation_text(price), 'total_cost': calculation_text(total), **({'pricing_phase': 'QUOTE_AT_ALLOCATION' if quote_prices else 'COUNTER_OFFER_REPRICING', 'cost_function_scope': 'COUNTER_OFFER_REPRICING'} if any((q.get('price_tiers') for q in quotes.values())) else {}), 'goods_amount': calculation_text(shared['goods_amount']), 'costs': {k: calculation_text(v) for k, v in extra.items()}, 'supplier_costs': cost_rows, 'lines': lines, 'cost_function': {'coefficient': calculation_text(a), 'constant': calculation_text(b)}, 'quote_versions': {sid: {'quote_id': quotes[sid]['quote_id'], 'version': quotes[sid]['version']} for sid in sorted(active)}, 'evidence_refs': sorted(set(refs)), 'policy_at_price': {'negotiated_price_within_limits': price_ok, 'total_within_retention_budget': total <= calculation_number(policy['max_total_cost']), 'budget_scope': 'COUNTER_OFFER_KEEP_ONLY'}}
+
+def purchase_plans_tools_checked(d, plan, price, *, quote_prices=False):
+    try:
+        return purchase_plans_tools_assess(d, plan, price, quote_prices=quote_prices)
+    except CalculationError as exc:
+        missing = exc.issue['code'] in ('MISSING_EVIDENCE', 'MISSING_REQUIRED_FIELD', 'TIER_GAP')
+        return {'plan_id': plan.get('plan_id') if isinstance(plan, dict) else None, 'proposal': deepcopy(plan), 'status': 'NEEDS_INFO' if missing else 'INVALID', 'issues': [exc.issue]}
+
+def check_plan_calculation(data, plan, proposed_price=None):
+    try:
+        d = validate_purchase_inputs(data)
+        price = calculation_number(proposed_price if proposed_price is not None else d['incumbent']['requested_unit_price'], positive=True)
+        return purchase_plans_tools_checked(d, plan, price, quote_prices=proposed_price is None)
+    except CalculationError as exc:
+        return {**purchase_plans_contract_failure(exc), 'status': 'NEEDS_INFO', 'plan_id': None}
+
+def reprice_plan(data, plan, proposed_price):
+    return check_plan_calculation(data, plan, proposed_price)
+
+def compute_plan_set(data):
+    try:
+        d = validate_purchase_inputs(data)
+        price = calculation_number(d['incumbent']['requested_unit_price'])
+        checked = [purchase_plans_tools_checked(d, p, price, quote_prices=True) for p in purchase_plans_tools_proposals(d)]
+        result = {'schema_version': 'kan.plan-set.v0', 'producer': 'COMMON_TOOLS_LOCAL', 'producer_mode': 'DETERMINISTIC_NO_LLM', 'input_digest': calculation_digest(d), 'revision': d['revision'], 'as_of': d['as_of'], 'data_kind': d['data_kind'], 'search_scope': 'ALL_PROVIDED_QUOTES_TWO_SUPPLIERS_ALLOCATION_GRID', 'plans': checked, 'outcome': 'SUCCESS', 'issues': []}
+        if any((q.get('price_tiers') for q in d['quotes'])):
+            step = calculation_number(d['policy']['allocation_step'])
+            result['tier_search'] = {'allocation_step': d['policy']['allocation_step'], 'scope': 'ALL_PROVIDED_QUOTES_AT_MOST_TWO_SUPPLIERS_ON_DECLARED_GRID', 'off_grid_boundaries': [{'quote_id': q['quote_id'], 'quantity': value} for q in d['quotes'] for t in q.get('price_tiers', []) for key in ('min_quantity', 'max_quantity') if (value := t[key]) is not None and calculation_number(value) % step != 0], 'global_optimum_claimed': False}
+        result['validation_ref'] = 'PLAN-SET-' + calculation_digest(result)
+        return result
+    except CalculationError as exc:
+        return {**purchase_plans_contract_failure(exc), 'plans': [], 'validation_ref': None}
+
+def verify_plan_bundle(data, bundle):
+    expected = compute_plan_set(data)
+    counter_offer_contract_require(expected['outcome'] == 'SUCCESS', 'PLAN_INPUT_NOT_READY', 'input', '구매안 입력 검증이 필요합니다.')
+    try:
+        matches = type(bundle) is dict and calculation_digest(bundle) == calculation_digest(expected)
+    except (ValueError, TypeError):
+        matches = False
+    counter_offer_contract_require(matches, 'STALE_OR_TAMPERED_PLAN_SET', 'plan_set', '입력/revision/견적 버전/배분/비용/검증 결과가 변경되었거나 안이 누락되었습니다.', 'HOLD')
+    return expected
+
+
+# Shared review implementation: purchase_plans.negotiation
+"""⑤ cap over every verified plan, independent checking, existing draft path reuse."""
+
+
+def purchase_plans_negotiation_context(data, bundle):
+    d = validate_purchase_inputs(data)
+    b = verify_plan_bundle(d, bundle)
+    valid = [p for p in b['plans'] if p['status'] == 'VALID']
+    keep = next((p for p in valid if p['type'] == 'KEEP'), None)
+    alternatives = [p for p in valid if p['type'] != 'KEEP']
+    unresolved = [p for p in b['plans'] if p['status'] == 'NEEDS_INFO']
+    counter_offer_contract_require(keep is not None, 'KEEP_NOT_VERIFIED', 'plans', '유지안의 계약/비용/물량 검증이 필요합니다.', 'HOLD')
+    counter_offer_contract_require(not unresolved or d['policy']['allow_partial_comparison'], 'PLAN_INFORMATION_REQUIRED', 'plans', '미확인 후보 정보가 있어 비교를 중단합니다.', 'HOLD')
+    counter_offer_contract_require(bool(alternatives), 'NO_VERIFIED_ALTERNATIVE', 'plans', '비교할 검증 대안이 없습니다. 추가 확인이 필요합니다.', 'HOLD')
+    return (d, keep, alternatives)
+
+def purchase_plans_negotiation_bounds(d, keep, alternatives):
+    p = d['policy']
+    a = purchase_plans_contract_calculated_number(keep['cost_function']['coefficient'])
+    b = purchase_plans_contract_calculated_number(keep['cost_function']['constant'])
+    bounds = {'requested_price': calculation_number(d['incumbent']['requested_unit_price']), 'policy_unit_price': calculation_number(p['max_unit_price']), 'policy_total_cost': (calculation_number(p['max_total_cost']) - b) / a}
+    if p.get('max_increase_rate') is not None:
+        bounds['increase_rate'] = calculation_number(d['incumbent']['old_unit_price']) * (1 + calculation_number(p['max_increase_rate']))
+    for plan in alternatives:
+        denom = a - purchase_plans_contract_calculated_number(plan['cost_function']['coefficient'])
+        counter_offer_contract_require(denom > 0, 'UNSUPPORTED_COST_MODEL', 'plans', '유지안보다 적은 재가격 계수의 대안이 필요합니다.', 'HOLD')
+        bounds[plan['plan_id']] = (purchase_plans_contract_calculated_number(plan['cost_function']['constant']) - b) / denom
+    return bounds
+
+def purchase_plans_negotiation_independent_quote(q, quantity):
+    """Separate Decimal boundary walk; never uses the operating tier selector."""
+    if not q.get('price_tiers'):
+        return (calculation_number(q['unit_price']), None)
+    quantity = Decimal(calculation_text(quantity))
+    matches = []
+    for i, t in enumerate(q['price_tiers']):
+        low = t['min_quantity']
+        high = t['max_quantity']
+        if low is not None:
+            low = Decimal(low)
+            if quantity < low or (quantity == low and t['min_inclusive'] is not True):
+                continue
+        if high is not None:
+            high = Decimal(high)
+            if quantity > high or (quantity == high and t['max_inclusive'] is not True):
+                continue
+        matches.append((Fraction(Decimal(t['unit_price'])), i))
+    counter_offer_contract_require(len(matches) == 1, 'INDEPENDENT_TIER_COVERAGE', 'price_tiers', '독립 경계 검사에서 적용 구간이 하나가 아닙니다.')
+    return matches[0]
+
+def purchase_plans_negotiation_independent_details(d, plan, price, *, rounded=True):
+    quotes = {q['supplier_id']: q for q in d['quotes']}
+    inc = d['incumbent']['supplier_id']
+    fixed = calculation_number(d['fixed_commitment']['quantity'])
+    total = fixed * calculation_number(d['fixed_commitment']['unit_price']) if fixed else 0
+    lines = []
+    active = {inc} if fixed else set()
+    if fixed:
+        lines.append({'supplier_id': inc, 'quantity': calculation_text(fixed), 'unit_price': calculation_text(calculation_number(d['fixed_commitment']['unit_price'])), 'goods_amount': calculation_text(total)})
+    for allocation in plan['allocations']:
+        sid = allocation['supplier_id']
+        active.add(sid)
+        qty = calculation_number(allocation['quantity'])
+        q = quotes[sid]
+        if 'pack_multiple' in q:
+            counter_offer_contract_require(q.get('pack_multiple_unit') == q['unit'], 'INDEPENDENT_PACK_MULTIPLE_UNIT', 'pack_multiple', '독립 검사에서 포장 배수 단위가 다릅니다.')
+            pack = Decimal(q['pack_multiple'])
+            counter_offer_contract_require(pack > 0 and Decimal(allocation['quantity']) % pack == 0, 'INDEPENDENT_PACK_MULTIPLE_VIOLATION', 'pack_multiple', '독립 검사에서 견적 포장 배수를 위반했습니다.')
+        quoted, index = purchase_plans_negotiation_independent_quote(q, qty)
+        override = price is not None and sid == inc and (plan['type'] == 'KEEP' or d['repricing_scope'] == 'ALL_INCUMBENT_CHANGEABLE')
+        unit = price if override else quoted
+        total += qty * unit
+        line = {'supplier_id': sid, 'quantity': calculation_text(qty), 'unit_price': calculation_text(unit), 'goods_amount': calculation_text(qty * unit)}
+        if index is not None:
+            line.update(quoted_unit_price=calculation_text(quoted), tier_index=index, tier_quantity=calculation_text(qty), tier_source_ref=q['price_tiers'][index]['source_ref'], unit_price_basis='PROPOSED_PRICE' if override else 'QUOTE_TIER')
+        lines.append(line)
+    transport = other = Fraction(0)
+    for sid in active:
+        for key, value in quotes[sid]['costs'].items():
+            if sid == inc and key == 'switching' and value is None: continue
+            # Independent quantity/rate evaluation from original quote, not operating totals.
+            if key in quotes[sid].get('cost_rates', {}):
+                ordered = sum((calculation_number(a['quantity']) for a in plan['allocations'] if a['supplier_id'] == sid), Fraction(0))
+                if sid == inc: ordered += fixed
+                value = calculation_text(Fraction(Decimal(quotes[sid]['cost_rates'][key])) * ordered)
+            if key == 'transport': transport += calculation_number(value)
+            else: other += calculation_number(value)
+    if rounded:
+        with localcontext() as ctx:
+            ctx.prec = 80
+            total = sum((Fraction(money(Decimal(calculation_text(v)))) for v in (total, transport, other)))
+    else:
+        total += transport + other
+    return (total, lines)
+
+def verify_independent_plan_cost(d, row, proposed_price=None):
+    """Re-read source intervals and quantities; operating prices/totals are claims."""
+    total, expected = purchase_plans_negotiation_independent_details(d, row, proposed_price)
+    counter_offer_contract_require(purchase_plans_contract_calculated_number(row['total_cost']) == total, 'INDEPENDENT_PLAN_COST_MISMATCH', 'plans', '원본 견적과 배분으로 재계산한 총액이 다릅니다.')
+    keys = {'supplier_id', 'quantity', 'unit_price', 'goods_amount', 'quoted_unit_price', 'tier_index', 'tier_quantity', 'tier_source_ref', 'unit_price_basis'}
+    actual = [{k: v for k, v in line.items() if k in keys} for line in row['lines']]
+    counter_offer_contract_require(sorted(map(calculation_digest, actual)) == sorted(map(calculation_digest, expected)), 'INDEPENDENT_PLAN_LINE_MISMATCH', 'plans', '구간 단가/적용 수량/재가격 근거가 다릅니다.')
+    return True
+
+def purchase_plans_negotiation_direct_totals(d, plans, price):
+    return {plan['plan_id']: purchase_plans_negotiation_independent_details(d, plan, price)[0] for plan in plans}
+
+def purchase_plans_negotiation_feasible(d, keep, alts, price):
+    p = d['policy']
+    totals = purchase_plans_negotiation_direct_totals(d, [keep, *alts], price)
+    total = totals[keep['plan_id']]
+    return price > 0 and price >= calculation_number(p['min_unit_price']) and (price <= calculation_number(p['max_unit_price'])) and (price <= calculation_number(d['incumbent']['requested_unit_price'])) and (price % calculation_number(p['price_increment']) == 0) and (total <= calculation_number(p['max_total_cost'])) and all((total <= totals[a['plan_id']] for a in alts)) and (p.get('max_increase_rate') is None or price <= calculation_number(d['incumbent']['old_unit_price']) * (1 + calculation_number(p['max_increase_rate'])))
+
+def purchase_plans_negotiation_description(d, bundle, keep, alts, price, decision):
+    rows = [purchase_plans_tools_assess(d, {k: p[k] for k in ('plan_id', 'type', 'allocations')}, price) for p in [keep, *alts]]
+    evaluated = rows[0]
+    alternatives = rows[1:]
+    best = min((purchase_plans_contract_calculated_number(p['total_cost']) for p in alternatives))
+    comparison = {'price_used': calculation_text(price), 'repricing_scope': d['repricing_scope'], 'scope': 'VERIFIED_PROVIDED_PLAN_SET_AT_PROPOSED_PRICE', 'keep_total_cost': evaluated['total_cost'], 'best_alternative_total_cost': calculation_text(best), 'lowest_alternative_ids': [p['plan_id'] for p in alternatives if purchase_plans_contract_calculated_number(p['total_cost']) == best], 'plans_at_proposed_price': rows, 'excluded_plans': [{'plan_id': p['plan_id'], 'status': p['status'], 'issues': p['issues']} for p in bundle['plans'] if p['status'] != 'VALID']}
+    offer = None
+    if decision == 'READY':
+        requested = purchase_plans_negotiation_direct_totals(d, [keep], calculation_number(d['incumbent']['requested_unit_price']))[keep['plan_id']]
+        before = purchase_plans_negotiation_direct_totals(d, [keep], calculation_number(d['incumbent']['old_unit_price']))[keep['plan_id']]
+        offer = {'target_unit_price': calculation_text(price), 'total_cost': evaluated['total_cost'], 'goods_amount': evaluated['goods_amount'], 'costs': evaluated['costs'], 'currency': d['currency'], 'unit': d['unit'], 'requested_total_cost': calculation_text(requested), 'baseline_total_cost': calculation_text(before), 'alternative_total_cost': calculation_text(best), 'savings_vs_request': calculation_text(requested - purchase_plans_contract_calculated_number(evaluated['total_cost'])), 'verification_refs': sorted(set((r for p in rows for r in p['evidence_refs'])))}
+    return {'schema_version': 'kan.plan-offer.v0', 'outcome': 'SUCCESS', 'decision': decision, 'offer': offer, 'comparison': comparison, 'issues': [], 'input_digest': calculation_digest(d), 'plan_validation_ref': bundle['validation_ref']}
+
+def rounded_price_window(d, keep, alternatives, *, independent):
+    """Proven finite window around exact affine caps, not a monotonicity guess.
+
+    Three rounded components differ from exact total by at most 0.015;
+    comparing two plans differs by at most 0.03. Enumerate this entire window
+    because two rounded affine costs need not have a monotone difference.
+    """
+    def affine(plan):
+        if not independent:
+            return (purchase_plans_contract_calculated_number(plan['cost_function']['coefficient']),
+                    purchase_plans_contract_calculated_number(plan['cost_function']['constant']))
+        zero = purchase_plans_negotiation_independent_details(d, plan, Fraction(0), rounded=False)[0]
+        one = purchase_plans_negotiation_independent_details(d, plan, Fraction(1), rounded=False)[0]
+        return one - zero, zero
+    p = d['policy']
+    step = calculation_number(p['price_increment'])
+    lower_price = calculation_number(p['min_unit_price'])
+    cap = min(calculation_number(p['max_unit_price']), calculation_number(d['incumbent']['requested_unit_price']))
+    if p.get('max_increase_rate') is not None:
+        cap = min(cap, calculation_number(d['incumbent']['old_unit_price']) * (1 + calculation_number(p['max_increase_rate'])))
+    a, b = affine(keep)
+    counter_offer_contract_require(a > 0, 'UNSUPPORTED_COST_MODEL', 'plans', 'Positive retention coefficient required.', 'HOLD')
+    budget = calculation_number(p['max_total_cost']) - b
+    lower, upper = [cap, (budget - Fraction('0.015')) / a], [cap, (budget + Fraction('0.015')) / a]
+    for plan in alternatives:
+        slope, constant = affine(plan)
+        denom = a - slope
+        counter_offer_contract_require(denom > 0, 'UNSUPPORTED_COST_MODEL', 'plans', 'Positive comparison coefficient required.', 'HOLD')
+        lower.append((constant - b - Fraction('0.03')) / denom)
+        upper.append((constant - b + Fraction('0.03')) / denom)
+    low = max(-(-lower_price // step), min(lower) // step)
+    high = min(upper) // step
+    counter_offer_contract_require(high - low <= 10000, 'ROUNDING_SEARCH_LIMIT', 'policy',
+                                  'Rounding boundary exceeds the deterministic resource limit.', 'HOLD')
+    return int(low), int(high), step
+
+
+def compute_counter_offer(data, bundle):
+    try:
+        d, keep, alts = purchase_plans_negotiation_context(data, bundle)
+        p = d['policy']
+        request = calculation_number(d['incumbent']['requested_unit_price'])
+        low, high, step = rounded_price_window(d, keep, alts, independent=False)
+        price = next((i * step for i in range(high, low - 1, -1)
+                      if purchase_plans_negotiation_feasible(d, keep, alts, i * step)), None)
+        counter_offer_contract_require(price is not None, 'NO_FEASIBLE_PRICE', 'policy', 'No policy-valid price in the proven rounding window.', 'HOLD')
+        decision = 'NO_COUNTER_NEEDED' if p['skip_if_request_not_more_than_alternative'] and price == request else 'READY'
+        return purchase_plans_negotiation_description(d, bundle, keep, alts, price, decision)
+    except CalculationError as exc:
+        return {**purchase_plans_contract_failure(exc), 'offer': None, 'comparison': None}
+
+def check_counter_offer_calculation(data, bundle, result):
+    """Never calls calculate_offer/_bounds/select_price. Direct sums + next-grid check."""
+    try:
+        d, keep, alts = purchase_plans_negotiation_context(data, bundle)
+        counter_offer_contract_shape(result, 'calculation', 'schema_version outcome decision offer comparison issues input_digest plan_validation_ref')
+        counter_offer_contract_require(result['outcome'] == 'SUCCESS' and result['decision'] in ('READY', 'NO_COUNTER_NEEDED'), 'CALCULATION_NOT_READY', 'calculation', '정상 계산이 필요합니다.')
+        decision = result['decision']
+        request = calculation_number(d['incumbent']['requested_unit_price'])
+        if decision == 'READY':
+            counter_offer_contract_require(type(result['offer']) is dict, 'CALCULATION_NOT_READY', 'offer', '제안 결과가 필요합니다.')
+            price = calculation_number(result['offer'].get('target_unit_price'), positive=True)
+        else:
+            price = request
+        counter_offer_contract_require(purchase_plans_negotiation_feasible(d, keep, alts, price), 'POLICY_OR_COMPARISON_VIOLATION', 'offer', '배정별 재계산/정책 부등식 위반입니다.', 'HOLD')
+        skip = d['policy']['skip_if_request_not_more_than_alternative'] and purchase_plans_negotiation_feasible(d, keep, alts, request)
+        counter_offer_contract_require((decision == 'NO_COUNTER_NEEDED') == skip, 'DECISION_MISMATCH', 'decision', '역제안 생략 정책과 결과가 다릅니다.')
+        low, high, step = rounded_price_window(d, keep, alts, independent=True)
+        counter_offer_contract_require(not any(purchase_plans_negotiation_feasible(d, keep, alts, i * step)
+            for i in range(max(low, int(price // step) + 1), high + 1)), 'TARGET_RULE_MISMATCH', 'offer', 'A higher policy-valid price exists in the proven rounding window.')
+        expected = purchase_plans_negotiation_description(d, bundle, keep, alts, price, decision)
+        for row in result['comparison']['plans_at_proposed_price']:
+            verify_independent_plan_cost(d, row, price)
+        direct = purchase_plans_negotiation_direct_totals(d, [keep, *alts], price)
+        counter_offer_contract_require(all((purchase_plans_contract_calculated_number(p['total_cost']) == direct[p['plan_id']] for p in expected['comparison']['plans_at_proposed_price'])), 'CALCULATION_MISMATCH', 'plans', '공통 도구와 독립 배정 재계산이 다릅니다.')
+        counter_offer_contract_require(calculation_digest(result) == calculation_digest(expected), 'CALCULATION_MISMATCH', 'calculation', '총액/배분/가격 범위/근거/입력 연결이 다릅니다.')
+        return {'valid': True, 'issues': [], 'validation_ref': 'PLAN-OFFER-' + calculation_digest(expected)}
+    except CalculationError as exc:
+        return {'valid': False, 'issues': [exc.issue], 'validation_ref': None}
+
+
+# Shared review implementation: team_bridge.repository
+"""Reference storage boundary. Production implementations require atomic CAS writes."""
+
+
+class OutputValidationError(ValueError):
+
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+@dataclass(frozen=True)
+class ExecutionScope:
+    case_id: str
+    revision: int
+    quote_ids: tuple[str, ...]
+
+    @classmethod
+    def from_input(cls, data):
+        ids = tuple(data.quote_version_ids)
+        if not ids or len(ids) != len(set(ids)):
+            raise OutputValidationError('QUOTE_VERSION_IDS_REQUIRED')
+        return cls(str(data.case_id), data.input_revision, tuple(sorted(ids)))
+
+
+# Shared review implementation: team_bridge.team_data
+"""Team records -> typed shared calculations; missing role-store facts hold.
+
+Backend implementations supply the role protocols below. CaseStore/QuoteStore
+remain unchanged. No production memory fallback or conversation input recovery.
+"""
+
+
+class MissingReviewData(OutputValidationError):
+
+    def __init__(self, fields=(), *, issues=()):
+        self.issues = [*issues, *({'action': 'HOLD', 'field': f} for f in fields)]
+        self.action = next((a for a in ('HOLD', 'RECHECK_SOURCE', 'NEEDS_EVIDENCE') if any((i['action'] == a for i in self.issues))))
+        self.fields = sorted({i['field'] for i in self.issues if i['action'] == self.action})
+        super().__init__(next((i['reason'] for i in self.issues if i['action'] == self.action and 'reason' in i), 'TEAM_DATA_REQUIRED'))
+
+
+class PriorityStore(Protocol):
+    """Authenticated persisted run input and reviewed facts; never model messages."""
+    def load_priority_input(self, context: RunContext) -> PriorityIn: ...
+    def load_review_facts(self, context: RunContext) -> ReviewFactsRecord | None: ...
+    def save_break_even(self, context: RunContext, scope: ExecutionScope, source_digest: str,
+                        record: BreakEvenRecord) -> str | None:
+        """Atomically verify authorized run/scope/revision/source then persist; None means not saved."""
+        ...
+    def read_break_even(self, context: RunContext, scope: ExecutionScope, ref: str) -> BreakEvenRecord:
+        """Read only; enforce ownership/revision/scope/kind and immutable record integrity."""
+        ...
+
+
+class PlanStore(Protocol):
+    def load_plan_input(self, context: RunContext) -> PlanIn: ...
+    def load_review_facts(self, context: RunContext) -> ReviewFactsRecord | None: ...
+    def save_plan_set(self, context: RunContext, scope: ExecutionScope, source_digest: str, record: PlanSetRecord) -> str: ...
+    def read_plan_set(self, context: RunContext, scope: ExecutionScope, source_digest: str, ref: str) -> PlanSetRecord: ...
+    def save_plan_calculation(self, context: RunContext, scope: ExecutionScope, source_digest: str, record: PlanCalculationRecord) -> str: ...
+    def read_plan_calculation(self, context: RunContext, scope: ExecutionScope, source_digest: str, ref: str) -> PlanCalculationRecord: ...
+
+
+class CounterOfferStore(Protocol):
+    def load_counter_offer_input(self, context: RunContext) -> CounterOfferIn: ...
+    def load_review_facts(self, context: RunContext) -> ReviewFactsRecord | None: ...
+    def save_price_calculation(self, context: RunContext, scope: ExecutionScope, source_digest: str, record: PriceCalculationRecord) -> str: ...
+    def read_price_calculation(self, context: RunContext, scope: ExecutionScope, source_digest: str, ref: str) -> PriceCalculationRecord: ...
+    def save_price_validation(self, context: RunContext, scope: ExecutionScope, source_digest: str, record: PriceValidationRecord) -> str: ...
+    def read_price_validation(self, context: RunContext, scope: ExecutionScope, source_digest: str, ref: str) -> PriceValidationRecord: ...
+    def save_policy(self, context: RunContext, scope: ExecutionScope, source_digest: str, record: PolicyRecord) -> str: ...
+    def read_policy(self, context: RunContext, scope: ExecutionScope, source_digest: str, ref: str) -> PolicyRecord: ...
+
+
+class DraftLookupStore(Protocol):
+    # Required read contract only; the shared draft owner's actual adapter is pending.
+    def read_counter_offer_draft(self, context: RunContext, scope: ExecutionScope, ref: str) -> DraftBinding: ...
+    def read_clarification_draft(self, context: RunContext, scope: ExecutionScope, ref: str) -> ClarificationDraftBinding: ...
+
+
+_priority_store: PriorityStore | None = None
+_plan_store: PlanStore | None = None
+_counter_offer_store: CounterOfferStore | None = None
+_draft_lookup_store: DraftLookupStore | None = None
+
+
+def use_role_stores(*, priority=None, plans=None, counter_offers=None, drafts=None):
+    """Backend composition. Store writes check scope/source/revision atomically.
+
+    Reads enforce ownership, exact versions, kind and source integrity.
+    No in-memory production fallback; None leaves a dependency missing.
+    """
+    global _priority_store, _plan_store, _counter_offer_store, _draft_lookup_store
+    _priority_store, _plan_store = priority, plans
+    _counter_offer_store, _draft_lookup_store = counter_offers, drafts
+
+
+def review_record_digest(case, rows):
+    """Bind reviewed supplemental facts to the exact team case and quote records."""
+    return calculation_digest({'case': case, 'quotes': {qid: row.model_dump(mode='json') for qid, row in rows.items()}})
+
+def team_bridge_team_data_number(value, path):
+    if value is None:
+        raise MissingReviewData([path])
+    if not isinstance(value, str):
+        raise OutputValidationError('TEAM_NUMERIC_VALIDATION_FAILED:' + path)
+    try:
+        return format(decimal_value(value, path), 'f')
+    except ReviewRequired as exc:
+        raise OutputValidationError('TEAM_NUMERIC_VALIDATION_FAILED:' + path) from exc
+
+def team_bridge_team_data_verify_number_source(name, entry):
+
+    kind = QUOTE_FIELDS[name][0]
+    if kind not in ('price', 'number'):
+        return
+    try:
+        normalized = _parse(kind, name, entry['raw_value'])
+        if decimal_value(normalized, name) != decimal_value(entry['value'], name):
+            raise OutputValidationError('REFERENCE_SOURCE_NUMERIC_MISMATCH:' + name)
+    except (ReviewRequired, TypeError, KeyError, AttributeError) as exc:
+        raise OutputValidationError('REFERENCE_SOURCE_NUMERIC_INVALID:' + name) from exc
+team_bridge_team_data_NUMERIC_SOURCE_LABELS = {'unit_price': ('unit_price', '요청 단가', '인상 단가', '변경 단가', '단가'), 'previous_unit_price': ('previous_unit_price', '기존 단가', '이전 단가', '인상 전 단가'), 'available_quantity': ('available_quantity', '공급 가능량', '공급 가능 수량', '공급량'), 'moq': ('moq', 'MOQ', '최소 주문 수량', '최소 수량', '최소'), 'pack_multiple': ('pack_multiple', '포장 배수', '주문 배수', '주문 단위', '포장 단위')}
+
+def team_bridge_team_data_source_contains(text, raw):
+    """Normalize whitespace/thousands separators, retaining numeric boundaries.
+
+    Never concatenate lines: 55 on one line and 00 on the next is not 5500.
+    Also reject numeric substrings embedded after signs/decimal punctuation.
+    """
+
+    raw = _normalized(raw, True)
+    pattern = re.escape(raw)
+    if raw[:1].isdigit():
+        pattern = '(?<![\\d.,+\\-])' + pattern
+    if raw[-1:].isdigit():
+        pattern += '(?![\\d.]|,\\d)'
+    return any((re.search(pattern, _normalized(line, True)) is not None for line in text.splitlines()))
+
+def team_bridge_team_data_numeric_field_source(text, raw, field):
+
+    expected = decimal_value(_parse(QUOTE_FIELDS[field][0], field, raw), field)
+    labels = {label.replace(' ', ''): key for key, names in team_bridge_team_data_NUMERIC_SOURCE_LABELS.items() for label in names}
+    pattern = '(?<![A-Za-z_])(?:' + '|'.join((re.escape(k) for k in sorted(labels, key=len, reverse=True))) + ')(?![A-Za-z_])'
+    matched = []
+    for line in text.splitlines():
+        compact = ''.join(line.split())
+        anchors = list(re.finditer(pattern, compact))
+        for i, anchor in enumerate(anchors):
+            end = anchors[i + 1].start() if i + 1 < len(anchors) else len(compact)
+            clause = re.split('[|;\\t]|[A-Za-z_]+:', compact[anchor.end():end])[0]
+            if labels[anchor.group()] == field:
+                # A cost's inclusion in the unit price does not state a price.
+                # Ignore this descriptive anchor, never numbers in its tail.
+                # An actual price anchor must still be present and match exactly.
+                if (anchor.group() == '단가' and re.match(r'(?:에)?(?:포함|미포함|불포함)', clause)
+                        and re.search(r'(?:배송비|운송비|물류비|포장비|하역비|수수료|비용|SHIPPING|HANDLING)[^|;]*$',
+                                      compact[:anchor.start()], re.I)):
+                    continue
+                number = re.search('[-+]?\\d+(?:\\.\\d+)?', _normalized(clause, True))
+                matched.append(bool(number) and number.group()[0].isdigit() and (decimal_value(number.group(), field) == expected) and team_bridge_team_data_source_contains(anchor.group() + clause, raw))
+        if not anchors:
+            if field == 'pack_multiple' and re.search('(?:단위|배수)', raw) and team_bridge_team_data_source_contains(line, raw):
+                matched.append(True)
+    return matched == [True]
+
+@dataclass(frozen=True)
+class _ReviewAccess:
+    context: RunContext
+    role: AgentRole
+
+    @property
+    def cases(self): return _case_store
+    @property
+    def quotes(self): return _quote_store
+    @property
+    def supplements(self):
+        store = {AgentRole.INFO_PRIORITY: _priority_store, AgentRole.RESPONSE_PLAN: _plan_store,
+                 AgentRole.COUNTER_OFFER: _counter_offer_store}[self.role]
+        if store is None: return None
+        value = store.load_review_facts(self.context)
+        return None if value is None else ReviewFactsRecord.model_validate(value)
+
+    def for_run(self, context):
+        return replace(self, context=context)
+
+    def current_revision(self, case_id):
+        if self.cases is None or self.quotes is None:
+            raise MissingReviewData(['CaseStore', 'QuoteStore'])
+        value = self.cases.current_input_revision(case_id)
+        if value is None:
+            raise OutputValidationError('CASE_SCOPE_DENIED')
+        return value
+
+    def scope_for_case(self, case_id, revision):
+        case = self.cases.get_work_case(case_id)
+        if case is None:
+            raise OutputValidationError('CASE_SCOPE_DENIED')
+        scope = ExecutionScope(case_id, revision, tuple(sorted(case['latest_quote_version_ids'])))
+        self.snapshot(scope)
+        return scope
+
+    def _check_current_scope(self, scope):
+        if type(scope.revision) is not int or scope.revision < 0:
+            raise OutputValidationError('STALE_REVISION')
+        if self.current_revision(scope.case_id) != scope.revision:
+            raise OutputValidationError('STALE_REVISION')
+        if self.quotes.current_input_revision(scope.case_id) != scope.revision:
+            raise OutputValidationError('STALE_REVISION')
+        if self.context is not None and (self.context.case_id != scope.case_id or self.context.input_revision != scope.revision):
+            raise OutputValidationError('CASE_SCOPE_RUN_CONTEXT_MISMATCH')
+        case = self.cases.get_work_case(scope.case_id)
+        if case is None:
+            raise OutputValidationError('CASE_SCOPE_DENIED')
+        if case.get('input_revision') != scope.revision:
+            raise OutputValidationError('STALE_REVISION')
+        ids = case.get('latest_quote_version_ids')
+        if not ids or len(ids) != len(set(ids)) or tuple(sorted(ids)) != scope.quote_ids:
+            raise OutputValidationError('STALE_QUOTE_VERSIONS')
+        return case
+
+    def _scope_records(self, scope):
+        case = self._check_current_scope(scope)
+        ids = scope.quote_ids
+        mails = {m['mail_id']: m for m in self.cases.list_case_mails(scope.case_id)}
+        rows = {}
+        for supplier in sorted({m['supplier_id'] for m in mails.values() if m.get('supplier_id')}):
+            found = self.quotes.latest_quote_version(scope.case_id, supplier)
+            if found is not None:
+                qid, row = found
+                if row.work_case_id != scope.case_id or row.supplier_id != supplier:
+                    raise OutputValidationError('CASE_SCOPE_QUOTE_MISMATCH')
+                if qid in ids:
+                    if qid in rows:
+                        raise OutputValidationError('REFERENCE_SCOPE_DUPLICATE_QUOTE')
+                    rows[qid] = row
+        if set(rows) != set(ids):
+            raise MissingReviewData(['QuoteStore.get_quote_version(case_id, quote_version_id)'])
+        return (case, mails, rows)
+
+    def check_scope(self, scope):
+        """Read scope only: no policy, supplemental facts or validation store needed."""
+        self._scope_records(scope)
+        self._check_current_scope(scope)
+
+    def snapshot(self, scope):
+        case, mails, rows = self._scope_records(scope)
+        mapping = _QuoteMapper(self.cases, scope, case, mails, rows, self.supplements)
+        snapshot = mapping.build()
+        self._check_current_scope(scope)
+        return snapshot
+
+    def resolve_draft(self, scope, ref):
+        self.check_scope(scope)
+        if _draft_lookup_store is None:
+            raise MissingReviewData(['create_mail_draft.resolve'])
+        value = _draft_lookup_store.read_counter_offer_draft(self.context, scope, ref)
+        return DraftBinding.model_validate(value).model_dump(mode='json')
+
+    def _record_port(self, kind):
+        ports = {
+            'PLAN_SET': (_plan_store, 'plan_set', PlanSetRecord),
+            'PLAN_CALCULATION': (_plan_store, 'plan_calculation', PlanCalculationRecord),
+            'OFFER_CALCULATION': (_counter_offer_store, 'price_calculation', PriceCalculationRecord),
+            'PRICE_VALIDATION': (_counter_offer_store, 'price_validation', PriceValidationRecord),
+            'POLICY': (_counter_offer_store, 'policy', PolicyRecord),
+        }
+        if kind not in ports: raise OutputValidationError('UNSUPPORTED_RECORD_KIND')
+        store, name, model = ports[kind]
+        if store is None: raise MissingReviewData([name + '.store'])
+        return store, name, model
+
+    def put_if_current(self, scope, kind, payload):
+        snapshot = self.snapshot(scope)
+        if not self.context.agent_run_id: raise MissingReviewData(['RunContext.agent_run_id'])
+        store, name, model = self._record_port(kind)
+        return getattr(store, 'save_' + name)(self.context, scope, calculation_digest(snapshot), model.model_validate(payload))
+
+    def resolve(self, scope, kind, ref):
+        snapshot = self.snapshot(scope)
+        store, name, model = self._record_port(kind)
+        value = getattr(store, 'read_' + name)(self.context, scope, calculation_digest(snapshot), ref)
+        return model.model_validate(value).model_dump(mode='json', by_alias=True, exclude_unset=True)
+
+
+class _QuoteMapper:
+
+    def __init__(self, store, scope, case, mails, rows, supplements):
+        self.store, self.scope, self.case, self.mails, self.rows = (store, scope, case, mails, rows)
+        self.evidence, self.missing, self.issues = ({}, [], [])
+        self.cost_rates = {}
+        extra = supplements.model_dump(mode='json', by_alias=True, exclude_none=True) if supplements is not None else None
+        self.facts = {}
+        if extra is not None:
+            if extra.get('case_id') != scope.case_id or extra.get('input_revision') != scope.revision or sorted(extra.get('quote_version_ids', [])) != list(scope.quote_ids):
+                raise OutputValidationError('REFERENCE_SCOPE_SUPPLEMENT_MISMATCH')
+            if extra.get('team_record_digest') != review_record_digest(case, rows):
+                raise OutputValidationError('REFERENCE_SOURCE_SUPPLEMENT_CHANGED')
+            self.facts = {k: v for k, v in extra['facts'].items() if k != 'quotes'}
+            self.facts.update({qid + '.' + name: value for qid, facts in extra['facts'].get('quotes', {}).items() for name, value in facts.items()})
+
+    def need(self, value, path):
+        if value is None or value == '':
+            self.missing.append(path)
+        return deepcopy(value)
+
+    def issue(self, action, field, *, stop=False):
+
+        if action == 'RECHECK_SOURCE' and field not in EXTRACTION_FIELD_NAMES:
+            raise ValueError('Unsupported extraction field')
+        self.issues.append({'action': action, 'field': field, **({'quote_version_id': self.current_qid, 'supplier_id': self.current_supplier} if hasattr(self, 'current_qid') else {})})
+        if stop:
+            raise MissingReviewData(self.missing, issues=self.issues)
+
+    def extraction_source(self, field, load):
+        try:
+            return load()
+        except MissingReviewData as exc:
+            if exc.fields == ['evidence.excerpt']:
+                self.issue('RECHECK_SOURCE', field, stop=True)
+            raise
+        except OutputValidationError as exc:
+            if exc.code.startswith(('REFERENCE_SOURCE_NUMERIC', 'REFERENCE_SOURCE_FIELD', 'REFERENCE_SOURCE_COST', 'REFERENCE_SOURCE_SHIPPING')) or exc.code == 'REFERENCE_SOURCE_EVIDENCE_MISMATCH':
+                self.issue('RECHECK_SOURCE', field, stop=True)
+            raise
+
+    def source(self, entry, supplier=None, field=None):
+        """Check stored original evidence against scoped current source text.
+
+        ① stores location, not part/page in evidence_jsonb. Resolve that exact
+        location through the existing mail/attachment interface, never guess body.
+        """
+        mail_id = entry.get('mail_id')
+        mail = self.mails.get(mail_id)
+        if mail is None or (supplier is not None and mail.get('supplier_id') != supplier):
+            raise OutputValidationError('CASE_SCOPE_EVIDENCE_MISMATCH')
+        raw = entry.get('excerpt', entry.get('raw_value', entry.get('source_text')))
+        if not isinstance(raw, str) or not raw.strip():
+            raise MissingReviewData(['evidence.excerpt'])
+        if 'part' in entry:
+            candidates = [(entry['part'], entry.get('page'))]
+        else:
+            candidates = [('body', None)] + [(a['attachment_ref'], p) for a in mail.get('attachments', []) for p in range(1, a['pages'] + 1)]
+        matches = []
+        for part, page in candidates:
+            found = self.store.read_mail_part(self.scope.case_id, mail_id, part, page)
+            if found is None:
+                continue
+            location = found.get('location')
+            if 'location' in entry and (not location or not (entry['location'] == location or entry['location'].startswith(location + ' '))):
+                continue
+            if team_bridge_team_data_source_contains(found['text'], raw) and (field not in team_bridge_team_data_NUMERIC_SOURCE_LABELS or team_bridge_team_data_numeric_field_source(found['text'], raw, field)):
+                matches.append({'mail_id': mail_id, 'part': part, 'page': page, 'location': location, 'text': found['text'], 'stored_evidence': deepcopy(entry)})
+        if len(matches) != 1:
+            raise OutputValidationError('REFERENCE_SOURCE_EVIDENCE_MISMATCH')
+        ref = 'team-source:' + calculation_digest(matches[0])
+        self.evidence[ref] = matches[0]
+        return ref
+
+    def fact(self, path, *, required=True, evidence=True):
+        entry = self.facts.get(path)
+        if entry is None or entry.get('value') is None:
+            if required:
+                self.missing.append('review_facts.' + path)
+            return None
+        if evidence:
+            if not entry.get('evidence'):
+                self.missing.append('review_facts.' + path + '.evidence')
+                return None
+            self.source(entry['evidence'])
+        return deepcopy(entry['value'])
+
+    def period_cost(self, qid, row, kind):
+        costs = [c for c in row.cost_terms_jsonb if c.get('cost_type') == kind]
+        key = 'transport' if kind == 'SHIPPING' else 'other_logistics'
+        self.cost_rates.setdefault(qid, {}).pop(key, None)
+        if len(costs) != 1:
+            self.issue('RECHECK_SOURCE' if costs or team_bridge_priority_source_has_answer(self, row, kind) else 'NEEDS_EVIDENCE', 'cost_terms')
+            return None, None
+        cost = costs[0]
+        ref = self.source(cost, row.supplier_id)
+        text = cost['source_text']
+        included = cost.get('included_in_price')
+        if included is not None and _inclusion(text) != included:
+            raise OutputValidationError('REFERENCE_SOURCE_COST_INCLUSION_MISMATCH')
+        for field in ('basis', 'payer'):
+            if cost.get(field) and not _contains(_normalized(text, False), _normalized(cost[field], False), False):
+                raise OutputValidationError('REFERENCE_SOURCE_COST_BASIS_MISMATCH')
+        amount = cost.get('amount')
+        if amount is not None:
+            number = decimal_value(amount, 'cost.amount')
+            if number < 0: raise OutputValidationError('TEAM_NUMERIC_VALIDATION_FAILED')
+            if not (_contains(_normalized(text, True), _normalized(amount, True), True) or
+                    number == 0 and any(word in text for word in _ZERO_AMOUNTS)):
+                raise OutputValidationError('REFERENCE_SOURCE_COST_AMOUNT_MISMATCH')
+            if kind == 'SHIPPING' and row.shipping_cost is not None and row.shipping_cost != amount:
+                raise OutputValidationError('REFERENCE_SOURCE_SHIPPING_COLUMN_MISMATCH')
+            if number == 0: return '0', ref
+        # Verified inclusion establishes zero *additional* charge, even without
+        # a separately stated amount. It does not impute an unknown charge.
+        if included is True: return '0', ref
+        if amount is None or included is None:
+            # Missing extraction must not turn an answer in the source into a new question.
+            answer_present = (amount is None and bool(re.search(r'\d[\d,.]*\s*원|무료|무상', text))) or (included is None and _inclusion(text) is not None)
+            self.issue('RECHECK_SOURCE' if answer_present else 'NEEDS_EVIDENCE', 'cost_terms')
+            return None, ref
+        basis = cost.get('basis')
+        if basis is None or basis.strip() in ('회당', '1회', '건당', '주문 1회', 'PER_ORDER', 'PER_SUPPLIER_PER_PERIOD', '비교기간 전체'):
+            # A missing normalized basis must not erase an explicit unit basis in source.
+            if basis is None and re.search(r'(?:kg|킬로그램|개|박스|box)\s*당', text, re.I):
+                self.issue('RECHECK_SOURCE', 'cost_terms')
+                return None, ref
+            return amount, ref
+        match = re.fullmatch(r'(?:1\s*)?(.+?)\s*당', basis.strip())
+        unit = match[1] if match else basis[1:] if basis.startswith('/') else None
+        if unit is not None and unit_name(unit) == unit_name(self.case.get('unit')):
+            self.cost_rates[qid][key] = amount
+            with localcontext() as ctx:
+                ctx.prec = 80
+                return calculation_text(number * decimal_value(self.case.get('quantity'), 'quantity')), ref
+        self.issue('NEEDS_EVIDENCE', 'cost_terms')
+        return None, ref
+
+    def field(self, qid, row, name, value):
+        entry = row.evidence_jsonb.get(name)
+        if value is None:
+
+            self.issue('RECHECK_SOURCE' if entry and entry.get('raw_value') or team_bridge_priority_source_has_answer(self, row, name) else 'NEEDS_EVIDENCE', name)
+            return None
+        if entry is None:
+            self.issue('RECHECK_SOURCE', name)
+            return value
+        if entry.get('value') != value:
+            self.issue('RECHECK_SOURCE', name, stop=True)
+        self.extraction_source(name, lambda: team_bridge_team_data_verify_number_source(name, entry))
+        self.extraction_source(name, lambda: self.source(entry, row.supplier_id, name))
+        return deepcopy(value)
+
+    def pack_multiple(self, row, qid):
+        pricing = row.pricing_terms_jsonb
+        if pricing.get('pack_multiple') is None:
+            if row.evidence_jsonb.get('pack_multiple', {}).get('raw_value'):
+                self.issue('RECHECK_SOURCE', 'pack_multiple', stop=True)
+            return {}
+        value = self.field(qid, row, 'pack_multiple', pricing['pack_multiple'])
+        entry = row.evidence_jsonb.get('pack_multiple')
+        if entry is None:
+            raise MissingReviewData(self.missing, issues=self.issues)
+
+        _, raw_unit = _quantity(entry['raw_value'], 'pack_multiple')
+        units = [u for u in (raw_unit, entry.get('quantity_unit'), pricing.get('pack_multiple_unit')) if u is not None]
+        if not units:
+            raise MissingReviewData(issues=[{'action': 'NEEDS_EVIDENCE', 'field': 'pack_multiple', 'reason': 'PACK_MULTIPLE_UNIT_REQUIRED'}])
+        if len({unit_name(u) for u in units}) != 1:
+            self.issue('RECHECK_SOURCE', 'pack_multiple', stop=True)
+        unit = unit_name(units[0])
+        if unit != unit_name(row.unit):
+            raise OutputValidationError('PACK_MULTIPLE_UNIT_UNSUPPORTED:' + qid)
+        if decimal_value(value, 'pack_multiple') <= 0:
+            self.issue('RECHECK_SOURCE', 'pack_multiple', stop=True)
+        ref = self.extraction_source('pack_multiple', lambda: self.source(entry, row.supplier_id, 'pack_multiple'))
+        return {'pack_multiple': team_bridge_team_data_number(value, 'pack_multiple'), 'pack_multiple_unit': unit, 'pack_multiple_source_ref': ref}
+
+    def price_tiers(self, qid, row):
+        """Read ①'s unchanged record shape; meaning must be explicit in its source.
+
+        No inference from price monotonicity or from missing endpoint operators.
+        A table-wide rule is accepted only in each tier's own source part.
+        """
+
+
+
+        def reject(reason, action='NEEDS_EVIDENCE'):
+            raise MissingReviewData(self.missing, issues=[*self.issues, {'action': action, 'field': 'price_tiers' if action != 'HOLD' else reason, 'reason': reason}])
+        records = row.pricing_terms_jsonb['price_tiers']
+        if not isinstance(records, list) or not 1 <= len(records) <= 100:
+            reject('TIER_TABLE_INVALID', 'RECHECK_SOURCE')
+        all_units = {'주문총수량에해당하는단가를전량에적용합니다', '주문전체수량에해당하는구간단가를전량에적용합니다', '수량구간은주문총수량기준이며해당단가를전량에적용합니다'}
+        graduated = {'각구간에속한물량에각구간단가를적용합니다', '구간별물량에각각단가를적용하는누진방식입니다'}
+        canonical, method_refs = ([], [])
+        for record in records:
+            endpoints, raw_bounds = ({}, [])
+            for side, operators in [('min', {'이상': True, '초과': False, '부터': True}), ('max', {'이하': True, '미만': False, '까지': True})]:
+                value, raw = (record.get(side + '_quantity'), record.get(side + '_quantity_raw'))
+                endpoints[side + '_quantity'] = value
+                endpoints[side + '_inclusive'] = False
+                if value is None:
+                    if raw is not None:
+                        reject('TIER_BOUNDARY_VALUE_MISMATCH', 'RECHECK_SOURCE')
+                    continue
+                if not isinstance(raw, str):
+                    reject('TIER_BOUNDARY_EVIDENCE_MISSING', 'RECHECK_SOURCE')
+                op = next((op for op in operators if raw.strip().endswith(op)), None)
+                if op is None:
+                    reject('TIER_BOUNDARY_AMBIGUOUS')
+                try:
+                    amount, unit = _quantity(raw, side + '_quantity')
+                except ReviewRequired:
+                    reject('TIER_BOUNDARY_VALUE_MISMATCH', 'RECHECK_SOURCE')
+                if decimal_value(amount, 'tier.quantity') != decimal_value(value, 'tier.quantity'):
+                    reject('TIER_BOUNDARY_VALUE_MISMATCH', 'RECHECK_SOURCE')
+                if unit is None:
+                    reject('TIER_QUANTITY_UNIT_REQUIRED')
+                if unit_name(unit) != unit_name(row.unit):
+                    reject('TIER_QUANTITY_UNIT_MISMATCH', 'HOLD')
+                endpoints[side + '_inclusive'] = operators[op]
+                raw_bounds.append(raw)
+            if not raw_bounds:
+                reject('TIER_BOUNDARY_AMBIGUOUS')
+            ref = self.extraction_source('price_tiers', lambda: self.source({**record, 'excerpt': raw_bounds[0]}, row.supplier_id))
+            source = self.evidence[ref]
+            lines = [_normalized(line, True) for line in source['text'].splitlines() if line.strip()]
+            price = team_bridge_team_data_number(record.get('unit_price'), 'price_tiers.unit_price')
+            matches = []
+            for line in lines:
+                if not all((team_bridge_team_data_source_contains(line, raw) for raw in raw_bounds)):
+                    continue
+                amounts = re.findall('(?<![\\d.])(\\d+(?:\\.\\d+)?)(?:원|KRW)(?:/([A-Za-z가-힣]+))?', line)
+                if len(amounts) == 1 and any((decimal_value(v, 'tier.unit_price') == decimal_value(price, 'tier.unit_price') and (not u or unit_name(u) == unit_name(row.unit)) for v, u in amounts)):
+                    matches.append(line)
+            if len(matches) != 1:
+                reject('TIER_ROW_EVIDENCE_MISMATCH', 'RECHECK_SOURCE')
+            statements = {''.join(line.split()).rstrip('.。').removeprefix('단가적용방식:') for line in source['text'].splitlines()}
+            is_all, is_graduated = (bool(statements & all_units), bool(statements & graduated))
+            if is_all and (is_graduated or '누진' in source['text']):
+                reject('TIER_METHOD_AMBIGUOUS')
+            if is_graduated:
+                reject('TIER_GRADUATED_UNSUPPORTED', 'HOLD')
+            if not is_all:
+                reject('TIER_METHOD_AMBIGUOUS')
+            method_refs.append(ref)
+            canonical.append({**endpoints, 'unit_price': price, 'source_ref': ref})
+        canonical.sort(key=lambda t: (t['min_quantity'] is not None, decimal_value(t['min_quantity'], 'tier.quantity') if t['min_quantity'] is not None else 0))
+        try:
+            purchase_plans_contract_validate_price_tiers(canonical)
+            if row.available_quantity is not None and row.pricing_terms_jsonb.get('moq') is not None:
+                purchase_plans_contract_validate_tier_coverage(canonical, calculation_number(row.pricing_terms_jsonb['moq']), min(calculation_number(row.available_quantity), calculation_number(team_bridge_team_data_number(self.case.get('quantity'), 'quantity'))))
+        except CalculationError as exc:
+            reject(exc.issue['code'])
+        method_ref = 'team-tier-method:' + calculation_digest(method_refs)
+        self.evidence[method_ref] = {'pricing_method': 'ALL_UNITS', 'source_refs': method_refs}
+        return (canonical, method_ref)
+
+    def build(self, *, allow_missing_costs=False, comparison_only=False):
+        case, scope = (self.case, self.scope)
+        policy = self.need(case.get('policy'), 'policy')
+        if isinstance(policy, dict) and policy.get('source_ref'):
+            self.evidence[policy['source_ref']] = {'case_id': scope.case_id, 'input_revision': scope.revision, 'field': 'policy', 'value': deepcopy(policy)}
+        as_of, period = (self.fact('as_of', evidence=False), self.fact('period'))
+        if period is not None and case.get('due_date') is not None:
+            if explicit_date(period['to'], 'period.to') > explicit_date(case['due_date'], 'due_date'):
+                raise OutputValidationError('TEAM_REQUEST_DUE_DATE_MISMATCH')
+        identity = self.fact('item_identity', required=False)
+        if identity is not None:
+            identity.pop('item_id', None)
+        item = {**(identity or {}), 'name': self.need(case.get('item_name'), 'item_name'), 'specification': self.need(case.get('specification'), 'specification')}
+        terms = self.fact('terms')
+        candidates = {row.supplier_id for row in self.rows.values() if any(('previous_unit_price' in m.get('fields', {}) for m in row.mail_normalized.values()))}
+        incumbent_id = self.fact('incumbent_supplier_id', required=len(candidates) != 1)
+        if incumbent_id is None and len(candidates) == 1:
+            incumbent_id = next(iter(candidates))
+        elif len(candidates) == 1 and incumbent_id not in candidates:
+            raise OutputValidationError('REFERENCE_SCOPE_INCUMBENT_MISMATCH')
+        fixed = self.fact('fixed_commitment')
+        if fixed is not None:
+            ref = self.source(self.facts['fixed_commitment']['evidence'])
+            fixed = {**fixed, 'source_ref': ref}
+        split_possible = not isinstance(policy, dict) or not (policy.get('allow_split') is False or policy.get('max_suppliers') == 1)
+        repricing = self.fact('repricing_scope', required=split_possible)
+        quote_data, bindings, notice = ([], {}, None)
+        for qid, row in sorted(self.rows.items()):
+            self.current_qid, self.current_supplier = (qid, row.supplier_id)
+            if row.source_mail_id not in self.mails or self.mails[row.source_mail_id].get('supplier_id') != row.supplier_id:
+                raise OutputValidationError('CASE_SCOPE_QUOTE_MAIL_MISMATCH')
+            if row.extraction_status != 'CONFIRMED':
+                self.missing.append(qid + '.extraction_status.CONFIRMED')
+
+            def field(name, value):
+                return self.field(qid, row, name, value)
+
+            def checked(name):
+                check = row.checks_jsonb.get(name, {})
+                if check.get('value') is not None and check.get('state') != 'STATED':
+                    self.issue('RECHECK_SOURCE', name)
+                return field(name, check.get('value'))
+            pricing = row.pricing_terms_jsonb
+            qi = self.fact(qid + '.item_identity', required=False) or {}
+            qi.pop('item_id', None)
+            qi.update(name=checked('item_name'), specification=checked('specification'))
+            if row.checks_jsonb.get('origin', {}).get('value') is not None or 'origin' in item:
+                qi['origin'] = checked('origin')
+            for condition in ('grade', 'processing'):
+                if condition in item and condition not in qi:
+                    self.missing.append('review_facts.' + qid + '.item_identity.' + condition)
+            unit = field('unit', row.unit)
+            for key in ('moq', 'available_quantity'):
+                if pricing.get(key + '_unit', unit) != unit:
+                    raise OutputValidationError('TEAM_QUANTITY_UNIT_MISMATCH:' + qid + '.' + key)
+            if pricing.get('order_unit', unit) != unit or pricing.get('quantity_per_order_unit') not in (None, '1'):
+                raise OutputValidationError('TEAM_ORDER_UNIT_CONVERSION_UNSUPPORTED')
+            tiers, tier_method_ref = self.price_tiers(qid, row) if pricing.get('price_tiers') else (None, None)
+            if tiers and row.unit_price is not None:
+                raise MissingReviewData(issues=[{'action': 'RECHECK_SOURCE', 'field': 'price_tiers', 'reason': 'TIER_FLAT_PRICE_CONFLICT'}])
+            price = None if tiers else field('unit_price', row.unit_price)
+            effective = field('effective_from', row.effective_from) if row.supplier_id == incumbent_id or row.effective_from is not None else None
+            until = field('valid_until', row.valid_until)
+            currency = field('currency', pricing.get('currency'))
+            qt = self.fact(qid + '.terms')
+            tax_raw = checked('tax_terms')
+            tax = {'INCLUDED': 'INCLUDED', 'EXCLUDED': 'EXCLUDED', 'EXEMPT': 'EXEMPT', '부가세 포함': 'INCLUDED', '부가세 별도': 'EXCLUDED', '면세': 'EXEMPT'}.get(tax_raw)
+            if tax_raw is not None and tax is None:
+                self.missing.append('UNSUPPORTED_TAX_MAPPING:' + qid)
+            if qt is not None:
+                qt['tax_basis'] = tax
+            source_ref = self.extraction_source('unit_price', lambda: self.source(row.evidence_jsonb['unit_price'], row.supplier_id)) if price is not None and 'unit_price' in row.evidence_jsonb else None
+            if tiers:
+                source_ref = tier_method_ref
+            transport, shipping_ref = self.extraction_source('cost_terms', lambda: self.period_cost(qid, row, 'SHIPPING'))
+            handling, handling_ref = self.extraction_source('cost_terms', lambda: self.period_cost(qid, row, 'HANDLING'))
+            if any((c.get('cost_type') not in ('SHIPPING', 'HANDLING') for c in row.cost_terms_jsonb)):
+                raise OutputValidationError('TEAM_OTHER_COST_CLASSIFICATION_REQUIRED')
+            switching = self.fact(qid + '.switching_cost', required=row.supplier_id != incumbent_id)
+            switch_ref = self.source(self.facts[qid + '.switching_cost']['evidence']) if switching is not None else None
+            cost_sources = [shipping_ref, handling_ref, switch_ref]
+            cost_ref = 'team-costs:' + calculation_digest(cost_sources)
+            self.evidence[cost_ref] = {'source_refs': cost_sources}
+            received = self.mails[row.source_mail_id].get('received_at')
+            self.need(received, qid + '.received_at')
+            delivery = row.checks_jsonb.get('delivery_date', {}).get('value')
+            if delivery is not None:
+                delivery = checked('delivery_date')
+                supply_from = supply_to = delivery
+            else:
+                supply_from, supply_to = (self.fact(qid + '.supply_from'), self.fact(qid + '.supply_to'))
+            lead = row.checks_jsonb.get('lead_time', {}).get('value')
+            if isinstance(lead, str) and re.fullmatch('\\d+일', lead):
+                lead_days = int(checked('lead_time')[:-1])
+            elif delivery is not None and lead is None:
+                lead_days = None
+            else:
+                lead_days = self.fact(qid + '.lead_days')
+            has_switching_amount = switching is not None and decimal_value(team_bridge_team_data_number(switching, qid + '.switching_cost'), 'switching_cost') != 0
+            cost_scope = self.fact(qid + '.cost_scope', required=has_switching_amount)
+            if cost_scope is None and (not has_switching_amount):
+                cost_scope = 'PER_SUPPLIER_PER_PERIOD'
+
+            required_checks = team_bridge_priority_mandatory_checks(self, qid, row)
+            eligibility = 'INVALID' if any((c['state'] == 'FAIL' for c in required_checks)) else 'NEEDS_INFO' if any((c['state'] == 'UNKNOWN' for c in required_checks)) else 'CONFIRMED'
+            q = {'supplier_id': row.supplier_id, 'quote_id': qid, 'version': row.version_no, 'received_on': datetime.fromisoformat(received).date().isoformat() if received else None, 'valid_from': self.fact(qid + '.valid_from', required=False), 'valid_until': until, 'supply_from': supply_from, 'supply_to': supply_to, 'item': qi, 'unit': unit, 'currency': currency, 'terms': qt, 'unit_price': price, 'moq': field('moq', pricing.get('moq')), 'available_quantity': field('available_quantity', row.available_quantity), 'lead_days': lead_days, 'costs': {'transport': transport, 'other_logistics': handling, 'switching': switching}, 'cost_scope': cost_scope, 'cost_source_ref': cost_ref, 'source_ref': source_ref, 'source_verified': row.extraction_status == 'CONFIRMED', 'eligibility': eligibility}
+            if self.cost_rates.get(qid): q['cost_rates'] = deepcopy(self.cost_rates[qid])
+            q.update(self.pack_multiple(row, qid))
+            if tiers:
+                q.update(price_tiers=tiers, pricing_method='ALL_UNITS', tier_method_ref=tier_method_ref)
+            quote_data.append(q)
+            bindings[qid] = {'kind': 'CURRENT', 'supplier_id': row.supplier_id, 'quote_id': qid, 'version': row.version_no}
+            if row.supplier_id == incumbent_id:
+                if tiers:
+
+                    basis_quantity = calculation_number(team_bridge_team_data_number(case.get('quantity'), 'quantity'))
+                    if q['moq'] is None or q['available_quantity'] is None:
+                        raise MissingReviewData(self.missing, issues=self.issues)
+                    if not comparison_only and not calculation_number(q['moq']) <= basis_quantity <= calculation_number(q['available_quantity']):
+                        raise OutputValidationError('KEEP_QUANTITY_NOT_FEASIBLE')
+                    price = calculation_text(quantity_price(q, basis_quantity)[0])
+                previous = [m['fields']['previous_unit_price'] for m in row.mail_normalized.values() if 'previous_unit_price' in m.get('fields', {})]
+                if len(previous) != 1:
+                    self.issue('NEEDS_EVIDENCE' if not previous else 'RECHECK_SOURCE', 'previous_unit_price')
+                else:
+                    self.extraction_source('previous_unit_price', lambda: team_bridge_team_data_verify_number_source('previous_unit_price', previous[0]))
+                    before_ref = self.extraction_source('previous_unit_price', lambda: self.source(previous[0], row.supplier_id, 'previous_unit_price'))
+                    notice = {'quote_version_id': qid, 'previous_unit_price': previous[0]['value'], 'requested_unit_price': price, 'before_source_ref': before_ref, 'requested_source_ref': source_ref, 'effective_date': effective, 'supplier_id': incumbent_id}
+        if notice is None and (not self.issues):
+            self.missing.append('incumbent.previous_and_requested_price_basis')
+        blocking = [i for i in self.issues if not (allow_missing_costs and i['action'] == 'NEEDS_EVIDENCE' and (i['field'] == 'cost_terms'))]
+        if self.missing or blocking:
+            raise MissingReviewData(self.missing, issues=self.issues)
+        quantity = team_bridge_team_data_number(case.get('quantity'), 'quantity')
+        if decimal_value(team_bridge_team_data_number(fixed['quantity'], 'fixed_commitment.quantity'), 'fixed_commitment.quantity') != 0:
+            raise OutputValidationError('TEAM_FIXED_ALLOCATION_UNREPRESENTABLE')
+        data = {'data_kind': 'LIVE', 'request_id': scope.case_id, 'revision': scope.revision, 'as_of': as_of, 'period': period, 'item': item, 'unit': unit_name(self.need(case.get('unit'), 'unit')), 'currency': quote_data[0]['currency'], 'terms': terms, 'incumbent': {'supplier_id': incumbent_id, 'old_unit_price': notice['previous_unit_price'], 'requested_unit_price': notice['requested_unit_price'], 'effective_date': notice['effective_date'], 'source_ref': notice['requested_source_ref'], 'verified': True}, 'fixed_commitment': fixed, 'changeable_quantity': quantity, 'repricing_scope': repricing, 'quotes': quote_data, 'policy': policy}
+        for q in quote_data:
+            for name in ('unit_price', 'moq', 'available_quantity'):
+                if name == 'unit_price' and q.get('price_tiers'):
+                    continue
+                q[name] = team_bridge_team_data_number(q[name], q['quote_id'] + '.' + name)
+            q['costs'] = {k: None if v is None and (allow_missing_costs or (k == 'switching' and q['supplier_id'] == incumbent_id)) else team_bridge_team_data_number(v, q['quote_id'] + '.costs.' + k) for k, v in q['costs'].items()}
+        return {'revision': scope.revision, 'data': data, 'quote_bindings': bindings, 'notice_quote_ids': [notice['quote_version_id']], 'notice_basis': notice, 'evidence': self.evidence, 'team_source_digest': calculation_digest({'records': review_record_digest(case, self.rows), 'facts': self.facts})}
+
+
+# Shared review implementation: team_bridge.team_calculations
+"""Cross-check exact engine totals with the team's Decimal calculation registry.
+
+Use the team evaluator's per-component cent rounding.
+Independent source/quantity/tier checks remain separate from this evaluator.
+"""
+
+
+def evaluate_cost_lines(lines, supplier_costs):
+    """Common component rounding. Missing applicable costs are never zero-filled."""
+    registry, goods, transport, other = {}, [], [], []
+    for i, line in enumerate(lines):
+        price, qty = 'price_' + str(i), 'quantity_' + str(i)
+        registry[price] = decimal_value(line['unit_price'], price)
+        registry[qty] = decimal_value(line['quantity'], qty)
+        goods.append((price, qty))
+    for i, supplier in enumerate(supplier_costs):
+        for name, value in supplier['costs'].items():
+            if value is None: raise OutputValidationError('UNCONFIRMED_COST')
+            key = name + '_' + str(i)
+            registry[key] = decimal_value(value, key)
+            (transport if name == 'transport' else other).append(key)
+    expected = {'BEFORE': {'goods': goods, 'transport_keys': transport,
+                           'other_logistics_keys': other, 'cost_confirmed': True}}
+    proposal = CalculationProposal(options=[{'option_id': 'BEFORE',
+        'goods': [{'value_key': p, 'quantity_key': q} for p, q in goods],
+        'transport_keys': transport, 'other_logistics_keys': other}])
+    with localcontext() as ctx:
+        ctx.prec = 80
+        return evaluate(proposal, registry, expected)['BEFORE']
+
+
+def verify_common_total(row):
+    try:
+        result = evaluate_cost_lines(row['lines'], row['supplier_costs'])
+        if result['total_cost'] != Decimal(row['total_cost']):
+            raise OutputValidationError('TEAM_CALCULATION_MISMATCH')
+        if 'goods_amount' in row and result['goods_amount'] != Decimal(row['goods_amount']):
+            raise OutputValidationError('TEAM_CALCULATION_MISMATCH')
+        return result['total_cost']
+    except ReviewRequired as exc:
+        raise OutputValidationError('TEAM_NUMERIC_VALIDATION_FAILED') from exc
+
+
+# Shared review implementation: team_bridge.service
+"""Business guards and lossless subset mapping to the unmodified team models."""
+
+
+def model_payload(value):
+    return value.model_dump(mode='json') if hasattr(value, 'model_dump') else deepcopy(value)
+
+def internal_review_fields(fields):
+    return [f for f in fields if f in ('policy', 'create_mail_draft', 'check_comparability', 'fixed_commitment', 'repricing_scope', 'as_of') or f.startswith(('policy.', 'review_facts.', 'ValidationStore', 'PlanStore', 'CounterOfferStore', 'PriorityStore', 'CaseStore', 'QuoteStore', 'RunContext', 'ReviewRepository', 'create_mail_draft.', 'check_comparability.'))]
+
+class ReviewCalculator:
+
+    def __init__(self, repository, draft_model):
+        self.repo = repository
+        self.draft_model = draft_model
+        self.trace = []
+
+    def context(self, scope):
+        snapshot = self.repo.snapshot(scope)
+        data = snapshot['data']
+        if data.get('revision') != scope.revision:
+            raise OutputValidationError('INPUT_REVISION_MISMATCH')
+        try:
+            validate_purchase_inputs(data)
+        except CalculationError as exc:
+            raise OutputValidationError('INPUT_' + exc.issue['code'] + ':' + exc.issue['field_name']) from exc
+        refs = {data['incumbent']['source_ref'], data['fixed_commitment']['source_ref'], data['policy']['source_ref']}
+        refs.update((q['source_ref'] for q in data['quotes']))
+        refs.update((q['cost_source_ref'] for q in data['quotes']))
+        refs.update((t['source_ref'] for q in data['quotes'] for t in q.get('price_tiers', [])))
+        refs.update((q['tier_method_ref'] for q in data['quotes'] if q.get('price_tiers')))
+        refs.update((q['pack_multiple_source_ref'] for q in data['quotes'] if 'pack_multiple' in q))
+        if not refs <= set(snapshot['evidence']):
+            raise OutputValidationError('SOURCE_EVIDENCE_MISSING')
+        for q in data['quotes']:
+            matches = [key for key, v in snapshot['quote_bindings'].items() if v == {'supplier_id': q['supplier_id'], 'quote_id': q['quote_id'], 'version': q['version'], 'kind': 'CURRENT'}]
+            if len(matches) != 1:
+                raise OutputValidationError('QUOTE_BINDING_MISMATCH')
+        if sum((v.get('kind') == 'CURRENT' for v in snapshot['quote_bindings'].values())) != len(data['quotes']):
+            raise OutputValidationError('QUOTE_BINDING_MISMATCH')
+        notice = snapshot.get('notice_quote_ids', [])
+        if 'notice_basis' in snapshot:
+            basis = snapshot['notice_basis']
+            requested = snapshot['quote_bindings'].get(basis['quote_version_id'], {})
+            if notice != [basis['quote_version_id']] or requested.get('kind') != 'CURRENT' or requested.get('supplier_id') != data['incumbent']['supplier_id'] or (basis['previous_unit_price'] != data['incumbent']['old_unit_price']) or (basis['requested_unit_price'] != data['incumbent']['requested_unit_price']) or (not {basis['before_source_ref'], basis['requested_source_ref']} <= set(snapshot['evidence'])):
+                raise OutputValidationError('NOTICE_BASIS_MISMATCH')
+        else:
+            if len(notice) != 2 or len(set(notice)) != 2:
+                raise OutputValidationError('NOTICE_BASIS_MISSING')
+            before, requested = (snapshot['quote_bindings'].get(key, {}) for key in notice)
+            if before.get('kind') != 'BEFORE' or requested.get('kind') != 'CURRENT' or before.get('supplier_id') != data['incumbent']['supplier_id'] or (requested.get('supplier_id') != data['incumbent']['supplier_id']) or (before.get('unit_price') != data['incumbent']['old_unit_price']):
+                raise OutputValidationError('NOTICE_BASIS_MISMATCH')
+        if calculation_number(data['fixed_commitment']['quantity']) != 0:
+            raise OutputValidationError('TEAM_FIXED_ALLOCATION_UNREPRESENTABLE')
+        bundle = compute_plan_set(data)
+        if bundle['outcome'] != 'SUCCESS':
+            raise OutputValidationError('PLAN_INPUT_NOT_READY')
+        if any((p['status'] == 'NEEDS_INFO' for p in bundle['plans'])):
+            raise OutputValidationError('TEAM_PARTIAL_SCOPE_UNREPRESENTABLE')
+        valid = [p for p in bundle['plans'] if p['status'] == 'VALID']
+        for row in valid:
+            try:
+                verify_independent_plan_cost(data, row)
+            except CalculationError as exc:
+                raise OutputValidationError(exc.issue['code']) from exc
+            verify_common_total(row)
+        if not any((p['type'] == 'KEEP' for p in valid)):
+            raise OutputValidationError('KEEP_NOT_VERIFIED')
+        return (snapshot, data, bundle, valid)
+
+    def _plan(self, snapshot, data, row):
+        ids = {(v['quote_id'], v['version']): key for key, v in snapshot['quote_bindings'].items() if v['kind'] == 'CURRENT'}
+        return Plan(plan_type=row['type'], allocations=[{'supplier_id': a['supplier_id'], 'quote_version_id': ids[a['quote_id'], a['quote_version']], 'quantity': a['quantity']} for a in row['allocations']], total_amount=row['total_cost'], conditions=['TEMP_CONTRACT: fixed=0; quantity=TOTAL=CHANGEABLE', 'REPRICING_SCOPE:' + (data['repricing_scope'] or 'NOT_APPLICABLE_NO_SPLIT'), 'TAX_BASIS:' + data['terms']['tax_basis'], 'PERIOD:' + data['period']['from'] + '/' + data['period']['to'], 'SCOPE: provided verified quotes and declared allocation grid only'] + (['PRICE_TIERS: all-units at each supplier allocation; off-grid boundaries not searched; no global optimum claim'] if any((q.get('price_tiers') for q in data['quotes'])) else []))
+
+    def build_candidates(self, scope):
+        snapshot, data, bundle, valid = self.context(scope)
+        return {'plans': [model_payload(self._plan(snapshot, data, row)) for row in valid], 'excluded_plans': [p for p in bundle['plans'] if p['status'] != 'VALID'], 'business_validated': False, 'send_authorized': False, **({'tier_search': bundle['tier_search']} if 'tier_search' in bundle else {})}
+
+    def _check_plans(self, scope, plans, require_refs):
+        """Compare calculations and references without creating validation records."""
+        snapshot, data, bundle, valid = self.context(scope)
+        if not plans:
+            raise OutputValidationError('EMPTY_PLANS')
+        try:
+            parsed = [Plan.model_validate(model_payload(p)) for p in plans]
+        except ValidationError as exc:
+            raise OutputValidationError('PLAN_SCHEMA_INVALID') from exc
+        expected = [model_payload(self._plan(snapshot, data, row)) for row in valid]
+        rows = {calculation_digest(plan): row for plan, row in zip(expected, valid)}
+        actual = []
+        for p in parsed:
+            content = model_payload(p)
+            ref = content.pop('calculation_ref')
+            content['calculation_ref'] = None
+            if ref:
+                record = self.repo.resolve(scope, 'PLAN_CALCULATION', ref)
+                if record['status'] != 'PASS' or record['plan'] != content or record.get('row') != rows.get(calculation_digest(content)):
+                    raise OutputValidationError('PLAN_REFERENCE_MISMATCH')
+                stored = self.repo.resolve(scope, 'PLAN_SET', record['bundle_ref'])
+                if stored.get('status') != 'PASS':
+                    raise OutputValidationError('PLAN_REFERENCE_MISMATCH')
+                verify_plan_bundle(data, stored['bundle'])
+            elif require_refs:
+                raise OutputValidationError('PLAN_VALIDATION_REFERENCE_REQUIRED')
+            actual.append(content)
+        if sorted(map(calculation_digest, actual)) != sorted(map(calculation_digest, expected)):
+            raise OutputValidationError('PLAN_ALLOCATION_TOTAL_OR_SET_MISMATCH')
+        return (parsed, expected, bundle, valid)
+
+    def check_plans(self, scope, plans):
+        """Read-only final verification; preserve the supplied calculation refs."""
+        checked, _, _, _ = self._check_plans(scope, plans, require_refs=True)
+        return checked
+
+    def validate_plans(self, scope, plans, require_refs=False):
+        """Explicit tool path that creates validation records after checking."""
+        _, expected, bundle, valid = self._check_plans(scope, plans, require_refs)
+        bundle_ref = self.repo.put_if_current(scope, 'PLAN_SET', {'status': 'PASS', 'bundle': bundle})
+        checked = []
+        for p, row in zip(expected, valid):
+            ref = self.repo.put_if_current(scope, 'PLAN_CALCULATION', {'status': 'PASS', 'plan': p, 'row': row, 'bundle_ref': bundle_ref})
+            checked.append(Plan.model_validate({**p, 'calculation_ref': ref}))
+        return (checked, bundle_ref, bundle)
+
+    def calculate(self, scope, plans):
+        checked, bundle_ref, bundle = self.validate_plans(scope, plans, require_refs=True)
+        snapshot = self.repo.snapshot(scope)
+        data = snapshot['data']
+        result = compute_counter_offer(data, bundle)
+        if result['decision'] == 'NO_COUNTER_NEEDED':
+            raise OutputValidationError('UNAGREED_NO_COUNTER_ROUTE')
+        if result['decision'] != 'READY':
+            raise OutputValidationError('COUNTER_OFFER_' + result['decision'])
+        validation = check_counter_offer_calculation(data, bundle, result)
+        if not validation['valid']:
+            raise OutputValidationError('INDEPENDENT_PRICE_VALIDATION_FAILED')
+        policy_ref = self.repo.put_if_current(scope, 'POLICY', {'policy': data['policy']})
+        target = CounterOfferTarget(supplier_id=data['incumbent']['supplier_id'], target_unit_price=result['offer']['target_unit_price'], conditions=['REPRICING_SCOPE:' + (data['repricing_scope'] or 'NOT_APPLICABLE_NO_SPLIT'), 'TAX_BASIS:' + data['terms']['tax_basis'], 'PERIOD:' + data['period']['from'] + '/' + data['period']['to'], 'SCOPE: all plans in alternative_plan_ref repriced; not market optimum'], basis_quote_version_ids=snapshot['notice_quote_ids'], alternative_plan_ref=bundle_ref, policy_ref=policy_ref)
+        ref = self.repo.put_if_current(scope, 'OFFER_CALCULATION', {'status': 'CALCULATED', 'result': result, 'target': model_payload(target), 'bundle_ref': bundle_ref})
+        return {'decision': 'READY', 'target': model_payload(target), 'calculation_ref': ref, 'send_authorized': False}
+
+    def _verify_target(self, scope, target, calculation_ref):
+        """Read-only business revalidation, independent of storage ID generation."""
+        try:
+            target = CounterOfferTarget.model_validate(model_payload(target))
+        except ValidationError as exc:
+            raise OutputValidationError('TARGET_SCHEMA_INVALID') from exc
+        record = self.repo.resolve(scope, 'OFFER_CALCULATION', calculation_ref)
+        if record.get('status') != 'CALCULATED' or model_payload(target) != record['target']:
+            raise OutputValidationError('TARGET_CALCULATION_MISMATCH')
+        if not target.policy_ref or not target.alternative_plan_ref:
+            raise OutputValidationError('TARGET_REFERENCES_REQUIRED')
+        snapshot = self.repo.snapshot(scope)
+        data = snapshot['data']
+        policy = self.repo.resolve(scope, 'POLICY', target.policy_ref)
+        if policy['policy'] != data['policy']:
+            raise OutputValidationError('POLICY_REFERENCE_MISMATCH')
+        stored = self.repo.resolve(scope, 'PLAN_SET', target.alternative_plan_ref)
+        if stored.get('status') != 'PASS':
+            raise OutputValidationError('ALTERNATIVE_REFERENCE_MISMATCH')
+        bundle = stored['bundle']
+        if target.alternative_plan_ref != record['bundle_ref']:
+            raise OutputValidationError('ALTERNATIVE_REFERENCE_MISMATCH')
+        checked = check_counter_offer_calculation(data, bundle, record['result'])
+        if not checked['valid']:
+            raise OutputValidationError('INDEPENDENT_PRICE_VALIDATION_FAILED')
+        if record['result']['decision'] != 'READY' or target.target_unit_price != record['result']['offer']['target_unit_price'] or target.supplier_id != data['incumbent']['supplier_id'] or (target.basis_quote_version_ids != snapshot['notice_quote_ids']) or (target.conditions != ['REPRICING_SCOPE:' + (data['repricing_scope'] or 'NOT_APPLICABLE_NO_SPLIT'), 'TAX_BASIS:' + data['terms']['tax_basis'], 'PERIOD:' + data['period']['from'] + '/' + data['period']['to'], 'SCOPE: all plans in alternative_plan_ref repriced; not market optimum']):
+            raise OutputValidationError('TARGET_CALCULATION_MISMATCH')
+        for row in record['result']['comparison']['plans_at_proposed_price']:
+            verify_common_total(row)
+        self.repo.snapshot(scope)
+        return (target, checked)
+
+    def validate_target(self, scope, target, calculation_ref):
+        """Explicit validation creation; only this path writes PRICE_VALIDATION."""
+        target, checked = self._verify_target(scope, target, calculation_ref)
+        ref = self.repo.put_if_current(scope, 'PRICE_VALIDATION', {'status': 'PASS', 'target': model_payload(target), 'calculation_ref': calculation_ref, 'validation': checked})
+        return target.model_copy(update={'validation_ref': ref})
+
+    def checked_target(self, scope, target):
+        if target is None:
+            raise OutputValidationError('TARGET_REQUIRED')
+        target = CounterOfferTarget.model_validate(model_payload(target))
+        if not target.validation_ref:
+            raise OutputValidationError('PRICE_VALIDATION_REFERENCE_REQUIRED')
+        check = self.repo.resolve(scope, 'PRICE_VALIDATION', target.validation_ref)
+        base = model_payload(target)
+        base['validation_ref'] = None
+        if check['status'] != 'PASS' or check['target'] != base:
+            raise OutputValidationError('VALIDATION_TARGET_MISMATCH')
+        _, verified = self._verify_target(scope, base, check['calculation_ref'])
+        if check.get('validation') != verified:
+            raise OutputValidationError('VALIDATION_RESULT_MISMATCH')
+        return target
+
+    def create_draft(self, scope, target):
+        raise MissingReviewData(['create_mail_draft'])
+
+    def check_output(self, scope, role, output, *, for_save=False):
+
+        return agent_validation.check_calculator_output(self, scope, role, output, for_save=for_save)
+
+    def save_result(self, scope, role, output):
+        raise OutputValidationError('FINAL_RESULT_WRITER_IS_RUNNER')
+
+
+# Shared review implementation: team_bridge.priority
+"""③ and the shared ③④⑤ comparison boundary. No model, DB or mail client.
+
+Only the explicit team-record subset below is interpreted. Unsupported company
+condition structures fail closed; preference scores never cancel requirements.
+"""
+
+
+team_bridge_priority_LABELS = {**team_bridge_team_data_NUMERIC_SOURCE_LABELS, 'item_name': ('item_name', '품목'), 'specification': ('specification', '규격'), 'origin': ('origin', '원산지'), 'certifications': ('certifications', '인증'), 'tax_terms': ('tax_terms', '세금', '부가세'), 'unit': ('unit', '단위'), 'currency': ('currency', '통화'), 'valid_until': ('valid_until', '유효기간'), 'delivery_date': ('delivery_date', '납품일'), 'effective_from': ('effective_from', '적용일'), 'SHIPPING': ('SHIPPING', '운송비', '배송비'), 'HANDLING': ('HANDLING', '하차비', '기타물류비')}
+
+def team_bridge_priority_source_has_answer(mapper, row, field):
+    """Detect an answer requiring extraction; never extract a new usable value.
+
+    Read only the source mails bound to this current quote, including attachment
+    parts. Older unrelated supplier mail and price_history are never consulted.
+    """
+    labels = team_bridge_priority_LABELS.get(field, (field,))
+    pattern = re.compile('(?:^|[\\s;|])(?:' + '|'.join(map(re.escape, labels)) +
+                         ')(?:\\s*[:：]\\s*|\\s*(?:은|는|이|가)\\s*|\\s+)([^;|]+)')
+    for mid in {row.source_mail_id, *row.mail_normalized}:
+        mail = mapper.mails.get(mid)
+        if mail is None or mail.get('supplier_id') != row.supplier_id:
+            raise OutputValidationError('CASE_SCOPE_EVIDENCE_MISMATCH')
+        parts = [('body', None)] + [(a['attachment_ref'], p) for a in mail.get('attachments', []) for p in range(1, a['pages'] + 1)]
+        for part, page in parts:
+            found = mapper.store.read_mail_part(mapper.scope.case_id, mid, part, page)
+            if found is None:
+                continue
+            for line in found['text'].splitlines():
+                match = pattern.search(line)
+                if match and (not re.search('미정|추후|미확인|미제공|없음|확인\\s*중|TBD|unknown|null|not\\s+(?:provided|known)', match[1], re.I)):
+                    return True
+    return False
+
+def team_bridge_priority_mandatory_checks(mapper, qid, row):
+    """Supported subset: a map of extracted text field -> required exact value(s).
+
+    This is a conservative adapter profile, not a new schema for company policy.
+    Empty {} means the case explicitly has no extra requirements; None is unknown.
+    """
+    required = mapper.case.get('mandatory_conditions')
+    if not isinstance(required, dict):
+        raise MissingReviewData(['mandatory_conditions'])
+    result = []
+    for field, wanted in required.items():
+        if field not in ('item_name', 'specification', 'origin', 'certifications'):
+            raise MissingReviewData(['mandatory_conditions.contract'])
+        values = wanted if isinstance(wanted, list) else [wanted]
+        if not values or any((not isinstance(v, str) or not v.strip() for v in values)):
+            raise MissingReviewData(['mandatory_conditions.contract'])
+        check = row.checks_jsonb.get(field, {})
+        actual = mapper.field(qid, row, field, check.get('value'))
+        if actual is not None and check.get('state') != 'STATED':
+            mapper.issue('RECHECK_SOURCE', field)
+        tokens = set(re.split('[,;/]\\s*', actual)) if isinstance(actual, str) and field == 'certifications' else {actual}
+        state = 'UNKNOWN' if actual is None else 'PASS' if all((v in tokens for v in values)) else 'FAIL'
+        result.append({'condition': field, 'required': True, 'state': state, 'evidence_refs': [row.evidence_jsonb[field]['mail_id']] if field in row.evidence_jsonb else []})
+    return result
+
+def team_bridge_priority_result(issues, quotes, *, source_digest=None):
+    unique = {calculation_digest(i): i for i in issues}
+    issues = list(unique.values())
+    action = next((a for a in ('HOLD', 'RECHECK_SOURCE', 'NEEDS_EVIDENCE') if any((i['action'] == a for i in issues))), 'PASS')
+    questions = {}
+    for issue in issues:
+        if issue['action'] != 'NEEDS_EVIDENCE' or not issue.get('supplier_id'):
+            continue
+        key = (issue['supplier_id'], issue['field'])
+        questions[key] = Question(supplier_id=key[0], field=key[1], priority='MUST_CONFIRM', reason='현재 견적의 비교 필수 근거가 없어 확인이 필요합니다.', evidence_refs=[issue['quote_version_id']]).model_dump(mode='json')
+    grouped = {}
+    for key in sorted(questions):
+        grouped.setdefault(key[0], []).append(questions[key])
+    return {'status': action, 'next_action': action, 'unknown_fields': sorted({i['field'] for i in issues if i['action'] == action}), 'blocking_issues': issues, 'quotes': quotes, 'questions': [q for qs in grouped.values() for q in qs], 'question_groups': [{'supplier_id': sid, 'questions': qs} for sid, qs in grouped.items()], 'comparison_scope': 'current versions; explicit quantity/period; mandatory conditions before preferences', 'source_digest': source_digest, 'send_authorized': False}
+
+def team_bridge_priority_inspect_team(repository, scope, *, comparison_only=False):
+    """One shared source/condition inspection, retaining supplier-specific gaps."""
+    case, mails, rows = repository._scope_records(scope)
+    source_digest = review_record_digest(case, rows)
+    mapper = _QuoteMapper(repository.cases, scope, case, mails, rows, repository.supplements)
+    issues, quotes = ([], [])
+    if not case.get('policy'):
+        issues.append({'action': 'HOLD', 'field': 'policy'})
+    for qid, row in sorted(rows.items()):
+        mapper.current_qid, mapper.current_supplier = (qid, row.supplier_id)
+        start = len(mapper.issues)
+        values = {}
+
+        def attempt(name, operation):
+            try:
+                return operation()
+            except MissingReviewData as exc:
+                for issue in exc.issues:
+                    issues.append({**issue, 'quote_version_id': qid, 'supplier_id': row.supplier_id})
+                return None
+            except ReviewRequired:
+                mapper.issue('RECHECK_SOURCE', name)
+                return None
+            except OutputValidationError as exc:
+                if exc.code.startswith(('CASE_SCOPE', 'STALE', 'REFERENCE_SCOPE', 'REFERENCE_SOURCE_SUPPLEMENT')):
+                    raise
+                issues.append({'action': 'HOLD', 'field': exc.code, 'quote_version_id': qid, 'supplier_id': row.supplier_id})
+                return None
+        for field in ('item_name', 'specification', 'tax_terms', 'delivery_date'):
+            check = row.checks_jsonb.get(field, {})
+            values[field] = attempt(field, lambda f=field, c=check: mapper.field(qid, row, f, c.get('value')))
+            if check.get('value') is not None and check.get('state') != 'STATED':
+                mapper.issue('RECHECK_SOURCE', field)
+        for field, value in [('unit', row.unit), ('currency', row.pricing_terms_jsonb.get('currency')), ('available_quantity', row.available_quantity), ('moq', row.pricing_terms_jsonb.get('moq')), ('valid_until', row.valid_until)]:
+            values[field] = attempt(field, lambda f=field, v=value: mapper.field(qid, row, f, v))
+        if row.pricing_terms_jsonb.get('price_tiers'):
+            values['price_tiers'] = attempt('price_tiers', lambda: mapper.price_tiers(qid, row))
+            if row.unit_price is not None:
+                mapper.issue('RECHECK_SOURCE', 'price_tiers')
+        else:
+            values['unit_price'] = attempt('unit_price', lambda: mapper.field(qid, row, 'unit_price', row.unit_price))
+        for kind in ('SHIPPING', 'HANDLING'):
+            found = attempt('cost_terms', lambda k=kind: mapper.extraction_source('cost_terms', lambda: mapper.period_cost(qid, row, k)))
+            values[kind] = found[0] if found else None
+        conditions = attempt('certifications', lambda: team_bridge_priority_mandatory_checks(mapper, qid, row))
+        if conditions and any((c['state'] == 'FAIL' for c in conditions)):
+            issues.append({'action': 'HOLD', 'field': 'mandatory_conditions', 'supplier_id': row.supplier_id, 'quote_version_id': qid, 'reason': 'REQUIRED_CONDITION_FAILED'})
+        if values.get('unit') is not None and unit_name(values['unit']) != unit_name(case.get('unit')):
+            issues.append({'action': 'HOLD', 'field': 'unit', 'reason': 'UNIT_CONVERSION_REQUIRED'})
+        issues.extend(mapper.issues[start:])
+        quotes.append({'quote_version_id': qid, 'supplier_id': row.supplier_id, 'confirmed': values, 'mandatory_checks': conditions or [], 'preference_score': None})
+    try:
+        mapper.build(comparison_only=comparison_only)
+        if not issues:
+
+            ReviewCalculator(repository, None).context(scope)
+    except MissingReviewData as exc:
+        issues.extend(exc.issues)
+    except (CalculationError, ReviewRequired) as exc:
+        issues.append({'action': 'HOLD', 'field': getattr(exc, 'code', 'COMPARISON_INPUT_NOT_READY')})
+    except OutputValidationError as exc:
+        if exc.code.startswith(('CASE_SCOPE', 'STALE', 'REFERENCE_SCOPE', 'REFERENCE_SOURCE_SUPPLEMENT')):
+            raise
+        issues.append({'action': 'HOLD', 'field': exc.code})
+    repository.check_scope(scope)
+    current = repository._scope_records(scope)
+    if source_digest != review_record_digest(current[0], current[2]):
+        raise OutputValidationError('REFERENCE_SOURCE_CHANGED')
+    return (team_bridge_priority_result(issues, quotes, source_digest=source_digest), mapper)
+
+LOW_VALUE_PLAN_CONTRACT_REQUIRED = 'LOW_VALUE_UNCONFIRMED_COST_PLAN_CONTRACT_REQUIRED'
+
+
+def inquiry_question_groups(questions):
+    """Assessment records include LOW_VALUE; supplier inquiries never do."""
+    groups = {}
+    for question in questions:
+        if question['priority'] in ('MUST_CONFIRM', 'CAN_CHANGE_CHOICE'):
+            groups.setdefault(question['supplier_id'], []).append(question)
+    return [{'supplier_id': sid, 'questions': qs} for sid, qs in groups.items()]
+
+
+def inspect_comparability(repository, scope):
+    if hasattr(repository, '_scope_records'):
+        report = team_bridge_priority_inspect_team(repository, scope)[0]
+        for question in report['questions']:
+            if question['field'] != 'cost_terms': continue
+            result = cost_question_calculation(repository, scope, question['evidence_refs'][0])
+            if result['status'] == 'CALCULATED':
+                question['priority'] = result['choice_priority']
+                question['reason'] = '조건부 계산 영향 분류; 실제 초안 전 저장된 계산 근거와 연결해야 합니다.'
+            else:
+                question['reason'] = '계산 근거 부족으로 비용 조건 확인 필요; LOW_VALUE로 분류하지 않습니다.'
+        report['question_groups'] = inquiry_question_groups(report['questions'])
+        return report
+
+    ReviewCalculator(repository, None).context(scope)
+    return team_bridge_priority_result([], [])
+
+
+def cost_question_calculation(repository, scope, question_quote_version_id):
+    rows = repository._scope_records(scope)[2]
+    incumbents = [qid for qid,row in rows.items() if any('previous_unit_price' in m.get('fields', {}) for m in row.mail_normalized.values())]
+    alternatives = [qid for qid in rows if qid not in incumbents]
+    if len(incumbents) != 1 or not alternatives or question_quote_version_id == incumbents[0] and len(alternatives) != 1:
+        return {'status':'NOT_CALCULABLE','missing_inputs':['explicit_comparison_alternative']}
+    alternative = alternatives[0] if question_quote_version_id == incumbents[0] else question_quote_version_id
+    return compute_break_even(repository, scope, alternative, question_quote_version_id)
+
+def priority_readiness(report, *, draft_available):
+    result = deepcopy(report)
+    if report['status'] == 'PASS':
+        result['next_action'] = 'BUILD_PLANS'
+    elif report['status'] == 'NEEDS_EVIDENCE':
+        if report['questions'] and not report['question_groups']:
+            result.update(next_action='HOLD', draft_required=False,
+                          unknown_fields=[LOW_VALUE_PLAN_CONTRACT_REQUIRED],
+                          missing_dependencies=[LOW_VALUE_PLAN_CONTRACT_REQUIRED],
+                          reason='LOW_VALUE 평가 근거는 보존합니다. 현재 ④는 미확인 비용을 유지한 조건부 구매안을 지원하지 않아 내부 계약 보완이 필요합니다. 거래처 문의 대상은 없습니다.')
+            return result
+        result['next_action'] = 'REQUEST_CLARIFICATION' if draft_available and report['question_groups'] else 'HOLD'
+        result['missing_dependencies'] = [] if draft_available else ['create_mail_draft']
+        result['draft_required'] = True
+    return result
+
+def team_bridge_priority_components(price, quantity, shipping, handling, switching):
+    registry = {'price': price, 'quantity': quantity}
+    transport, other = ([], [])
+    for key, value, keys in [('shipping', shipping, transport), ('handling', handling, other), ('switching', switching, other)]:
+        if value is not None:
+            registry[key] = value
+            keys.append(key)
+    expected = {'BEFORE': {'goods': [('price', 'quantity')], 'transport_keys': transport, 'other_logistics_keys': other, 'cost_confirmed': all((v is not None for v in (shipping, handling, switching)))}}
+    proposal = CalculationProposal(options=[{'option_id': 'BEFORE', 'goods': [{'value_key': 'price', 'quantity_key': 'quantity'}], 'transport_keys': transport, 'other_logistics_keys': other}])
+    return evaluate(proposal, registry, expected)['BEFORE']
+
+def compute_break_even(repository, scope, alternative_quote_version_id, question_quote_version_id=None):
+    """Read-only conditional comparison, with unknown charges on either or both sides."""
+    if alternative_quote_version_id not in scope.quote_ids:
+        raise OutputValidationError('TOOL_SCOPE_QUOTE_MISMATCH')
+    if not hasattr(repository, '_scope_records'):
+        raise MissingReviewData(['PriorityStore.team_inputs'])
+    report, mapper = team_bridge_priority_inspect_team(repository, scope, comparison_only=True)
+    unavailable = {'status': 'NOT_CALCULABLE', 'break_even_amount': None, 'calculation_ref': None, 'missing_inputs': report['unknown_fields'], 'blocking_issues': report['blocking_issues'], 'send_authorized': False}
+    if any((i['action'] != 'NEEDS_EVIDENCE' or i['field'] != 'cost_terms' for i in report['blocking_issues'])):
+        return unavailable
+    rows = mapper.rows
+    incumbents = [qid for qid, row in rows.items() if any(('previous_unit_price' in m.get('fields', {}) for m in row.mail_normalized.values()))]
+    if len(incumbents) != 1 or incumbents[0] == alternative_quote_version_id:
+        return {**unavailable, 'missing_inputs': ['unique_current_incumbent_and_alternative']}
+    selected = {q['quote_version_id']: q['confirmed'] for q in report['quotes']}
+    try:
+
+        partial = mapper.build(allow_missing_costs=True, comparison_only=True)
+        quantity = decimal_value(mapper.case.get('quantity'), 'quantity')
+        if quantity <= 0:
+            raise MissingReviewData(['quantity'])
+        warnings = []
+        for qid in (incumbents[0], alternative_quote_version_id):
+            quote = verify_comparison_quote(partial['data'], qid, str(quantity), allow_unknown_costs=True)
+            warnings.extend(allocation_warnings(quote, calculation_number(str(quantity))))
+            values, row = (selected[qid], rows[qid])
+            pack = mapper.pack_multiple(row, qid)
+            if pack and quantity % decimal_value(pack['pack_multiple'], 'pack_multiple'):
+                raise MissingReviewData(['pack_multiple'])
+            if values.get('price_tiers'):
+                values['unit_price'] = calculation_text(quantity_price({'price_tiers': values['price_tiers'][0]}, calculation_number(str(quantity)))[0])
+        left, right = (selected[incumbents[0]], selected[alternative_quote_version_id])
+        if left['unit'] != right['unit'] or left['currency'] != right['currency'] or left['currency'] != 'KRW':
+            raise MissingReviewData(['unit_or_currency'])
+        if left['tax_terms'] != right['tax_terms']:
+            raise MissingReviewData(['tax_terms'])
+        period = mapper.fact('period')
+        terms = mapper.fact('terms')
+        for qid in (incumbents[0], alternative_quote_version_id):
+            qt = mapper.fact(qid + '.terms')
+            if not period or not terms or (not qt) or any((qt.get(k) != terms.get(k) for k in ('delivery_location', 'delivery_terms', 'payment_terms'))):
+                raise MissingReviewData(['comparison_period_or_terms'])
+            if not selected[qid]['delivery_date'] == period['from'] == period['to']:
+                raise MissingReviewData(['comparison_supply_period'])
+        switch = mapper.fact(alternative_quote_version_id + '.switching_cost')
+        if switch is None:
+            raise MissingReviewData(['switching_cost'])
+        unknown = [(qid, kind) for qid in (incumbents[0], alternative_quote_version_id)
+                   for kind in ('SHIPPING', 'HANDLING') if selected[qid][kind] is None]
+        if not unknown or len(unknown) > 2 or len({qid for qid, _ in unknown}) != len(unknown):
+            raise MissingReviewData(['at_most_one_unknown_component_per_side'])
+        question_qid = question_quote_version_id or (unknown[0][0] if len(unknown) == 1 else alternative_quote_version_id)
+        if question_qid not in {qid for qid, _ in unknown}:
+            raise OutputValidationError('TOOL_SCOPE_QUESTION_MISMATCH')
+        field = next(kind for qid, kind in unknown if qid == question_qid)
+        with localcontext() as ctx:
+            ctx.prec = 80
+            dec = lambda value: decimal_value(value, 'cost') if value is not None else None
+            baseline = team_bridge_priority_components(dec(left['unit_price']), quantity, dec(left['SHIPPING']), dec(left['HANDLING']), Decimal(0))
+            alternative = team_bridge_priority_components(dec(right['unit_price']), quantity, dec(right['SHIPPING']), dec(right['HANDLING']), dec(switch))
+            terms = [{'quote_version_id':qid, 'component':kind,
+                      'variable':('A_' if qid == incumbents[0] else 'B_') + kind} for qid, kind in unknown]
+            amount = limit = lower = upper = None
+            offset = Decimal(0)
+            if len(unknown) == 1:
+                qid, kind = unknown[0]
+                is_baseline = qid == incumbents[0]
+                side, values = (baseline, left) if is_baseline else (alternative, right)
+                switching = Decimal(0) if is_baseline else dec(switch)
+                known = alternative['total_cost'] if is_baseline else baseline['total_cost']
+                if kind == 'SHIPPING':
+                    base = side['goods_amount'] + money(dec(values['HANDLING']) + switching)
+                else:
+                    base = side['goods_amount'] + money(dec(values['SHIPPING']))
+                    offset = switching
+                limit = known - base
+                amount = limit - offset
+                operator = '>=' if is_baseline else '<='
+                if is_baseline: lower = max(Decimal(0), limit - Decimal('0.005') - offset)
+                else: upper = limit + Decimal('0.005') - offset
+                condition = f"round_half_up({terms[0]['variable']} + {offset}, 0.01) {operator} {limit}; B total <= A total"
+                feasible = True if is_baseline else money(offset) <= limit
+                side_name = 'INCUMBENT' if is_baseline else 'ALTERNATIVE'
+            else:
+                def expression(qid, values, goods, switching):
+                    shipping = next((t['variable'] for t in terms if t['quote_version_id']==qid and t['component']=='SHIPPING'), values['SHIPPING'])
+                    handling = next((t['variable'] for t in terms if t['quote_version_id']==qid and t['component']=='HANDLING'), values['HANDLING'])
+                    return f"{goods} + round_half_up({shipping},2) + round_half_up({handling} + {switching},2)"
+                condition = expression(alternative_quote_version_id,right,alternative['goods_amount'],switch) + ' <= ' + expression(incumbents[0],left,baseline['goods_amount'],'0')
+                operator, feasible, side_name = '<=', True, 'BOTH'
+            priority, priority_basis = cost_question_priority(partial['data'], question_qid, field, unknown)
+            result = {'status':'CALCULATED', 'field':field, 'question_quote_version_id':question_qid,
+                'break_even_amount':str(amount) if amount is not None else None,
+                'amount_unit':'KRW total charge at the stated comparison quantity and period',
+                'quantity':str(quantity), 'quantity_unit':left['unit'], 'period':period,
+                'formula':'round(goods,2)+round(transport,2)+round(other_logistics,2); B total <= A total',
+                'condition':condition, 'offset':str(offset), 'rounded_component_limit':str(limit) if limit is not None else None,
+                'baseline_total':str(baseline['total_cost']) if baseline['total_cost'] is not None else None,
+                'raw_upper_exclusive':str(upper) if upper is not None else None,
+                'raw_lower_inclusive':str(lower) if lower is not None else None,
+                'unknown_side':side_name, 'unknown_terms':terms, 'comparison_operator':operator,
+                'choice_priority':priority, 'priority_basis':priority_basis,
+                'feasible_nonnegative_cost':feasible, 'calculation_ref':None,
+                'reference_status':'READ_ONLY_SENSITIVITY_NOT_PERSISTED',
+                'basis_quote_version_ids':[incumbents[0],alternative_quote_version_id], 'send_authorized':False}
+        repository.check_scope(scope)
+        current = repository._scope_records(scope)
+        if review_record_digest(current[0], current[2]) != report['source_digest']:
+            raise OutputValidationError('REFERENCE_SOURCE_CHANGED')
+        result.update(result_kind='CONDITIONAL' if len(unknown)==1 else 'RELATION', allocation_feasible=not warnings,
+                      warnings=warnings, source_digest=calculation_digest(partial))
+        if warnings: result['condition'] += '; capacity/MOQ must be resolved before allocation'
+        return result
+    except (ReviewRequired, CalculationError, MissingReviewData) as exc:
+        return {**unavailable, 'missing_inputs':getattr(exc,'fields',['comparison_inputs'])}
+    except OutputValidationError as exc:
+        if exc.code.startswith(('STALE','CASE_SCOPE','REFERENCE_SCOPE','REFERENCE_SOURCE','TOOL_SCOPE')):raise
+        return {**unavailable,'missing_inputs':[exc.code]}
+
+
+def cost_question_priority(data, question_qid, field, unknown):
+    """LOW_VALUE requires dominance across all feasible provided allocations.
+
+    Zero here is an explicit nonnegative lower-bound scenario, never stored as a
+    confirmed supplier cost. Unpriced or otherwise unknown plans prevent proof.
+    """
+    possible = ('CAN_CHANGE_CHOICE','CONDITIONAL_COMPARISON_CAN_REVERSE; no global optimum claim')
+    if len(unknown) != 1: return possible
+    scenario = deepcopy(data)
+    quote = next(q for q in scenario['quotes'] if q['quote_id']==question_qid)
+    key = 'transport' if field=='SHIPPING' else 'other_logistics'
+    quote['costs'][key] = '0'
+    if any(v is None for q in scenario['quotes'] for k,v in q['costs'].items()
+           if not (q['supplier_id']==scenario['incumbent']['supplier_id'] and k=='switching')):
+        return possible
+    bundle = compute_plan_set(scenario)
+    if bundle['outcome'] != 'SUCCESS' or any(p['status']=='NEEDS_INFO' for p in bundle['plans']): return possible
+    valid = [p for p in bundle['plans'] if p['status']=='VALID']
+    # Fixed incumbent commitments also incur this supplier's charge.
+    affected = [p for p in valid if any(c['supplier_id']==quote['supplier_id'] for c in p['supplier_costs'])]
+    unaffected = [p for p in valid if not any(c['supplier_id']==quote['supplier_id'] for c in p['supplier_costs'])]
+    if affected and unaffected:
+        best = min(Decimal(p['total_cost']) for p in unaffected)
+        if all(Decimal(p['total_cost']) > best for p in affected):
+            return 'LOW_VALUE','STRICTLY_DOMINATED_AT_NONNEGATIVE_COST_LOWER_BOUND_IN_ALL_VERIFIED_PROVIDED_ALLOCATIONS'
+    return possible
+
+
+def break_even_record(repository, scope, alternative_quote_version_id, result):
+    if result['status'] != 'CALCULATED': raise OutputValidationError('BREAK_EVEN_NOT_CALCULABLE')
+    rows = repository._scope_records(scope)[2]
+    fields = {name: result[name] for name in BreakEvenRecord.model_fields if name in result}
+    fields.update(alternative_quote_version_id=alternative_quote_version_id,
+                  supplier_id=rows[result['question_quote_version_id']].supplier_id,
+                  field='cost_terms', component=result['field'])
+    return BreakEvenRecord.model_validate(fields)
+
+
+def read_break_even(repository, scope, ref):
+    reader = getattr(_priority_store, 'read_break_even', None)
+    if not callable(reader): raise MissingReviewData(['PriorityStore.read_break_even'])
+    record = BreakEvenRecord.model_validate(reader(repository.context, scope, ref))
+    current = compute_break_even(repository, scope, record.alternative_quote_version_id, record.question_quote_version_id)
+    if current['status'] != 'CALCULATED' or record != break_even_record(repository, scope, record.alternative_quote_version_id, current):
+        raise OutputValidationError('BREAK_EVEN_REFERENCE_MISMATCH')
+    repository.check_scope(scope)
+    return record
+
+
+def persist_break_even(repository, scope, alternative_quote_version_id, question_quote_version_id=None):
+    result = compute_break_even(repository, scope, alternative_quote_version_id, question_quote_version_id)
+    if result['status'] != 'CALCULATED': return result
+    writer = getattr(_priority_store, 'save_break_even', None)
+    if not callable(writer): raise MissingReviewData(['PriorityStore.save_break_even'])
+    if not callable(getattr(_priority_store, 'read_break_even', None)):
+        raise MissingReviewData(['PriorityStore.read_break_even'])
+    record = break_even_record(repository, scope, alternative_quote_version_id, result)
+    ref = writer(repository.context, scope, record.source_digest, record)
+    if not isinstance(ref, str) or not ref.strip():
+        raise MissingReviewData(['PriorityStore.save_break_even.not_saved'])
+    if read_break_even(repository, scope, ref) != record:
+        raise OutputValidationError('BREAK_EVEN_REFERENCE_MISMATCH')
+    question = Question(supplier_id=record.supplier_id, field=record.field, priority=record.choice_priority,
+        reason='계산 근거의 조건부 비용 영향 분류; 확정 총액이나 배분 가능 판정이 아닙니다.',
+        evidence_refs=[record.question_quote_version_id], calculation_ref=ref, break_even_amount=record.break_even_amount)
+    return {**result, 'status':'STORED_CONDITIONAL', 'calculation_ref':ref,
+            'reference_status':'PERSISTED', 'question':question.model_dump(mode='json')}
+
+
+# Runtime binding: context plus persisted typed run input, never conversation messages.
+def review_service_for_input(role, data, context):
+    if role not in (AgentRole.INFO_PRIORITY, AgentRole.RESPONSE_PLAN, AgentRole.COUNTER_OFFER):
+        raise OutputValidationError('ROLE_NOT_IMPLEMENTED')
+    if not isinstance(context, RunContext) or type(context.input_revision) is not int or context.input_revision < 0:
+        raise OutputValidationError('RUN_CONTEXT_MISMATCH')
+    data = AGENT_IO[role][0].model_validate(model_payload(data))
+    if str(data.case_id) != context.case_id or data.input_revision != context.input_revision:
+        raise OutputValidationError('RUN_CONTEXT_MISMATCH')
+    scope = ExecutionScope.from_input(data)
+    return ReviewCalculator(_ReviewAccess(context, role), None), scope, data
+
+
+def _bound_review_service(runtime, role, expected_role):
+    if role != expected_role: raise OutputValidationError('TOOL_ROLE_DENIED')
+    context = runtime.context
+    if context is None or not context.agent_run_id: raise MissingReviewData(['RunContext.agent_run_id'])
+    store, getter = {
+        AgentRole.INFO_PRIORITY: (_priority_store, 'load_priority_input'),
+        AgentRole.RESPONSE_PLAN: (_plan_store, 'load_plan_input'),
+        AgentRole.COUNTER_OFFER: (_counter_offer_store, 'load_counter_offer_input'),
+    }[role]
+    if store is None: raise MissingReviewData([role.value + 'Store'])
+    data = getattr(store, getter)(context)
+    if not isinstance(data, AGENT_IO[role][0]): raise OutputValidationError('TRUSTED_AGENT_INPUT_REQUIRED')
+    service, scope, data = review_service_for_input(role, data, context)
+    service.repo.check_scope(scope)
+    return service, scope, data
+
+
+def _review_failure(exc):
+    if isinstance(exc, MissingReviewData):
+        return {'status': exc.action, 'next_action': exc.action, 'unknown_fields': exc.fields,
+                'blocking_issues': exc.issues, 'questions': [], 'send_authorized': False}
+    if exc.code.startswith(('STALE', 'CASE_SCOPE', 'REFERENCE_SCOPE', 'REFERENCE_SOURCE',
+                            'TOOL_SCOPE', 'RUN_CONTEXT', 'TRUSTED_AGENT', 'TOOL_ROLE')):
+        raise exc
+    field = exc.code.split(':', 1)[1] if exc.code.startswith('INPUT_') and ':' in exc.code else exc.code
+    return {'status': 'HOLD', 'next_action': 'HOLD', 'unknown_fields': [field], 'send_authorized': False}
+
+
+def _dispatch_review(runtime, role, expected_role, operation, *, inspect=True, quote_version_ids=None):
+    try:
+        service, scope, data = _bound_review_service(runtime, role, expected_role)
+        if quote_version_ids is not None and (len(quote_version_ids) != len(set(quote_version_ids)) or
+                                               tuple(sorted(quote_version_ids)) != scope.quote_ids):
+            raise OutputValidationError('TOOL_SCOPE_QUOTE_MISMATCH')
+        if inspect:
+            report = inspect_comparability(service.repo, scope)
+            if report['status'] != 'PASS': return report
+        if role == AgentRole.RESPONSE_PLAN:
+            pending = [q.field for q in data.questions if q.priority != 'LOW_VALUE']
+            internal = internal_review_fields(pending)
+            if internal: raise MissingReviewData(internal)
+            answered = {'item_name', 'specification', 'unit', 'unit_price', 'currency', 'available_quantity',
+                        'moq', 'valid_until', 'tax_terms', 'cost_terms', 'delivery_date'}
+            unanswered = sorted(set(pending) - answered)
+            if unanswered:
+                return {'status': 'NEEDS_EVIDENCE', 'next_action': 'NEEDS_EVIDENCE',
+                        'unknown_fields': unanswered, 'send_authorized': False}
+        result = operation(service, scope, data)
+        service.repo.check_scope(scope)
+        return result
+    except OutputValidationError as exc:
+        return _review_failure(exc)
+
+
+# INFO_PRIORITY and shared comparison.
+@register
+@tool
+def check_comparability(quote_version_ids: list[str], runtime: ToolRuntime[RunContext]) -> dict:
+    """현재 견적 전체의 원문·단위·세금·물량/기간·필수 조건·비용을 확인한다.
+    누락 질문은 업체별로 묶고, 원문에 답이 있는 추출 오류는 RECHECK_SOURCE로 구분한다.
+    REQUEST_CLARIFICATION은 실제 공통 초안 ID를 받은 뒤에만 완료한다."""
+    role = _agent_role(runtime)
+    def inspect(service, scope, data):
+        result = inspect_comparability(service.repo, scope)
+        if role != AgentRole.INFO_PRIORITY: return result
+        available = 'create_mail_draft' in _registry and callable(getattr(_draft_lookup_store, 'read_clarification_draft', None))
+        ready = priority_readiness(result, draft_available=available)
+        if not available and 'create_mail_draft' in _registry and ready.get('draft_required'):
+            ready['missing_dependencies'] = ['create_mail_draft.read_clarification_draft']
+        return ready
+    return _dispatch_review(runtime, role, role, inspect, inspect=False, quote_version_ids=quote_version_ids)
 
 
 @register
 @tool
-def build_plan_candidates(runtime: ToolRuntime[RunContext]) -> dict:
-    '''현재 업무의 견적·정책으로 유지·전환·2업체 분산안을 계산한다. 반환 plans 전체를 validate_purchase_plan에
-    전달한다. 미확인 정책·비교 범위는 HOLD이며 금액을 추측하지 않는다. 업무 범위는 RunContext로 검사한다.'''
-    return dispatch_review(runtime, _agent_role(runtime), AgentRole.RESPONSE_PLAN,
-                           lambda service, scope, data: service.build_candidates(scope))
+def calculate_break_even(quote_version_ids: list[str], alternative_quote_version_id: str, runtime: ToolRuntime[RunContext], question_quote_version_id: str | None = None) -> dict:
+    """현재 대안의 확인된 근거로 전량 전환의 조건부 비용 한도·산식·반올림 경계를 계산한다.
+    근거가 부족하면 NOT_CALCULABLE/missing_inputs를 반환하고 미확인 비용을 0원으로 만들지 않는다."""
+    return _dispatch_review(runtime, _agent_role(runtime), AgentRole.INFO_PRIORITY,
+        lambda service, scope, data: persist_break_even(service.repo, scope, alternative_quote_version_id, question_quote_version_id),
+        inspect=False, quote_version_ids=quote_version_ids)
+
+
+# RESPONSE_PLAN
+@register
+@tool
+def build_plan_candidates(quote_version_ids: list[str], runtime: ToolRuntime[RunContext]) -> dict:
+    """현재 업무의 검증된 견적·정책으로 유지·전환·최대 두 업체 분산안을 계산한다."""
+    return _dispatch_review(runtime, _agent_role(runtime), AgentRole.RESPONSE_PLAN,
+                            lambda service, scope, data: service.build_candidates(scope), quote_version_ids=quote_version_ids)
 
 
 @register
 @tool
-def validate_purchase_plan(plans: list[dict], runtime: ToolRuntime[RunContext]) -> dict:
-    '''전체 구매안의 배분·총액·검증 참조를 독립 재검증한다. PASS이면 plans·plan_set_ref, 수정 가능 오류는
-    FIX·reason·빈 plans를 반환한다. 받은 검증 참조를 그대로 사용하고 금액을 직접 수정하지 않는다.'''
-    return dispatch_review(runtime, _agent_role(runtime), AgentRole.RESPONSE_PLAN,
-                           lambda service, scope, data: _validate_review_plans(service, scope, plans))
-
-
-# ⑤ COUNTER_OFFER: calculate_counter_offer, validate_counter_offer
-@register
-@tool
-def calculate_counter_offer(validated_plans: list[dict], runtime: ToolRuntime[RunContext]) -> dict:
-    '''입력의 검증된 전체 대안과 회사 정책으로 목표 조건별 비용을 계산한다. READY이면 target·calculation_ref.
-    정책 누락·생략 미합의는 HOLD한다. 입력의 대안을 임의로 제외하거나 인상률을 지어내지 않는다.'''
-    return dispatch_review(runtime, _agent_role(runtime), AgentRole.COUNTER_OFFER,
-                           lambda service, scope, data: _calculate_review_offer(service, scope, data, validated_plans))
-
-
-@register
-@tool
-def validate_counter_offer(target: dict, calculation_ref: str, runtime: ToolRuntime[RunContext]) -> dict:
-    '''목표가·정책·대안 전체·근거 버전을 독립 검증한다. valid=true와 validation_ref가 포함된 target을 반환한다.
-    이것은 초안 생성 성공이 아니다. missing_dependencies가 있으면 해당 의존성을 해결해야 한다.'''
+def validate_purchase_plan(plans: list[Plan], runtime: ToolRuntime[RunContext]) -> dict:
+    """팀 Plan 전체의 배분·총액·참조를 독립 재검증한다. PASS 또는 수정 가능한 FIX를 반환한다."""
     def validate(service, scope, data):
-        from app.agents.kan60.team_bridge.service import wire
-        return {'valid': True, 'target': wire(service.validate_target(scope, target, calculation_ref)),
-                'next_step': 'create_mail_draft',
-                'missing_dependencies': [] if 'create_mail_draft' in _registry else ['create_mail_draft'],
-                'send_authorized': False}
-    return dispatch_review(runtime, _agent_role(runtime), AgentRole.COUNTER_OFFER, validate)
+        try:
+            checked, ref, _ = service.validate_plans(scope, plans)
+            return {'plan_check': 'PASS', 'plans': [model_payload(p) for p in checked], 'plan_set_ref': ref}
+        except OutputValidationError as exc:
+            if exc.code in ('EMPTY_PLANS','PLAN_SCHEMA_INVALID','PLAN_ALLOCATION_TOTAL_OR_SET_MISMATCH','PLAN_REFERENCE_MISMATCH'):
+                return {'plan_check':'FIX','reason':exc.code,'plans':[]}
+            raise
+    return _dispatch_review(runtime, _agent_role(runtime), AgentRole.RESPONSE_PLAN, validate)
+
+
+# COUNTER_OFFER
+@register
+@tool
+def calculate_counter_offer(validated_plans: list[Plan], runtime: ToolRuntime[RunContext]) -> dict:
+    """신뢰된 실행 입력의 구매안 전체와 정책으로 목표 조건을 계산한다. 초안 생성은 별도다."""
+    def calculate(service, scope, data):
+        if sorted(calculation_digest(model_payload(p)) for p in validated_plans) != sorted(
+                calculation_digest(model_payload(p)) for p in data.validated_plans):
+            raise OutputValidationError('COUNTER_INPUT_PLAN_SET_MISMATCH')
+        return service.calculate(scope, validated_plans)
+    return _dispatch_review(runtime, _agent_role(runtime), AgentRole.COUNTER_OFFER, calculate)
+
+
+@register
+@tool
+def validate_counter_offer(target: CounterOfferTarget, calculation_ref: str, runtime: ToolRuntime[RunContext]) -> dict:
+    """목표 조건·가격·대안·정책·근거를 독립 검증한다. 공통 초안 의존성 누락은 완료가 아니다."""
+    def validate(service, scope, data):
+        checked = service.validate_target(scope, target, calculation_ref)
+        return {'valid':True,'target':model_payload(checked),'next_step':'create_mail_draft',
+                'missing_dependencies':(['create_mail_draft'] if 'create_mail_draft' not in _registry else
+                    ['create_mail_draft.validation_binding'] if not callable(getattr(_draft_lookup_store, 'read_counter_offer_draft', None)) else []),
+                'send_authorized':False}
+    return _dispatch_review(runtime, _agent_role(runtime), AgentRole.COUNTER_OFFER, validate)

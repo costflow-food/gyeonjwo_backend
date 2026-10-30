@@ -31,7 +31,7 @@ from langchain_openai import ChatOpenAI
 
 from app.agents.schemas import (AGENT_IO, MAX_TOOL_CALLS_PER_AGENT_CALL, AgentInput, AgentOutput, AgentRole,
                                 RunContext)
-from app.agents.tools import EXTRACTION_FIELD_NAMES, tools_for
+from app.agents import tools
 from app.shared.infrastructure.llm import POLICY
 
 # 07 7절. 역할 지시문은 담당 팀원이 작성한다. 주석은 넣어야 할 내용과 고를 수 있는 next_action이다.
@@ -131,11 +131,41 @@ next_action:
     AgentRole.CANDIDATE: '',
     # ③ 필수 누락 우선, 원문에 이미 있는 답은 재문의 금지, calculate_break_even으로 역전 가능성 확인, 질문 묶기
     #    REQUEST_CLARIFICATION: 보완 초안 생성 / BUILD_PLANS: 검토 가능 / RECHECK_SOURCE: ① 재추출 필요 / HOLD
-    AgentRole.INFO_PRIORITY: '',
+    AgentRole.INFO_PRIORITY: '''현재 PriorityIn의 견적 ID와 pending_questions는 확인 대상이며 답이 아직 없다는 증거가 아니다.
+먼저 get_case_context, check_comparability(quote_version_ids)를 호출한다. 견적 ID는 현재 PriorityIn의 typed 인자로 전달한다.
+업무·revision·실행 ID는 Runner의 RunContext에서 읽으므로 인자로 만들지 않는다.
+공통 비교 결과의 blocking_issues, questions, question_groups를 사용한다. 원문에 이미 있는 답을 거래처에 다시 묻지 않는다.
+원문에 답이 있지만 추출이 누락/불일치하면 RECHECK_SOURCE와 팀 추출 필드인 unknown_fields만 반환한다.
+정책·내부 비교기간·단위 환산·지원하지 않는 조건 구조·저장소/초안 의존성은 HOLD로 분리한다.
+필수 조건 FAIL은 선호 점수나 낮은 가격으로 상쇄하지 않는다. 과거 가격을 현재 대안 가격으로 사용하지 않는다.
+필수 조건 누락의 MUST_CONFIRM을 유지한다. 비용 질문은 계산 근거의 CAN_CHANGE_CHOICE/LOW_VALUE를 따른다.
+LOW_VALUE는 제공된 모든 유효 배분에서 비음수 비용 하한에서도 선택을 바꿀 수 없음이 입증된 경우만 쓴다.
+questions에는 LOW_VALUE를 포함한 평가 기록을 보존한다. 실제 문의 대상 question_groups는 MUST_CONFIRM/CAN_CHANGE_CHOICE만 업체별로 묶는다.
+LOW_VALUE는 초안에 넣지 않는다. 동일 업체·필드 질문은 한 번만 만든다.
+비용 질문의 영향이 계산 가능하면 해당 현재 대안 ID로 calculate_break_even을 호출한다.
+STORED_CONDITIONAL의 금액·단위·기간·조건부 산식·부등호·반올림 경계를 reason에 설명한다. NOT_CALCULABLE이면 missing_inputs를 설명한다.
+계산 불가를 LOW_VALUE로 바꾸거나 금액/범위를 지어내지 않는다. 미확인 비용은 0원이 아니고 명시된 0원과 구별한다.
+calculate_break_even(quote_version_ids, alternative_quote_version_id)의 STORED_CONDITIONAL 결과만 저장된 계산 근거다.
+반환된 question의 calculation_ref/break_even_amount를 그대로 연결하고 조건부 결과·배분 경고를 설명한다.
+LOW_VALUE만 남은 HOLD에서도 calculate_break_even으로 저장한 계산 참조·판단 근거를 questions에 보존한다.
+이 경우 초안이나 회신 대기를 만들지 않고 draft_ids=[]로 둔다. 현재 ④의 미확인 비용 조건부 구매안 계약 미지원으로
+unknown_fields=[LOW_VALUE_UNCONFIRMED_COST_PLAN_CONTRACT_REQUIRED]와 내부 계약 보완 사유를 반환한다.
+미확인 비용을 0원으로 바꾸거나 업체를 제외해 BUILD_PLANS로 넘기지 않는다.
+필수 조건 질문을 계산 없이 낮추지 않는다. 기존 업체 비용 미확인은 >=, 대안 비용 미확인은 <= 경계를 따른다.
+양쪽 비용 미확인의 RELATION은 식으로 설명하고 단일 확정 금액을 만들지 않는다. 저장 실패/계약 누락이면 HOLD한다.
+calculation_ref=null인 계산 결과는 완료가 아니다. 참조를 만들거나 조건부 역전 금액을 확정 총액으로 쓰지 않는다.
+질문 답변이 더 이상 필요 없고 비교가 PASS면 BUILD_PLANS, questions=[], draft_ids=[]로 반환한다.
+NEEDS_EVIDENCE이고 question_groups가 있으면 실제 공통 create_mail_draft의 선언된 계약으로 그 문의 대상만 CLARIFICATION 초안을 만든다.
+그 도구가 없거나 현재 업무·revision·질문에 연결된 내부 draft_ids를 얻지 못하면 HOLD, draft_ids=[]로 두고
+unknown_fields에 create_mail_draft 또는 create_mail_draft.validation_binding 의존성을 명시한다.
+REQUEST_CLARIFICATION은 실제 공통 초안 도구 결과의 ID가 있는 경우만 반환한다. 발송하지 않는다.
+보완 대기는 그래프가 종료하며 새 회신은 새 revision의 REPLY 실행이다. 예전 참조/질문을 그대로 재사용하지 않는다.
+최종 PriorityOut은 Runner만 저장한다. 도구 오류·권한/revision 위반을 성공이나 가짜 초안 ID로 우회하지 않는다.''',
     # ④ 유지·전환·최대 2곳 분산안, validate_purchase_plan 실패 사유로 수정, 탐색 범위·조건부 명시
     #    PLANS_PROPOSED: 안 구성 / NEEDS_EVIDENCE: ③ 확인 필요(unknown_fields에) / RECHECK_SOURCE / HOLD
     AgentRole.RESPONSE_PLAN: '''업무·revision은 RunContext로 도구에 전달되므로 도구 인자로 만들지 않는다.
 get_case_context로 요청 조건과 정책을 확인한다. CASE_NOT_FOUND·REVISION_CHANGED면 즉시 HOLD한다.
+check_comparability로 ③과 동일한 원문·단위·기간·필수 조건·비용 기준을 확인하고 비PASS 분기를 따른다.
 build_plan_candidates로 유지·전환·최대 2곳 분산안을 만들고, 반환된 전체 안을 validate_purchase_plan에 전달한다.
 PASS가 확인된 전체 plans와 calculation_ref를 그대로 PlanOut에 옮긴다. 금액·배분·참조를 직접 만들지 않는다.
 plan_check_reason이 있거나 검증이 FIX이면 허용 도구로 다시 구성·검증한다. 같은 잘못된 안을 그대로 재전송하지 않는다.
@@ -149,7 +179,8 @@ save_agent_result는 중간 기록만 저장한다. 최종 응답 저장은 Agen
     #    COUNTER_OFFER_PROPOSED: 목표 조건·초안 / COUNTER_OFFER_SKIPPED: 정책상 역제안 불필요 (target·초안 없이, reason에 근거)
     #    NEEDS_EVIDENCE / RECHECK_SOURCE / HOLD: 정책·근거 없음
     #    가격 검증 FIX로 다시 호출되면 입력의 price_check_reason을 보고 목표 조건을 고친다
-    AgentRole.COUNTER_OFFER: '''입력의 validated_plans 전체를 calculate_counter_offer에 전달한다.
+    AgentRole.COUNTER_OFFER: '''먼저 check_comparability로 ③·④와 동일한 비교 기준을 확인하고 비PASS 분기를 따른다.
+입력의 validated_plans 전체를 calculate_counter_offer에 전달한다.
 계산 결과의 target과 calculation_ref를 validate_counter_offer로 독립 검증한다. 가격·정책·참조는 직접 만들지 않는다.
 price_check_reason이 있으면 허용 도구로 다시 계산·검증한다. 도구가 HOLD/NEEDS_EVIDENCE/RECHECK_SOURCE이면
 해당 next_action과 unknown_fields를 그대로 전달한다. 개발 의존성·회사 정책을 거래처 질문으로 보내지 않는다.
@@ -179,7 +210,7 @@ def system_prompt(role: AgentRole) -> str:
 def build_agent(role: AgentRole, model: BaseChatModel):
     _, output = AGENT_IO[role]
     return create_agent(
-        model, tools_for(role), system_prompt=system_prompt(role),
+        model, tools.tools_for(role), system_prompt=system_prompt(role),
         response_format=ToolStrategy(output),
         context_schema=RunContext,
         middleware=[ToolCallLimitMiddleware(run_limit=MAX_TOOL_CALLS_PER_AGENT_CALL, exit_behavior='error')],
@@ -221,7 +252,7 @@ def check_grounded(role: AgentRole, output: AgentOutput, messages: list) -> Agen
                   'unknown_fields': list(dict.fromkeys(name for r in results for name in r.get('unknown_fields', [])))
                   + output.unknown_fields}
     unknown = [name for name in dict.fromkeys(update.get('unknown_fields', output.unknown_fields))
-               if name in EXTRACTION_FIELD_NAMES]
+               if name in tools.EXTRACTION_FIELD_NAMES]
     if unknown != output.unknown_fields:
         update['unknown_fields'] = unknown
     return type(output).model_validate(output.model_dump() | update) if update else output
@@ -271,3 +302,165 @@ class AgentRunner:
         if self.runs is not None:
             self.runs.finish_agent_run(context.agent_run_id, 'COMPLETED', output.model_dump(mode='json'), None)
         return output
+
+
+# Read-only final validation. Runner registration remains the orchestration owner.
+def check_calculator_output(self, scope, role, output, *, for_save=False):
+    """Strict, read-only final guard. for_save is retained for caller compatibility.
+
+    Never call validate_plans/validate_target/create_draft/save_result here.
+    Scope must come from trusted execution input, not the model's output.
+    """
+    from app.agents.tools import (OutputValidationError, model_payload, internal_review_fields)
+    from app.agents.schemas import PlanOut, CounterOfferOut, AgentNextAction as N
+    if not callable(getattr(self.repo, 'check_scope', None)):
+        raise OutputValidationError('SCOPE_CHECK_REQUIRED')
+    self.repo.check_scope(scope)
+    if role not in (AgentRole.RESPONSE_PLAN, AgentRole.COUNTER_OFFER):
+        raise OutputValidationError('ROLE_NOT_IMPLEMENTED')
+    output = (PlanOut if role == AgentRole.RESPONSE_PLAN else CounterOfferOut).model_validate(model_payload(output))
+    if output.next_action in (N.PLANS_PROPOSED, N.COUNTER_OFFER_PROPOSED) and (not callable(getattr(self.repo, 'resolve', None))):
+        raise OutputValidationError('VALIDATION_LOOKUP_REQUIRED')
+    if role == AgentRole.RESPONSE_PLAN:
+        if output.next_action == N.PLANS_PROPOSED:
+            self.check_plans(scope, output.plans)
+        elif output.plans:
+            raise OutputValidationError('NON_PROPOSAL_HAS_PLANS')
+    elif role == AgentRole.COUNTER_OFFER:
+        if output.next_action == N.COUNTER_OFFER_SKIPPED:
+            raise OutputValidationError('TEAM_SKIP_ROUTE_NOT_IMPLEMENTED')
+        if output.next_action == N.COUNTER_OFFER_PROPOSED:
+            self.checked_target(scope, output.target)
+            if not output.draft_ids:
+                raise OutputValidationError('VALIDATED_DRAFT_REQUIRED')
+            if len(set(output.draft_ids)) != len(output.draft_ids) or any((not ref.strip() for ref in output.draft_ids)):
+                raise OutputValidationError('DRAFT_REFERENCE_MISMATCH')
+            if not callable(getattr(self.repo, 'resolve_draft', None)):
+                raise OutputValidationError('DRAFT_LOOKUP_REQUIRED')
+            for ref in output.draft_ids:
+                draft = self.repo.resolve_draft(scope, ref)
+                if not isinstance(draft, dict) or draft.get('send_authorized') is not False or draft.get('target') != model_payload(output.target):
+                    raise OutputValidationError('DRAFT_REFERENCE_MISMATCH')
+        elif output.target is not None or output.draft_ids:
+            raise OutputValidationError('NON_PROPOSAL_HAS_TARGET_OR_DRAFT')
+    else:
+        raise OutputValidationError('ROLE_NOT_IMPLEMENTED')
+    if not output.reason.strip():
+        raise OutputValidationError('OUTPUT_REASON_REQUIRED')
+    if any((not f.strip() for f in output.unknown_fields)) or len(set(output.unknown_fields)) != len(output.unknown_fields):
+        raise OutputValidationError('UNRESOLVED_FIELDS_INVALID')
+    if output.next_action in (N.PLANS_PROPOSED, N.COUNTER_OFFER_PROPOSED) and output.unknown_fields:
+        raise OutputValidationError('PROPOSAL_HAS_UNRESOLVED_FIELDS')
+    if output.next_action in (N.NEEDS_EVIDENCE, N.RECHECK_SOURCE) and (not output.unknown_fields):
+        raise OutputValidationError('UNRESOLVED_FIELDS_REQUIRED')
+    if output.next_action == N.RECHECK_SOURCE:
+        from app.agents.tools import EXTRACTION_FIELD_NAMES
+        if not set(output.unknown_fields) <= EXTRACTION_FIELD_NAMES:
+            raise OutputValidationError('RECHECK_FIELDS_INVALID')
+    if output.next_action == N.NEEDS_EVIDENCE and internal_review_fields(output.unknown_fields):
+        raise OutputValidationError('INTERNAL_FIELDS_REQUIRE_HOLD')
+    self.repo.check_scope(scope)
+    return output
+
+
+def check_final_output(role, data, context, output):
+    """Call inside Runner try after check_grounded and before COMPLETED.
+
+    This function is ready for registration, not registered by monkeypatching the
+    Runner. Trusted typed input/context must come from the orchestration owner.
+    Any exception prevents completion. It never writes references/drafts/results.
+    """
+    from pydantic import ValidationError
+    from app.agents.tools import (review_service_for_input, OutputValidationError,
+                                  CalculationError)
+    from app.agents.schemas import AgentNextAction
+    try:
+        service, scope, data = review_service_for_input(role, data, context)
+        checked = (check_priority_output(service, scope, output) if role == AgentRole.INFO_PRIORITY else
+                   check_calculator_output(service, scope, role, output))
+        if role == AgentRole.COUNTER_OFFER and checked.next_action == AgentNextAction.COUNTER_OFFER_PROPOSED:
+            service.check_plans(scope, data.validated_plans)
+        service.repo.check_scope(scope)
+        return checked
+    except ValidationError as exc:
+        raise OutputValidationError('FINAL_INPUT_OR_OUTPUT_SCHEMA_INVALID') from exc
+    except CalculationError as exc:
+        raise OutputValidationError(exc.issue['code']) from exc
+
+
+def check_priority_output(service, scope, output):
+    """Read-only third-role guard; no calculation/reference/draft/result writes."""
+    from app.agents import tools
+    from app.agents.schemas import PriorityOut, ClarificationDraftBinding
+    output = PriorityOut.model_validate(tools.model_payload(output))
+    repo = service.repo
+    repo.check_scope(scope)
+    if not output.reason.strip() or any(not f.strip() for f in output.unknown_fields) or len(set(output.unknown_fields)) != len(output.unknown_fields):
+        raise tools.OutputValidationError('PRIORITY_OUTPUT_FIELDS_INVALID')
+    if output.next_action == 'HOLD' and not output.questions and tools.LOW_VALUE_PLAN_CONTRACT_REQUIRED not in output.unknown_fields:
+        if output.draft_ids: raise tools.OutputValidationError('NON_REQUEST_HAS_DRAFTS')
+        return output
+    report = tools.inspect_comparability(repo, scope)
+    if output.next_action == 'BUILD_PLANS':
+        if report['status'] != 'PASS' or output.questions or output.draft_ids or output.unknown_fields:
+            raise tools.OutputValidationError('PRIORITY_BUILD_NOT_READY')
+        repo.check_scope(scope)
+        return output
+    if output.next_action == 'RECHECK_SOURCE':
+        if report['status'] != 'RECHECK_SOURCE' or set(output.unknown_fields) != set(report['unknown_fields']) or output.questions or output.draft_ids:
+            raise tools.OutputValidationError('PRIORITY_RECHECK_MISMATCH')
+        repo.check_scope(scope)
+        return output
+    expected = {(q['supplier_id'], q['field']): q for q in report['questions']}
+    actual = {}
+    for question in output.questions:
+        key = question.supplier_id, question.field
+        if key in actual or key not in expected or not question.reason.strip():
+            raise tools.OutputValidationError('PRIORITY_QUESTION_MISMATCH')
+        wanted = expected[key]
+        if len(set(question.evidence_refs)) != len(question.evidence_refs) or set(question.evidence_refs) != set(wanted['evidence_refs']):
+            raise tools.OutputValidationError('PRIORITY_QUESTION_EVIDENCE_MISMATCH')
+        # Cost priority is recomputed; mandatory non-cost conditions cannot be downgraded.
+        if question.priority in ('CAN_CHANGE_CHOICE', 'LOW_VALUE') and not question.calculation_ref:
+            raise tools.OutputValidationError('PRIORITY_CALCULATION_REQUIRED')
+        if question.priority != wanted['priority']:
+            raise tools.OutputValidationError('PRIORITY_CLASSIFICATION_MISMATCH')
+        if question.calculation_ref is None and question.break_even_amount is not None:
+            raise tools.OutputValidationError('PRIORITY_CALCULATION_REQUIRED')
+        if question.calculation_ref is not None:
+            record = tools.read_break_even(repo, scope, question.calculation_ref)
+            if (record.supplier_id, record.field, record.break_even_amount, record.choice_priority) != (question.supplier_id, question.field, question.break_even_amount, question.priority) or record.question_quote_version_id not in question.evidence_refs:
+                raise tools.OutputValidationError('PRIORITY_CALCULATION_MISMATCH')
+        elif output.next_action == 'REQUEST_CLARIFICATION' and question.field == 'cost_terms':
+            for qid in question.evidence_refs:
+                if tools.cost_question_calculation(repo, scope, qid)['status'] == 'CALCULATED':
+                    raise tools.OutputValidationError('PRIORITY_CALCULATION_REQUIRED')
+        actual[key] = question
+    if output.next_action == 'REQUEST_CLARIFICATION':
+        if report['status'] != 'NEEDS_EVIDENCE' or not report['question_groups'] or actual.keys() != expected.keys() or set(output.unknown_fields) != set(report['unknown_fields']):
+            raise tools.OutputValidationError('PRIORITY_REQUEST_MISMATCH')
+        reader = getattr(tools._draft_lookup_store, 'read_clarification_draft', None)
+        if not callable(reader): raise tools.MissingReviewData(['create_mail_draft.read_clarification_draft'])
+        groups = {}
+        for q in actual.values():
+            if q.priority in ('MUST_CONFIRM', 'CAN_CHANGE_CHOICE'):
+                groups.setdefault(q.supplier_id, []).append(q)
+        if len(output.draft_ids) != len(groups) or len(set(output.draft_ids)) != len(output.draft_ids):
+            raise tools.OutputValidationError('CLARIFICATION_DRAFT_MISMATCH')
+        seen = set()
+        for ref in output.draft_ids:
+            if not ref.strip(): raise tools.OutputValidationError('CLARIFICATION_DRAFT_MISMATCH')
+            draft = ClarificationDraftBinding.model_validate(reader(repo.context, scope, ref))
+            if draft.case_id != scope.case_id or draft.input_revision != scope.revision or draft.supplier_id not in groups or draft.supplier_id in seen:
+                raise tools.OutputValidationError('CLARIFICATION_DRAFT_MISMATCH')
+            digest = lambda qs: sorted(tools.calculation_digest(q.model_dump(mode='json')) for q in qs)
+            if digest(draft.questions) != digest(groups[draft.supplier_id]):
+                raise tools.OutputValidationError('CLARIFICATION_DRAFT_MISMATCH')
+            seen.add(draft.supplier_id)
+    elif output.draft_ids:
+        raise tools.OutputValidationError('NON_REQUEST_HAS_DRAFTS')
+    elif output.next_action == 'HOLD' and expected and not report['question_groups']:
+        if actual.keys() != expected.keys() or output.unknown_fields != [tools.LOW_VALUE_PLAN_CONTRACT_REQUIRED]:
+            raise tools.OutputValidationError('PRIORITY_LOW_VALUE_HOLD_MISMATCH')
+    repo.check_scope(scope)
+    return output

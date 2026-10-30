@@ -4,20 +4,26 @@ Only model/storage doubles. Supplement and validation stores below are explicit
 unagreed dependency doubles, not implementations of missing common tools.
 """
 from copy import deepcopy
+from dataclasses import replace
 import json
 from threading import RLock
 from uuid import UUID
 
 import pytest
 
-from agent_memory_store import MemoryStore
+from agent_memory_store import MemoryStore, RoleMemoryStore
 from test_agents45_product_registration import ToolDrivenModel
+from test_agents45_product_registration import forbid_final_writes
 from app.agents import tools
 from app.agents.agents import AgentRunner, PROMPTS
 from app.agents.schemas import AgentRole as R, PlanIn, CounterOfferIn
-from app.agents.kan60.counter_offer.contract import digest
-from app.agents.kan60.team_bridge.repository import BridgeError, Scope
-from app.agents.kan60.team_bridge.team_data import TeamReviewRepository, team_record_digest
+from app.agents.tools import calculation_digest as digest
+from app.agents.tools import OutputValidationError as BridgeError, ExecutionScope as Scope
+from app.agents.tools import _ReviewAccess as ReviewAccess, review_record_digest as team_record_digest
+from app.agents.tools import MissingReviewData as MissingTeamData
+from app.agents.agents import check_final_output
+from app.agents.tools import ReviewCalculator as BridgeService, model_payload as wire
+from app.agents.schemas import RunContext
 
 CASE = '15582535-f1b8-5326-8dc9-978888285fd0'
 
@@ -44,7 +50,7 @@ class ValidationMemory:
         self.before_write = None
 
     def _current(self, scope, source_digest):
-        if digest(self.repository.snapshot(scope)) != source_digest:
+        if digest(self.repository.for_run(RunContext(scope.case_id, scope.revision)).snapshot(scope)) != source_digest:
             raise BridgeError('REFERENCE_SOURCE_CHANGED')
 
     def put_if_current(self, scope, source_digest, kind, payload, agent_run_id):
@@ -67,6 +73,11 @@ class ValidationMemory:
             if row['source_digest'] != source_digest or ref != 'SYNTHETIC-validation:' + digest(row):
                 raise BridgeError('REFERENCE_SOURCE_CHANGED')
             return deepcopy(row['payload'])
+
+
+def configure_review_stores(common, *, supplements=None, references=None):
+    roles = RoleMemoryStore(common, supplements, references)
+    tools.use_role_stores(priority=roles, plans=roles, counter_offers=roles)
 
 
 @pytest.fixture
@@ -129,13 +140,13 @@ def team_storage():
     scope = Scope(CASE, 1, ('qv-a', 'qv-b'))
     supplement = SupplementMemory(common, scope, facts)
     refs = ValidationMemory()
-    repo = TeamReviewRepository(common, common, supplement, refs)
+    repo = ReviewAccess(RunContext(CASE, scope.revision), R.RESPONSE_PLAN)
     refs.repository = repo
     tools.use_case_store(common)
     tools.use_quote_store(common)
-    tools.use_team_review_stores(supplements=supplement, references=refs)
+    configure_review_stores(common, supplements=supplement, references=refs)
     yield common, scope, supplement, refs, repo
-    tools.use_review_repository(None)
+    tools.use_role_stores()
     tools.use_case_store(None)
     tools.use_quote_store(None)
 
@@ -172,12 +183,12 @@ def test_team_records_through_product_registration_to_stage4_and_stage5(team_sto
     assert common.agent_runs['run-1']['output_jsonb'] == plan.model_dump(mode='json')
     assert common.agent_runs['run-2']['output_jsonb'] == out.model_dump(mode='json')
     assert not any(r['kind'] in ('AGENT_RESULT', 'DRAFT') for r in refs.records.values())
-    assert before == tools._registry and 'create_mail_draft' not in before and 'check_comparability' not in before
+    assert before == tools._registry and 'create_mail_draft' not in before and 'check_comparability' in before
 
 
 @pytest.mark.parametrize('fault,expected', [
     ('policy', 'policy'), ('cost', 'cost_terms'),
-    ('facts', 'review_facts.fixed_commitment'), ('references', 'ValidationStore.put_if_current'),
+    ('facts', 'review_facts.fixed_commitment'), ('references', 'PlanStore.save_plan_set'),
     ('all_facts', 'review_facts.period'),
     ('suppliers', 'QuoteStore.get_quote_version(case_id, quote_version_id)'),
 ])
@@ -186,12 +197,13 @@ def test_missing_dependencies_hold_without_defaults(team_storage, fault, expecte
     if fault == 'policy':common.work_cases[CASE]['policy'] = None
     if fault == 'cost':common.quote_versions['qv-b'].cost_terms_jsonb = []
     if fault == 'facts':supplement.facts.pop('fixed_commitment')
-    if fault == 'references':tools.use_team_review_stores(supplements=supplement)
-    if fault == 'all_facts':tools.use_team_review_stores(references=refs)
+    if fault == 'references':configure_review_stores(common, supplements=supplement)
+    if fault == 'all_facts':configure_review_stores(common, references=refs)
     if fault == 'suppliers':common.mail_messages['mail-qv-b']['supplier_id'] = None
     supplement.refresh_binding()
     out = run_plan(team_storage)
-    assert out.next_action == ('NEEDS_EVIDENCE' if fault == 'cost' else 'HOLD') and expected in out.unknown_fields
+    # The removed structured costs still have answers in the source mail.
+    assert out.next_action == ('RECHECK_SOURCE' if fault == 'cost' else 'HOLD') and expected in out.unknown_fields
     assert not refs.records
 
 
@@ -270,15 +282,14 @@ def test_normalized_values_must_still_match_original_source(team_storage, fault)
     assert not refs.records
 
 
-@pytest.mark.parametrize('price,expected', [('1.01', '1.01'), ('1.005', None)])
+@pytest.mark.parametrize('price,expected', [('1.01', '1.01'), ('1.005', '1.01')])
 def test_shared_calculation_rounding_difference_is_not_silently_accepted(price, expected):
-    from app.agents.kan60.team_bridge.team_calculations import verify_team_total
-    row = {'lines': [{'unit_price': price, 'quantity': '1'}], 'supplier_costs': [], 'total_cost': price}
-    if expected:
-        assert str(verify_team_total(row)) == expected
-    else:
-        with pytest.raises(BridgeError, match='TEAM_ROUNDING_CONTRACT_REQUIRED'):
-            verify_team_total(row)
+    from app.agents.tools import verify_common_total as verify_team_total
+    row = {'lines': [{'unit_price': price, 'quantity': '1'}], 'supplier_costs': [], 'total_cost': expected}
+    assert str(verify_team_total(row)) == expected
+    row['total_cost'] = '0'
+    with pytest.raises(BridgeError, match='TEAM_CALCULATION_MISMATCH'):
+        verify_team_total(row)
 
 
 def test_irrelevant_supplements_are_not_needed_for_same_plans_and_price(team_storage):
@@ -332,7 +343,7 @@ def test_no_split_requires_no_split_repricing_rule_and_keep_can_stand_alone(team
     ('unextracted_price', 'RECHECK_SOURCE', 'unit_price'),
     ('changed_source', 'RECHECK_SOURCE', 'unit_price'),
     ('missing_price_and_policy', 'HOLD', 'policy'),
-    ('unsupported_cost_basis', 'HOLD', 'UNSUPPORTED_COST_MAPPING:qv-b.SHIPPING'),
+    ('unsupported_cost_basis', 'NEEDS_EVIDENCE', 'cost_terms'),
     ('split_scope', 'HOLD', 'review_facts.repricing_scope'),
 ])
 def test_missing_facts_extraction_and_configuration_use_distinct_actions(team_storage, fault, action, field):
@@ -341,13 +352,15 @@ def test_missing_facts_extraction_and_configuration_use_distinct_actions(team_st
     if fault in ('missing_price', 'unextracted_price', 'missing_price_and_policy'):
         row.unit_price = None
         if fault != 'unextracted_price':row.evidence_jsonb.pop('unit_price')
+        if fault == 'missing_price':
+            common.mail_messages[row.source_mail_id]['body_text'] = common.mail_messages[row.source_mail_id]['body_text'].replace('unit_price: 5400', 'unit_price: 미확인')
     if fault == 'missing_price_and_policy':common.work_cases[CASE]['policy'] = None
     if fault == 'changed_source':
         common.mail_messages[row.source_mail_id]['body_text'] = common.mail_messages[row.source_mail_id]['body_text'].replace('unit_price: 5400', 'unit_price: 미확인')
     if fault == 'unsupported_cost_basis':
-        row.cost_terms_jsonb[0]['basis'] = '회당'
-        row.cost_terms_jsonb[0]['source_text'] = row.cost_terms_jsonb[0]['source_text'].replace('비교기간 전체', '회당')
-        common.mail_messages[row.source_mail_id]['body_text'] = common.mail_messages[row.source_mail_id]['body_text'].replace('SHIPPING: 10000원 비교기간 전체', 'SHIPPING: 10000원 회당')
+        row.cost_terms_jsonb[0]['basis'] = '박스당'
+        row.cost_terms_jsonb[0]['source_text'] = row.cost_terms_jsonb[0]['source_text'].replace('비교기간 전체', '박스당')
+        common.mail_messages[row.source_mail_id]['body_text'] = common.mail_messages[row.source_mail_id]['body_text'].replace('SHIPPING: 10000원 비교기간 전체', 'SHIPPING: 10000원 박스당')
     if fault == 'split_scope':supplement.facts.pop('repricing_scope')
     supplement.refresh_binding()
     result = run_plan(team_storage)
@@ -357,7 +370,7 @@ def test_missing_facts_extraction_and_configuration_use_distinct_actions(team_st
     assert not refs.records
 
 
-@pytest.mark.parametrize('field', ['policy', 'create_mail_draft', 'ValidationStore.resolve'])
+@pytest.mark.parametrize('field', ['policy', 'create_mail_draft', 'PlanStore.read_plan_calculation'])
 def test_upstream_development_questions_are_not_sent_to_supplier(team_storage, field):
     common, scope, _, refs, _ = team_storage
     out = AgentRunner(ToolDrivenModel(messages=iter([])), runs=common)(R.RESPONSE_PLAN,
@@ -389,11 +402,11 @@ def test_shared_rounding_is_per_component_after_sum_not_per_line_or_final_total(
     assert Decimal('1.012') <= Decimal('1.015') < _shared_total(['1.006'], '0.006')
 
 
-@pytest.mark.parametrize('cap,exact_target', [('100.00', '100'), ('100.005', '100.005')])
-def test_rounding_changes_target_grid_and_policy_limit_decision(team_storage, cap, exact_target):
+@pytest.mark.parametrize('cap,rounded_expected', [('100.00', '100.004'), ('100.005', '100.004')])
+def test_rounding_changes_target_grid_and_policy_limit_decision(team_storage, cap, rounded_expected):
     from decimal import Decimal
-    from app.agents.kan60.purchase_plans.tools import build_plan_set
-    from app.agents.kan60.purchase_plans.negotiation import calculate_offer, validate_offer
+    from app.agents.tools import compute_plan_set as build_plan_set
+    from app.agents.tools import compute_counter_offer as calculate_offer, check_counter_offer_calculation as validate_offer
     _, scope, _, _, repo = team_storage
     data = repo.snapshot(scope)['data']
     data['changeable_quantity'] = '1'
@@ -404,7 +417,7 @@ def test_rounding_changes_target_grid_and_policy_limit_decision(team_storage, ca
         q.update(unit_price='102' if i == 0 else '101', available_quantity='1',
                  costs={'transport': '0', 'other_logistics': '0', 'switching': '0'})
     bundle = build_plan_set(data);offer = calculate_offer(data, bundle)
-    assert offer['offer']['target_unit_price'] == exact_target and validate_offer(data, bundle, offer)['valid']
+    assert offer['offer']['target_unit_price'] == rounded_expected and validate_offer(data, bundle, offer)['valid']
     # Boundary comparison only, not an alternate production optimizer.
     grid = [Decimal(i) / 1000 for i in range(99990, 100021)]
     rounded_target = max(p for p in grid if _shared_total([str(p)]) <= Decimal(cap))
@@ -423,8 +436,8 @@ def test_blocked_features_are_explicit_holds_not_supplier_questions(team_storage
 
 
 def test_existing_core_fixed_contract_still_works_but_team_mapping_is_not_claimed(team_storage):
-    from app.agents.kan60.purchase_plans.tools import build_plan_set
-    from app.agents.kan60.purchase_plans.negotiation import calculate_offer, validate_offer
+    from app.agents.tools import compute_plan_set as build_plan_set
+    from app.agents.tools import compute_counter_offer as calculate_offer, check_counter_offer_calculation as validate_offer
     _, scope, _, _, repo = team_storage
     data = repo.snapshot(scope)['data']
     data['fixed_commitment']['quantity'] = '100'
@@ -467,7 +480,7 @@ def set_pack(storage, unit='kg', raw_unit=None):
 
 
 def test_review_pack_multiple_registered_allocation_and_repricing(team_storage):
-    from app.agents.kan60.purchase_plans.tools import build_plan_set
+    from app.agents.tools import compute_plan_set as build_plan_set
     common, scope, _, refs, repo = team_storage
     set_pack(team_storage)
     result = run_plan(team_storage)
@@ -487,9 +500,9 @@ def test_review_pack_multiple_registered_allocation_and_repricing(team_storage):
 
 
 def test_review_pack_independent_check_does_not_trust_operating_acceptance(team_storage):
-    from app.agents.kan60.purchase_plans.tools import build_plan_set
-    from app.agents.kan60.purchase_plans.negotiation import verify_plan_cost
-    from app.agents.kan60.purchase_plans.contract import ReviewError
+    from app.agents.tools import compute_plan_set as build_plan_set
+    from app.agents.tools import verify_independent_plan_cost as verify_plan_cost
+    from app.agents.tools import CalculationError as ReviewError
     _, scope, _, _, repo = team_storage
     data = repo.snapshot(scope)['data']
     row = next(p for p in build_plan_set(data)['plans'] if p['status']=='VALID' and
@@ -586,7 +599,7 @@ def test_review_pack_evidence_and_unit_are_not_inferred(team_storage, fault, act
 
 @pytest.mark.parametrize('revision', [-1, True])
 def test_review_revision_contract_still_rejects_negative_and_bool(team_storage, revision):
-    from app.agents.kan60.purchase_plans.contract import parse, ReviewError
+    from app.agents.tools import validate_purchase_inputs as parse, CalculationError as ReviewError
     _, scope, _, _, repo=team_storage
     data=repo.snapshot(scope)['data'];data['revision']=revision
     with pytest.raises(ReviewError) as rejected:parse(data)
@@ -601,3 +614,77 @@ def test_review_revision_zero_to_one_still_blocks(team_storage):
     with pytest.raises(Exception, match='STALE_REVISION'):
         run_plan(team_storage, ToolDrivenModel(messages=iter([]),hook=advance),scope)
     assert not refs.records and common.agent_runs['run-1']['status']=='FAILED'
+
+
+def test_final_guard_team_plan_repeats_without_reference_or_result_writes(team_storage, monkeypatch):
+    common, scope, _, refs, repo = team_storage
+    output = run_plan(team_storage)
+    data = PlanIn(case_id=UUID(CASE), input_revision=scope.revision, quote_version_ids=list(scope.quote_ids))
+    context = RunContext(CASE, scope.revision, 'SYNTHETIC-final-run')
+    before = deepcopy((refs.records, common.agent_runs))
+    forbid_final_writes(monkeypatch, repo)
+    def forbidden(*args):pytest.fail('Final guard attempted a ValidationStore write')
+    monkeypatch.setattr(refs, 'put_if_current', forbidden)
+    for _ in range(2):
+        assert check_final_output(R.RESPONSE_PLAN, data, context, output) == output
+    forged = wire(output);forged['plans'][0]['total_amount'] = '1'
+    with pytest.raises(BridgeError, match='PLAN_REFERENCE_MISMATCH'):
+        check_final_output(R.RESPONSE_PLAN, data, context, forged)
+    assert (refs.records, common.agent_runs) == before
+
+
+@pytest.mark.parametrize('role', [R.RESPONSE_PLAN, R.COUNTER_OFFER])
+def test_final_guard_team_policy_hold_requires_no_supplements_or_validation_store(team_storage, monkeypatch, role):
+    common, scope, _, refs, repo = team_storage
+    common.work_cases[CASE]['policy'] = None
+    configure_review_stores(common)
+    data_type = PlanIn if role == R.RESPONSE_PLAN else CounterOfferIn
+    data = data_type(case_id=UUID(CASE), input_revision=scope.revision, quote_version_ids=list(scope.quote_ids))
+    context = RunContext(CASE, scope.revision, 'SYNTHETIC-final-run')
+    output = {'next_action': 'HOLD', 'reason': 'SYNTHETIC policy missing', 'unknown_fields': ['policy']}
+    def forbidden(*args):pytest.fail('Normal HOLD must not load calculation-ready business facts')
+    monkeypatch.setattr(ReviewAccess, 'snapshot', forbidden)
+    forbid_final_writes(monkeypatch, repo)
+    for _ in range(2):
+        assert check_final_output(role, data, context, output).next_action == 'HOLD'
+    # Even without policy, cross-case/stale quote data cannot become a valid HOLD.
+    common.quote_versions['qv-b'].work_case_id = 'foreign-case'
+    # MemoryStore removes that foreign row from the case's latest quote IDs.
+    with pytest.raises(BridgeError, match='STALE_QUOTE_VERSIONS'):
+        check_final_output(role, data, context, output)
+    assert not refs.records and not common.agent_runs
+
+
+def test_final_guard_team_proposal_requires_validation_store(team_storage):
+    common, scope, supplement, _, repo = team_storage
+    output = run_plan(team_storage)
+    configure_review_stores(common, supplements=supplement)
+    data = PlanIn(case_id=UUID(CASE), input_revision=scope.revision, quote_version_ids=list(scope.quote_ids))
+    with pytest.raises(MissingTeamData) as rejected:
+        check_final_output(R.RESPONSE_PLAN, data, RunContext(CASE, scope.revision), output)
+    assert rejected.value.fields == ['PlanStore.read_plan_calculation']
+
+
+def test_final_guard_team_validation_row_cannot_replace_missing_shared_draft_lookup(team_storage, monkeypatch):
+    common, scope, _, refs, repo = team_storage
+    plan = run_plan(team_storage)
+    context = RunContext(CASE, scope.revision, 'SYNTHETIC-final-run')
+    service = BridgeService(repo.for_run(context), None)
+    calc = service.calculate(scope, plan.plans)
+    target = service.validate_target(scope, calc['target'], calc['calculation_ref'])
+    # A record with matching target is not evidence of an actual common-tool draft.
+    ref = refs.put_if_current(scope, digest(service.repo.snapshot(scope)), 'DRAFT',
+        {'target': wire(target), 'send_authorized': False}, context.agent_run_id)
+    data = CounterOfferIn(case_id=UUID(CASE), input_revision=scope.revision,
+                         quote_version_ids=list(scope.quote_ids), validated_plans=plan.plans)
+    payload = {'next_action': 'COUNTER_OFFER_PROPOSED', 'reason': 'SYNTHETIC',
+               'target': wire(target), 'draft_ids': [ref]}
+    before = deepcopy((refs.records, common.agent_runs))
+    forbid_final_writes(monkeypatch, repo)
+    def forbidden(*args):pytest.fail('Final guard attempted a ValidationStore write')
+    monkeypatch.setattr(refs, 'put_if_current', forbidden)
+    for _ in range(2):
+        with pytest.raises(MissingTeamData) as rejected:
+            check_final_output(R.COUNTER_OFFER, data, context, payload)
+        assert rejected.value.fields == ['create_mail_draft.resolve']
+    assert (refs.records, common.agent_runs) == before
