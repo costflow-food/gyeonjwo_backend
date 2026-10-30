@@ -331,7 +331,8 @@ _NOTE_REPEAT_FIELDS = ('unit_price', 'effective_from', 'valid_until', 'delivery_
 # 거절·조정 코드별로 LLM이 다음 호출에서 고칠 방법
 _HINTS = {
     'SOURCE_MISMATCH': '원문 표기 그대로 값 부분만 옮긴다. 원문에 없는 값은 null로 보낸다.',
-    'MISSING_EVIDENCE': '값을 읽은 메일의 evidence{mail_id, part, page}를 붙인다.',
+    'MISSING_EVIDENCE': '값을 읽은 메일의 evidence{mail_id, part, page}를 붙인다. 원문에서 그 항목을 직접 읽지 않았다면 '
+                        '(다른 항목의 값을 옮겨 쓴 경우 등) 그 항목은 빼고 다시 보낸다.',
     'EVIDENCE_NOT_IN_CASE': 'get_case_context 메일 목록의 mail_id와 part(본문 body, 첨부 att-1 등)를 쓴다.',
     'INVALID_NUMBER': '숫자와 단위·통화만 옮긴다 (예: "54,500원", "300kg", "3.20 USD"). 그래도 안 되면 그 항목만 null로 보낸다.',
     'INVALID_DATE': '연도가 있는 날짜만 옮긴다. 연도가 없으면 그 항목만 null로 보낸다.',
@@ -411,6 +412,11 @@ class QuoteVersionRecord(StrictModel):
     item_notes_jsonb: list[dict]
     evidence_jsonb: dict               # 필드 → {raw_value, value, mail_id, location, carried_from?}
     extraction_status: Literal['NEEDS_REVIEW', 'CONFIRMED', 'UNSUPPORTED']
+    currency: str = 'KRW'              # 원문에 통화가 없으면 KRW
+    moq_quantity: DecimalStr | None = None
+    moq_unit: str | None = None
+    order_increment_quantity: DecimalStr | None = None   # 발주 배수 (pack_multiple)
+    order_increment_unit: str | None = None
     mail_normalized: dict              # mail_id → mail_messages.normalized_jsonb
     case_conditions: dict | None       # 최초 추출 시 work_cases.item_name·specification
 
@@ -861,6 +867,9 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         cost_terms_jsonb=costs, item_notes_jsonb=notes,
         evidence_jsonb={name: entry for name, entry in values.items() if QUOTE_FIELDS[name][1] != 'mail'},
         extraction_status='NEEDS_REVIEW' if foreign or review else 'CONFIRMED',
+        currency=value('currency') or 'KRW', moq_quantity=value('moq'),
+        moq_unit=values.get('moq', {}).get('quantity_unit'), order_increment_quantity=value('pack_multiple'),
+        order_increment_unit=values.get('pack_multiple', {}).get('quantity_unit'),
         mail_normalized=mails,
         case_conditions={'item_name': value('item_name'), 'specification': value('specification')}
         if not case_item and 'item_name' in current else None)
@@ -1068,6 +1077,23 @@ def _same_unit(a: str | None, b: str | None) -> bool:
     return not a or not b or unit_name(_UNIT_ALIASES.get(a, a)) == unit_name(_UNIT_ALIASES.get(b, b))
 
 
+_KG_PER = {'kg': Decimal(1), 'g': Decimal('0.001'), '톤': Decimal(1000)}
+
+
+def _price_in_case_unit(price: dict, case_unit: str | None, item: dict) -> Decimal | None:
+    """단가를 업무 수량 단위의 단가로 바꾼다. 같은 단위, 무게 단위끼리(kg·g·톤), 박스↔무게(supplier_items.weight_per_box kg)만
+    환산하고 그 밖에는 비교하지 않는다(None)."""
+    value = Decimal(str(price['unit_price']))
+    if _same_unit(price.get('unit'), case_unit):
+        return value
+    unit, wanted = (unit_name(_UNIT_ALIASES.get(u, u)) for u in (price['unit'], case_unit))
+    box_kg = _weight(item.get('weight_per_box')) or None
+    per_kg = value / _KG_PER[unit] if unit in _KG_PER else value / box_kg if unit == 'box' and box_kg else None
+    if per_kg is None:
+        return None
+    return per_kg * _KG_PER[wanted] if wanted in _KG_PER else per_kg * box_kg if wanted == 'box' and box_kg else None
+
+
 def _preferences(case: dict, rows: dict[str, dict], purchases: dict[str, dict]) -> tuple[dict, list[str]]:
     """PREFERENCE_WEIGHTS로 업체별 (선호 체크, 점수)를 만든다. 모르는 키·잘못된 가중치는 무시하고 ignored로 알린다."""
     weights = PREFERENCE_WEIGHTS
@@ -1077,8 +1103,8 @@ def _preferences(case: dict, rows: dict[str, dict], purchases: dict[str, dict]) 
     for supplier_id, item in rows.items():
         price = purchases.get(supplier_id) or item.get('reference_quote')      # 실거래 우선, 없으면 참고 견적
         if price and price.get('unit_price') is not None and (price.get('currency') or 'KRW') == 'KRW' and \
-                _same_unit(price.get('unit'), case.get('unit')):
-            prices[supplier_id] = Decimal(str(price['unit_price']))
+                (converted := _price_in_case_unit(price, case.get('unit'), item)) is not None:
+            prices[supplier_id] = converted
     for key, raw in weights.items():
         weight = _weight(raw)
         if weight is None:
