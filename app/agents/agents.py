@@ -134,12 +134,35 @@ next_action:
     AgentRole.INFO_PRIORITY: '',
     # ④ 유지·전환·최대 2곳 분산안, validate_purchase_plan 실패 사유로 수정, 탐색 범위·조건부 명시
     #    PLANS_PROPOSED: 안 구성 / NEEDS_EVIDENCE: ③ 확인 필요(unknown_fields에) / RECHECK_SOURCE / HOLD
-    AgentRole.RESPONSE_PLAN: '',
+    AgentRole.RESPONSE_PLAN: '''업무·revision은 RunContext로 도구에 전달되므로 도구 인자로 만들지 않는다.
+get_case_context로 요청 조건과 정책을 확인한다. CASE_NOT_FOUND·REVISION_CHANGED면 즉시 HOLD한다.
+build_plan_candidates로 유지·전환·최대 2곳 분산안을 만들고, 반환된 전체 안을 validate_purchase_plan에 전달한다.
+PASS가 확인된 전체 plans와 calculation_ref를 그대로 PlanOut에 옮긴다. 금액·배분·참조를 직접 만들지 않는다.
+plan_check_reason이 있거나 검증이 FIX이면 허용 도구로 다시 구성·검증한다. 같은 잘못된 안을 그대로 재전송하지 않는다.
+도구가 NEEDS_EVIDENCE 또는 RECHECK_SOURCE를 반환하면 해당 next_action과 unknown_fields를 그대로 전달한다.
+회사 정책·공통 도구·저장소 문제는 HOLD이며 거래처 질문으로 보내지 않는다. 미합의 고정 물량·부분 비교도 HOLD한다.
+check_comparability가 등록되지 않았는데 호출하거나 비교 성공으로 가정하지 않는다. 현재 전용 도구의 비교 범위는
+입력으로 제공된 검증 가능 견적과 명시된 배분 간격뿐이며 시장 최적성을 주장하지 않는다.
+RECHECK_SOURCE가 필요하면 unknown_fields에는 공통 EXTRACTION_FIELD_NAMES의 실제 해당 필드 이름만 쓴다.
+save_agent_result는 중간 기록만 저장한다. 최종 응답 저장은 AgentRunner가 담당한다.''',
     # ⑤ 기존 업체 유지 조건, 검증된 대안·회사 정책 기준, 정책 없으면 목표 가격 생성 금지
     #    COUNTER_OFFER_PROPOSED: 목표 조건·초안 / COUNTER_OFFER_SKIPPED: 정책상 역제안 불필요 (target·초안 없이, reason에 근거)
     #    NEEDS_EVIDENCE / RECHECK_SOURCE / HOLD: 정책·근거 없음
     #    가격 검증 FIX로 다시 호출되면 입력의 price_check_reason을 보고 목표 조건을 고친다
-    AgentRole.COUNTER_OFFER: '',
+    AgentRole.COUNTER_OFFER: '''입력의 validated_plans 전체를 calculate_counter_offer에 전달한다.
+계산 결과의 target과 calculation_ref를 validate_counter_offer로 독립 검증한다. 가격·정책·참조는 직접 만들지 않는다.
+price_check_reason이 있으면 허용 도구로 다시 계산·검증한다. 도구가 HOLD/NEEDS_EVIDENCE/RECHECK_SOURCE이면
+해당 next_action과 unknown_fields를 그대로 전달한다. 개발 의존성·회사 정책을 거래처 질문으로 보내지 않는다.
+검증 결과의 missing_dependencies가 있으면 해당 항목을 unknown_fields에 넣어 HOLD한다.
+공통 create_mail_draft가 실제 제공되면 그 도구의 선언된 입력 계약으로 검증된 target과 근거 참조를 연결한다.
+입력 계약으로 검증 참조를 전달할 수 없거나 초안과 검증 target의 결합을 확인할 수 없으면
+unknown_fields=['create_mail_draft.validation_binding']으로 HOLD한다. 인자나 초안 ID를 추측하지 않는다.
+공통 도구가 같은 업무·revision·검증 target에 결합된 초안 ID를 반환한 경우에만
+그 target과 draft_ids를 그대로 COUNTER_OFFER_PROPOSED로 전달한다.
+HOLD에서는 target=null, draft_ids=[]로 둔다. 가격 검증 성공만으로 초안 완료를 주장하지 않는다.
+COUNTER_OFFER_SKIPPED의 독립 증명·카드 연결도 미합의이므로 생략 성공으로 처리하지 말고 HOLD한다.
+check_comparability와 공통 도구를 전용 어댑터로 대체하지 않는다. save_agent_result는 중간 기록만 저장하며
+최종 응답은 AgentRunner가 저장한다. 발송 권한을 생성하지 않는다.''',
 }
 
 

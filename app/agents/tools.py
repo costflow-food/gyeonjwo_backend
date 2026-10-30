@@ -951,3 +951,64 @@ def store_structured_mail(fields: list[QuoteField], runtime: ToolRuntime[RunCont
     '''
     context = _run_context(_quote_store, runtime)
     return save_structured_quote(_quote_store, context, fields, price_tiers or [], cost_terms or [], item_notes or [])
+
+
+# ④ RESPONSE_PLAN: build_plan_candidates, validate_purchase_plan
+# Only our private repository port is configured here. Shared tools/stores above
+# remain owned by their original implementation; no registry replacement occurs.
+from app.agents.kan60.team_bridge.product import (
+    use_review_repository, dispatch_review, validate_plans as _validate_review_plans,
+    calculate_offer as _calculate_review_offer,
+)
+from app.agents.kan60.team_bridge.team_data import TeamReviewRepository
+
+
+def use_team_review_stores(*, supplements=None, references=None) -> None:
+    """Bind existing CaseStore/QuoteStore after their normal startup configuration.
+
+    Missing supplemental facts/reference persistence explicitly HOLD. These private
+    ports do not redefine the shared interfaces or supply an in-memory fallback.
+    """
+    use_review_repository(TeamReviewRepository(_case_store, _quote_store, supplements, references))
+
+
+@register
+@tool
+def build_plan_candidates(runtime: ToolRuntime[RunContext]) -> dict:
+    '''현재 업무의 견적·정책으로 유지·전환·2업체 분산안을 계산한다. 반환 plans 전체를 validate_purchase_plan에
+    전달한다. 미확인 정책·비교 범위는 HOLD이며 금액을 추측하지 않는다. 업무 범위는 RunContext로 검사한다.'''
+    return dispatch_review(runtime, _agent_role(runtime), AgentRole.RESPONSE_PLAN,
+                           lambda service, scope, data: service.build_candidates(scope))
+
+
+@register
+@tool
+def validate_purchase_plan(plans: list[dict], runtime: ToolRuntime[RunContext]) -> dict:
+    '''전체 구매안의 배분·총액·검증 참조를 독립 재검증한다. PASS이면 plans·plan_set_ref, 수정 가능 오류는
+    FIX·reason·빈 plans를 반환한다. 받은 검증 참조를 그대로 사용하고 금액을 직접 수정하지 않는다.'''
+    return dispatch_review(runtime, _agent_role(runtime), AgentRole.RESPONSE_PLAN,
+                           lambda service, scope, data: _validate_review_plans(service, scope, plans))
+
+
+# ⑤ COUNTER_OFFER: calculate_counter_offer, validate_counter_offer
+@register
+@tool
+def calculate_counter_offer(validated_plans: list[dict], runtime: ToolRuntime[RunContext]) -> dict:
+    '''입력의 검증된 전체 대안과 회사 정책으로 목표 조건별 비용을 계산한다. READY이면 target·calculation_ref.
+    정책 누락·생략 미합의는 HOLD한다. 입력의 대안을 임의로 제외하거나 인상률을 지어내지 않는다.'''
+    return dispatch_review(runtime, _agent_role(runtime), AgentRole.COUNTER_OFFER,
+                           lambda service, scope, data: _calculate_review_offer(service, scope, data, validated_plans))
+
+
+@register
+@tool
+def validate_counter_offer(target: dict, calculation_ref: str, runtime: ToolRuntime[RunContext]) -> dict:
+    '''목표가·정책·대안 전체·근거 버전을 독립 검증한다. valid=true와 validation_ref가 포함된 target을 반환한다.
+    이것은 초안 생성 성공이 아니다. missing_dependencies가 있으면 해당 의존성을 해결해야 한다.'''
+    def validate(service, scope, data):
+        from app.agents.kan60.team_bridge.service import wire
+        return {'valid': True, 'target': wire(service.validate_target(scope, target, calculation_ref)),
+                'next_step': 'create_mail_draft',
+                'missing_dependencies': [] if 'create_mail_draft' in _registry else ['create_mail_draft'],
+                'send_authorized': False}
+    return dispatch_review(runtime, _agent_role(runtime), AgentRole.COUNTER_OFFER, validate)
