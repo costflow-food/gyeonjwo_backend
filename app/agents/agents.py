@@ -141,7 +141,9 @@ next_action:
    - supplier_ids에는 candidates의 supplier_id를 모두 넣는다. 업체마다 따로 부르지 않는다.
    - subject·body는 모든 업체에 같이 쓰는 템플릿이다. 사실은 자리표시자로 쓴다.
      {업체명}(견적을 요청받는 업체) {품목} {규격} {수량} {납기일} {회신기한}(오늘+2일, 도구가 채움) {질문목록}
-   - body에는 {질문목록}을 반드시 넣는다. 질문은 도구가 업체마다 채운다.
+   - body에는 {질문목록}을 반드시 넣는다. 질문은 도구가 업체마다 채운다. 질문 문장을 직접 나열하지 않는다.
+   - 품목·규격·수량·납기·회신기한·업체 이름은 실제 값을 쓰지 말고 반드시 자리표시자 그대로 둔다
+     (예: "냉동 딸기"가 아니라 {품목}, "600"이 아니라 {수량}). 값은 도구가 업체마다 채운다.
    - 숫자·날짜·금액·단가·업체 이름은 직접 쓰지 않는다. 인상을 요청한 업체나 그 가격도 언급하지 않는다.
    - 보내는 회사는 (주)트루나스다(견줘를 쓰는 회사).
    - 아래 형식을 줄바꿈·빈 줄까지 그대로 따른다. 문단 사이에는 빈 줄을 한 줄 둔다.
@@ -170,7 +172,8 @@ next_action:
   checklist·preference_score·evidence_refs는 search_supplier_evidence 결과를 그대로 옮긴다. 바꾸거나 지어내지 않는다.
   reason은 담당자가 읽을 한 문장이다(어떤 필수 조건이 확인됐고, 무엇을 견적 회신으로 확인하는지).
   가격·물량을 추측해 쓰지 않는다.
-- 최종 응답의 reason(전체)은 검색 결과의 summary 문장을 쓴다.
+- 최종 응답의 reason(전체)은 SEND_RFQ면 create_mail_draft 결과의 summary, HOLD면 search_supplier_evidence 결과의
+  summary 문장을 그대로 쓴다.
 - reason은 모두 구매담당자가 읽는 한국어 문장이다. 영문 코드(INCUMBENT·REQUIRED_FAIL·PASS·UNKNOWN 등)와
   필드 이름(scope.searched·excluded·standardized_item_key 등)은 쓰지 않는다. 코드는 아래처럼 바꿔 쓴다.
   INCUMBENT → 인상을 요청한 업체 / REQUIRED_FAIL → 필수 조건 불충족 / PASS → 확인됨 / UNKNOWN → 견적 회신으로 확인
@@ -302,9 +305,13 @@ def _check_candidates(output: AgentOutput, messages: list) -> AgentOutput:
                   for sid in suppliers if sid in found]
     unknown_fields = [f"{c['supplier_id']}.{check['condition']}" for c in candidates for check in c['checklist']
                       if check['required'] and check['state'] == 'UNKNOWN']
+    # 전체 사유는 실제로 초안을 만든 업체 기준 문장(create_mail_draft의 summary)으로 둔다. 검색 시점 문장은
+    # 연락처가 없어 초안을 못 만든 업체까지 "견적을 요청합니다"로 쓰므로 LLM 문장을 쓰지 않는다
+    draft_summary = next((r['summary'] for r in reversed(_tool_results(messages, 'create_mail_draft'))
+                          if r.get('summary')), None)
     return type(output).model_validate(output.model_dump() | {
         'next_action': 'SEND_RFQ', 'draft_ids': ids, 'candidates': candidates, 'unknown_fields': unknown_fields,
-        'reason': _readable(output.reason, summary)[:500]})
+        'reason': (draft_summary or _readable(output.reason, summary))[:500]})
 
 
 class AgentRunStore(Protocol):

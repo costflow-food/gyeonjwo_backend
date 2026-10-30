@@ -1127,8 +1127,13 @@ def _score_text(score: Decimal) -> str:
 EXCLUDE_LABELS = {'INCUMBENT': '인상을 요청한 업체', 'REQUIRED_FAIL': '필수 조건 불충족', 'OVER_LIMIT': '후보 상한 초과'}
 
 
-def search_summary(result: dict, item_name: str) -> str:
-    """구매담당자가 읽는 조회 결과 한두 문장. 코드·필드 이름을 쓰지 않는다."""
+DRAFT_SKIP_LABELS = {'NO_CONTACT': '연락처가 없는 업체'}
+
+
+def search_summary(result: dict, item_name: str, drafted: list[str] | None = None,
+                   not_drafted: list[dict] | None = None) -> str:
+    """구매담당자가 읽는 조회 결과 한두 문장. 코드·필드 이름을 쓰지 않는다.
+    drafted가 있으면(초안 생성 후) 실제로 초안을 만든 업체와 만들지 못한 업체로 쓴다."""
     scope = result['scope']
     if scope['searched'] == 0:
         return f'{item_name} 취급 등록 업체가 없어 견적을 요청할 후보가 없습니다.'
@@ -1141,9 +1146,15 @@ def search_summary(result: dict, item_name: str) -> str:
     excluded = f' {", ".join(parts)}을 제외했습니다.' if parts else ''
     if not result['candidates']:
         return f'{item_name} 취급 등록 업체 {scope["searched"]}곳을 확인했습니다.{excluded} 견적을 요청할 후보가 없습니다.'
-    names = ', '.join(c.get('supplier_name') or c['supplier_id'] for c in result['candidates'])
-    return (f'{item_name} 취급 등록 업체 {scope["searched"]}곳을 확인했습니다.{excluded} '
-            f'{len(result["candidates"])}곳({names})에 견적을 요청합니다.')
+    name_of = {c['supplier_id']: c.get('supplier_name') or c['supplier_id'] for c in result['candidates']}
+    targets = drafted if drafted is not None else list(name_of)
+    text = (f'{item_name} 취급 등록 업체 {scope["searched"]}곳을 확인했습니다.{excluded} '
+            f'{len(targets)}곳({", ".join(name_of.get(sid, sid) for sid in targets)})에 견적을 요청합니다.')
+    for code, label in DRAFT_SKIP_LABELS.items():
+        skipped = [r['supplier_id'] for r in not_drafted or [] if r['code'] == code and r['supplier_id'] in name_of]
+        if skipped:
+            text += f' {label} {len(skipped)}곳({", ".join(name_of[sid] for sid in skipped)})은 초안을 만들지 못했습니다.'
+    return text
 
 
 def candidate_summary(checklist: list[dict]) -> str:
@@ -1242,13 +1253,19 @@ def search_supplier_evidence(runtime: ToolRuntime[RunContext]) -> dict:
     필수 조건을 모르는 업체는 후보에 넣어 RFQ로 확인한다. 가격은 돌려주지 않는다.
 
     반환 status:
-    - OK: scope(조회한 업체 수·후보 수·제외 수), rfq_facts(메일 자리표시자에 들어갈 업무 값),
-      candidates(supplier_id·supplier_name·checklist·preference_score·evidence_refs·questions(RFQ로 물을 것)·notes(표시용)),
+    - OK: scope(조회한 업체 수·후보 수·제외 수),
+      candidates(supplier_id·supplier_name·checklist·preference_score·evidence_refs·notes(표시용)),
       excluded(supplier_id·code: INCUMBENT·REQUIRED_FAIL·OVER_LIMIT·label: 한글 사유),
       summary(구매담당자가 읽는 조회 결과 문장. HOLD면 reason에 이 문장을 쓴다)
     - CONDITIONS_MISSING: 업무 품목이 정해지지 않았다 / REVISION_CHANGED / CASE_NOT_FOUND
+    메일에 들어갈 품목·수량·납기 값과 질문 문장은 돌려주지 않는다. create_mail_draft가 자리표시자로 채운다.
     '''
-    return evaluate_candidates(_candidate_store, _run_context(_candidate_store, runtime))
+    result = evaluate_candidates(_candidate_store, _run_context(_candidate_store, runtime))
+    # LLM이 메일 본문에 값을 직접 옮겨 쓰지 않게 메일용 값(rfq_facts)과 질문 문장(questions)은 보여주지 않는다
+    result.pop('rfq_facts', None)
+    for candidate in result.get('candidates', []):
+        candidate.pop('questions', None)
+    return result
 
 
 # 공용(②③⑤) create_mail_draft — 이번에는 RFQ만. CLARIFICATION·COUNTER_OFFER는 ③⑤ 담당과 합의 후 추가한다.
@@ -1401,9 +1418,14 @@ def save_mail_drafts(store: MailDraftStore, context: RunContext, purpose: str, s
 
     result = {'status': 'DRAFTED' if drafts else 'REJECTED', 'template': template, 'drafts': drafts,
               'rejected': rejected}
-    if adjusted:
+    if drafts:      # 실제로 초안을 만든 업체 기준의 구매담당자용 문장. 최종 응답 reason에 쓴다
+        result['summary'] = search_summary(found, facts.get('품목') or '요청 품목',
+                                           [d['supplier_id'] for d in drafts], rejected)
+    hints = {item['code']: _DRAFT_HINTS[item['code']] for item in rejected}
+    if adjusted:    # 기본 문안으로 이미 저장했다. 고쳐서 다시 부르라는 뜻으로 읽히지 않게 힌트를 따로 준다
         result['adjusted'] = adjusted
-    hints = {item['code']: _DRAFT_HINTS[item['code']] for item in rejected + adjusted}
+        hints |= {item['code']: f'{_DRAFT_HINTS[item["code"]]} 이번에는 기본 문안으로 저장했다. 다시 부르지 않는다.'
+                  for item in adjusted}
     return result | {'hints': hints} if hints else result
 
 
@@ -1419,7 +1441,8 @@ def create_mail_draft(purpose: str, supplier_ids: list[str], subject: str, body:
       숫자·날짜·금액·업체 이름은 직접 쓰지 않는다. 받는 주소는 도구가 정한다.
 
     반환 status:
-    - DRAFTED: drafts(supplier_id·draft_id), rejected(supplier_id·code: 초안을 만들지 않은 업체), template(LLM 또는
+    - DRAFTED: drafts(supplier_id·draft_id), rejected(supplier_id·code: 초안을 만들지 않은 업체),
+      summary(실제로 초안을 만든 업체 기준 구매담당자용 문장. 최종 응답 reason에 쓴다), template(LLM 또는
       DEFAULT: 템플릿이 검사에 걸려 기본 문안으로 대신했다. adjusted에 이유가 있다. 다시 보내지 않는다), hints
     - REJECTED: code(UNSUPPORTED_PURPOSE·NO_SUPPLIERS) 또는 모든 업체가 rejected / REVISION_CHANGED / CASE_NOT_FOUND
     '''
