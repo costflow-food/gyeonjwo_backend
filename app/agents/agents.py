@@ -20,6 +20,7 @@ PROMPTS에는 역할 목표, 어떤 도구를 언제 쓰는지, 어떤 경우 �
 """
 import hashlib
 import json
+from collections.abc import Callable
 from typing import Protocol
 
 from langchain.agents import create_agent
@@ -165,10 +166,12 @@ def build_agent(role: AgentRole, model: BaseChatModel):
 
 
 class UngroundedOutputError(RuntimeError):
-    """최종 응답이 이번 실행의 도구 결과와 맞지 않는다 (예: 저장되지 않은 견적 버전 ID)."""
+    """최종 응답이 이번 실행의 도구 결과와 맞지 않는다 (예: 저장되지 않은 견적 버전 ID).
+    역할별 최종 검사(FINAL_CHECKS)가 실패를 알릴 때 쓴다. AgentRunner가 실행 기록을 FAILED로 닫는다."""
 
 
 def _tool_results(messages: list, name: str) -> list[dict]:
+    """이번 실행의 대화 기록에서 name 도구가 돌려준 JSON 결과만 모은다. JSON이 아닌 결과는 건너뛴다."""
     results = []
     for message in messages:
         if isinstance(message, ToolMessage) and message.name == name:
@@ -179,11 +182,10 @@ def _tool_results(messages: list, name: str) -> list[dict]:
     return results
 
 
-def check_grounded(role: AgentRole, output: AgentOutput, messages: list) -> AgentOutput:
-    """LLM의 최종 응답 중 도구 결과로 확인할 수 있는 값은 코드가 대조한다. 맞지 않으면 실행 실패로 남긴다.
-    ①의 unknown_fields는 필드 이름만 남긴다. ③④⑤의 recheck_fields로 다시 쓰이는 목록이라 문장이 섞이면 안 된다."""
-    if role != AgentRole.INFO_EXTRACTOR:
-        return output
+def check_extraction(role: AgentRole, data: AgentInput, context: RunContext, output: AgentOutput,
+                     messages: list) -> AgentOutput:
+    """INFO_EXTRACTOR의 최종 검사. quote_version_ids가 이번 실행에서 store_structured_mail이 실제로 저장한 ID인지 대조한다.
+    unknown_fields는 필드 이름만 남긴다. 다른 역할의 recheck_fields로 다시 쓰이는 목록이라 문장이 섞이면 안 된다."""
     results = [result for result in _tool_results(messages, 'store_structured_mail') if result.get('status') == 'STORED']
     stored = {result['quote_version_id'] for result in results}
     ids = set(output.quote_version_ids)
@@ -202,6 +204,30 @@ def check_grounded(role: AgentRole, output: AgentOutput, messages: list) -> Agen
     if unknown != output.unknown_fields:
         update['unknown_fields'] = unknown
     return type(output).model_validate(output.model_dump() | update) if update else output
+
+
+# 역할별 최종 결과 검사: (role, data, context, output, messages) → 검사·보정한 output.
+#   LLM이 최종 응답에 옮겨 적은 값(ID·총액·참조)을 이번 실행의 도구 결과나 저장소 기록과 대조한다.
+#   맞지 않으면 UngroundedOutputError 등 예외를 올린다 → AgentRunner가 실행 기록을 FAILED로 닫고 그래프는 FAILED로 끝난다.
+#   조회·검증만 하고 새 참조·초안·결과를 저장하지 않는다. 등록되지 않은 역할은 *Out 형식 검증만 받는다.
+#   각 역할 담당은 이 모듈에 검사 함수를 만들고 여기에 한 줄 등록한다 (AgentRunner는 고치지 않는다).
+FinalCheck = Callable[[AgentRole, AgentInput, RunContext, AgentOutput, list], AgentOutput]
+FINAL_CHECKS: dict[AgentRole, FinalCheck] = {
+    AgentRole.INFO_EXTRACTOR: check_extraction,
+}
+
+
+def check_final_output(role: AgentRole, data: AgentInput, context: RunContext, output: AgentOutput,
+                       messages: list) -> AgentOutput:
+    """FINAL_CHECKS에 등록된 역할 검사를 실행한다. 검사가 다른 역할의 결과 모델을 돌려주면 계약 위반으로 실패한다."""
+    check = FINAL_CHECKS.get(role)
+    if check is None:
+        return output
+    checked = check(role, data, context, output, messages)
+    expected_out = AGENT_IO[role][1]
+    if not isinstance(checked, expected_out):
+        raise TypeError(f'{role} final check must return {expected_out.__name__}')
+    return checked
 
 
 class AgentRunStore(Protocol):
@@ -240,7 +266,7 @@ class AgentRunner:
                                  started['review_batch_id'])
         try:
             result = self.agents[role].invoke({'messages': [('user', data.model_dump_json())]}, context=context)
-            output = check_grounded(role, result['structured_response'], result['messages'])
+            output = check_final_output(role, data, context, result['structured_response'], result['messages'])
         except Exception as error:
             if self.runs is not None:
                 self.runs.finish_agent_run(context.agent_run_id, 'FAILED', None, {'type': type(error).__name__})
