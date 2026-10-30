@@ -20,7 +20,7 @@ from agent_memory_store import SyntheticCalculationStore as SyntheticRepository
 from app.agents.tools import ExecutionScope as Scope
 from app.agents.tools import OutputValidationError as BridgeError
 from app.agents.tools import ReviewCalculator as BridgeService, model_payload as wire
-from app.agents.agents import check_final_output
+from app.agents.agents import validate_review_output
 from app.agents.schemas import RunContext, PlanOut, CounterOfferOut
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +69,8 @@ class ToolDrivenModel(GenericFakeChatModel):
             if result['plan_check'] == 'FIX':return call('build_plan_candidates', {'quote_version_ids':data['quote_version_ids']})
             return final('PLANS_PROPOSED', plans=result['plans'])
         if last.name == 'calculate_counter_offer':
+            if result.get('next_action')=='COUNTER_OFFER_SKIPPED':
+                return final('COUNTER_OFFER_SKIPPED',reason=result['reason'])
             target = deepcopy(result['target'])
             if self.mode == 'bad_target':target['target_unit_price'] = '999999'
             return call('validate_counter_offer', {'target': target, 'calculation_ref': result['calculation_ref']})
@@ -308,7 +310,7 @@ def test_final_guard_repeated_valid_output_is_read_only(final_case, monkeypatch,
     before = deepcopy((c.repo._records, c.repo.audit, c.common.agent_runs, wire(data), wire(output)))
     forbid_final_writes(monkeypatch, c.repo)
     for _ in range(2):
-        assert check_final_output(role, data, c.context, output) == output
+        assert validate_review_output(role, data, c.context, output) == output
         for for_save in (False, True):
             assert c.service.check_output(c.scope, role, output, for_save=for_save) == output
     assert (c.repo._records, c.repo.audit, c.common.agent_runs, wire(data), wire(output)) == before
@@ -343,7 +345,7 @@ def test_final_guard_rejects_forged_or_incomplete_proposal_without_writes(final_
     before = deepcopy((c.repo._records, c.repo.audit))
     forbid_final_writes(monkeypatch, c.repo)
     for _ in range(2):
-        with pytest.raises(BridgeError):check_final_output(role, data, c.context, payload)
+        with pytest.raises(BridgeError):validate_review_output(role, data, c.context, payload)
     assert (c.repo._records, c.repo.audit) == before
 
 
@@ -358,7 +360,7 @@ def test_final_guard_requires_actual_draft_target_and_unapproved_send(final_case
     output = c.counter.model_copy(update={'draft_ids': [ref]})
     forbid_final_writes(monkeypatch, c.repo)
     with pytest.raises(BridgeError, match='DRAFT_REFERENCE_MISMATCH'):
-        check_final_output(R.COUNTER_OFFER, c.data, c.context, output)
+        validate_review_output(R.COUNTER_OFFER, c.data, c.context, output)
 
 
 @pytest.mark.parametrize('capability,role,code', [
@@ -372,7 +374,7 @@ def test_final_guard_rejects_missing_read_capability(final_case, monkeypatch, ca
     monkeypatch.setattr(c.repo, capability, None)
     forbid_final_writes(monkeypatch, c.repo)
     data, output = (plan_input(c.scope), c.plan) if role == R.RESPONSE_PLAN else (c.data, c.counter)
-    with pytest.raises(BridgeError, match=code):check_final_output(role, data, c.context, output)
+    with pytest.raises(BridgeError, match=code):validate_review_output(role, data, c.context, output)
 
 
 @pytest.mark.parametrize('action', ['HOLD', 'NEEDS_EVIDENCE', 'RECHECK_SOURCE'])
@@ -388,7 +390,7 @@ def test_final_guard_valid_nonproposal_needs_no_policy_or_business_snapshot(stor
     output = {'next_action': action, 'reason': 'SYNTHETIC unresolved facts',
               'unknown_fields': ['policy' if action == 'HOLD' else 'unit_price']}
     for _ in range(2):
-        checked = check_final_output(role, data, RunContext(scope.case_id, scope.revision), output)
+        checked = validate_review_output(role, data, RunContext(scope.case_id, scope.revision), output)
         assert checked.next_action == action
     assert not repo._records and not repo.audit and not common.agent_runs
 
@@ -410,7 +412,7 @@ def test_final_guard_nonproposal_does_not_bypass_trusted_scope(storage, monkeypa
         context = RunContext(foreign, scope.revision)
     forbid_final_writes(monkeypatch, repo)
     with pytest.raises(BridgeError):
-        check_final_output(role, data, context, {'next_action': 'HOLD', 'reason': 'SYNTHETIC policy missing'})
+        validate_review_output(role, data, context, {'next_action': 'HOLD', 'reason': 'SYNTHETIC policy missing'})
 
 
 @pytest.mark.parametrize('action,fields,code', [
@@ -423,7 +425,7 @@ def test_final_guard_nonproposal_does_not_bypass_trusted_scope(storage, monkeypa
 def test_final_guard_checks_nonproposal_field_contract(storage, action, fields, code):
     _, scope, _ = storage
     with pytest.raises(BridgeError, match=code):
-        check_final_output(R.RESPONSE_PLAN, plan_input(scope), RunContext(scope.case_id, scope.revision),
+        validate_review_output(R.RESPONSE_PLAN, plan_input(scope), RunContext(scope.case_id, scope.revision),
             {'next_action': action, 'reason': 'SYNTHETIC', 'unknown_fields': fields})
 
 
@@ -433,7 +435,7 @@ def test_final_guard_rejects_proposal_content_in_hold(final_case, role):
     data, payload = (plan_input(c.scope), wire(c.plan)) if role == R.RESPONSE_PLAN else (c.data, wire(c.counter))
     payload['next_action'] = 'HOLD'
     with pytest.raises(BridgeError, match='NON_PROPOSAL_HAS_'):
-        check_final_output(role, data, c.context, payload)
+        validate_review_output(role, data, c.context, payload)
 
 
 def test_final_guard_catches_revision_change_during_draft_read(final_case, monkeypatch):
@@ -446,4 +448,4 @@ def test_final_guard_catches_revision_change_during_draft_read(final_case, monke
     monkeypatch.setattr(c.repo, 'resolve_draft', changed)
     forbid_final_writes(monkeypatch, c.repo)
     with pytest.raises(BridgeError, match='STALE_REVISION'):
-        check_final_output(R.COUNTER_OFFER, c.data, c.context, c.counter)
+        validate_review_output(R.COUNTER_OFFER, c.data, c.context, c.counter)

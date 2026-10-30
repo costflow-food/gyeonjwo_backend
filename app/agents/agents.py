@@ -191,7 +191,8 @@ unknown_fields=['create_mail_draft.validation_binding']으로 HOLD한다. 인자
 공통 도구가 같은 업무·revision·검증 target에 결합된 초안 ID를 반환한 경우에만
 그 target과 draft_ids를 그대로 COUNTER_OFFER_PROPOSED로 전달한다.
 HOLD에서는 target=null, draft_ids=[]로 둔다. 가격 검증 성공만으로 초안 완료를 주장하지 않는다.
-COUNTER_OFFER_SKIPPED의 독립 증명·카드 연결도 미합의이므로 생략 성공으로 처리하지 말고 HOLD한다.
+기존 skip_if_request_not_more_than_alternative만으로 C4 승인을 주장하지 않는다. 도구가 미확정 정책 HOLD이면 그대로 보류한다.
+도구가 COUNTER_OFFER_SKIPPED와 실제 계산 참조가 연결된 reason을 반환한 경우에만 그 reason을 그대로 복사하고 target=null, draft_ids=[]로 둔다.
 check_comparability와 공통 도구를 전용 어댑터로 대체하지 않는다. save_agent_result는 중간 기록만 저장하며
 최종 응답은 AgentRunner가 저장한다. 발송 권한을 생성하지 않는다.''',
 }
@@ -328,7 +329,11 @@ def check_calculator_output(self, scope, role, output, *, for_save=False):
             raise OutputValidationError('NON_PROPOSAL_HAS_PLANS')
     elif role == AgentRole.COUNTER_OFFER:
         if output.next_action == N.COUNTER_OFFER_SKIPPED:
-            raise OutputValidationError('TEAM_SKIP_ROUTE_NOT_IMPLEMENTED')
+            if output.target is not None or output.draft_ids:
+                raise OutputValidationError('SKIPPED_HAS_TARGET_OR_DRAFT')
+            if output.unknown_fields:
+                raise OutputValidationError('SKIPPED_HAS_UNRESOLVED_FIELDS')
+            self.checked_skip(scope, output.reason)
         if output.next_action == N.COUNTER_OFFER_PROPOSED:
             self.checked_target(scope, output.target)
             if not output.draft_ids:
@@ -363,7 +368,7 @@ def check_calculator_output(self, scope, role, output, *, for_save=False):
     return output
 
 
-def check_final_output(role, data, context, output):
+def validate_review_output(role, data, context, output):
     """Call inside Runner try after check_grounded and before COMPLETED.
 
     This function is ready for registration, not registered by monkeypatching the
@@ -378,7 +383,7 @@ def check_final_output(role, data, context, output):
         service, scope, data = review_service_for_input(role, data, context)
         checked = (check_priority_output(service, scope, output) if role == AgentRole.INFO_PRIORITY else
                    check_calculator_output(service, scope, role, output))
-        if role == AgentRole.COUNTER_OFFER and checked.next_action == AgentNextAction.COUNTER_OFFER_PROPOSED:
+        if role == AgentRole.COUNTER_OFFER and checked.next_action in (AgentNextAction.COUNTER_OFFER_PROPOSED,AgentNextAction.COUNTER_OFFER_SKIPPED):
             service.check_plans(scope, data.validated_plans)
         service.repo.check_scope(scope)
         return checked
@@ -464,3 +469,13 @@ def check_priority_output(service, scope, output):
             raise tools.OutputValidationError('PRIORITY_LOW_VALUE_HOLD_MISMATCH')
     repo.check_scope(scope)
     return output
+
+
+def check_review_output(role, data, context, output, messages):
+    """Five-argument FINAL_CHECKS adapter; register only in the integration layer.
+
+    The review guard uses trusted typed run inputs and stored evidence. It never
+    reconstructs authority from model messages, and never writes final results.
+    Validation errors intentionally propagate into AgentRunner's FAILED path.
+    """
+    return validate_review_output(role, data, context, output)

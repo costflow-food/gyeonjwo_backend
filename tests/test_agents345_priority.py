@@ -11,7 +11,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 
 from app.agents import tools
-from app.agents.agents import AgentRunner, check_final_output
+from app.agents.agents import AgentRunner, validate_review_output
 from app.agents.graph import build_graph
 from app.agents.nodes import Nodes, plan_validation, price_validation
 from app.agents.schemas import (AgentRole as R, PriorityIn, PlanIn, CounterOfferIn, RunContext,
@@ -277,7 +277,7 @@ def test_verification_nodes_use_real_refs_reject_forgery_and_never_write(team_st
     assert plan_validation(state)['plan_check']==PlanCheck.PASS
     forged=deepcopy(plan.plans);forged[0].total_amount='1'
     assert plan_validation({**state,'plans':forged})['plan_check']==PlanCheck.FIX
-    assert price_validation({**state,'last_action':'COUNTER_OFFER_SKIPPED'})['unresolved']==['SKIPPED_EVIDENCE_REQUIRED']
+    assert price_validation({**state,'last_action':'COUNTER_OFFER_SKIPPED'})['unresolved']==['policy.skip_calculation_ref']
     assert refs.records==before
 
 
@@ -344,7 +344,7 @@ def test_reply_new_revision_reenters_and_old_reference_is_rejected(team_storage,
     common.mail_messages['mail-qv-b']['body_text']=original_text
     facts.scope=ExecutionScope(CASE,2,scope.quote_ids);facts.refresh_binding()
     with pytest.raises(OutputValidationError,match='STALE_REVISION'):
-        check_final_output(R.RESPONSE_PLAN,PlanIn(case_id=CASE,input_revision=1,
+        validate_review_output(R.RESPONSE_PLAN,PlanIn(case_id=CASE,input_revision=1,
             quote_version_ids=list(scope.quote_ids)),RunContext(CASE,1),previous)
     model=extraction_model(team_storage,monkeypatch)
     state=team_graph(team_storage,model).invoke({**graph_state(team_storage,start='REPLY'),
@@ -353,7 +353,7 @@ def test_reply_new_revision_reenters_and_old_reference_is_rejected(team_storage,
     assert state['status']=='ON_HOLD' and 'create_mail_draft.validation_binding' in state['unresolved']
     new_input=PlanIn(case_id=CASE,input_revision=2,quote_version_ids=state['quote_version_ids'])
     with pytest.raises(OutputValidationError):
-        check_final_output(R.RESPONSE_PLAN,new_input,RunContext(CASE,2),previous)
+        validate_review_output(R.RESPONSE_PLAN,new_input,RunContext(CASE,2),previous)
 
 
 def test_registered_sensitivity_reads_typed_run_not_conversation(team_storage):
@@ -541,8 +541,20 @@ def test_priority_final_guard_is_read_only_with_stored_calculation_and_draft(pri
     monkeypatch.setattr(refs,'put_if_current',forbidden)
     monkeypatch.setattr(common,'finish_agent_run',forbidden)
     for _ in range(2):
-        assert check_final_output(R.INFO_PRIORITY,priority_input(storage),RunContext(CASE,scope.revision),output)==output
+        assert validate_review_output(R.INFO_PRIORITY,priority_input(storage),RunContext(CASE,scope.revision),output)==output
     assert (store.priority_records,refs.records,saved,common.agent_runs)==before
+
+
+def test_review_final_checks_adapter_validates_and_propagates_before_any_write(priority_request,monkeypatch):
+    from app.agents.agents import check_review_output
+    storage,saved,output=priority_request
+    before=deepcopy((tools._priority_store.priority_records,storage[3].records,saved,storage[0].agent_runs))
+    monkeypatch.setattr(tools._priority_store,'save_break_even',lambda *args:pytest.fail('Adapter wrote'))
+    assert check_review_output(R.INFO_PRIORITY,priority_input(storage),RunContext(CASE,1),output,[])==output
+    forged=output.model_copy(deep=True);forged.questions[0].calculation_ref='forged'
+    with pytest.raises((OutputValidationError,KeyError)):
+        check_review_output(R.INFO_PRIORITY,priority_input(storage),RunContext(CASE,1),forged,[])
+    assert (tools._priority_store.priority_records,storage[3].records,saved,storage[0].agent_runs)==before
 
 
 @pytest.mark.parametrize('fault',['supplier','field','evidence','amount','reference','missing_calculation',
@@ -570,7 +582,7 @@ def test_priority_guard_rejects_forged_questions_and_draft_groups(priority_reque
     if fault=='no_lookup':monkeypatch.setattr(tools,'_draft_lookup_store',None)
     before=deepcopy((tools._priority_store.priority_records,storage[3].records,saved))
     with pytest.raises((OutputValidationError,KeyError)):
-        check_final_output(R.INFO_PRIORITY,priority_input(storage),RunContext(CASE,1),output)
+        validate_review_output(R.INFO_PRIORITY,priority_input(storage),RunContext(CASE,1),output)
     assert (tools._priority_store.priority_records,storage[3].records,saved)==before
 
 
@@ -581,17 +593,17 @@ def test_priority_guard_rejects_build_plans_before_ready(team_storage,fault):
     if fault=='policy':
         team_storage[0].work_cases[CASE]['policy']=None;team_storage[2].refresh_binding()
     with pytest.raises(OutputValidationError,match='PRIORITY_BUILD_NOT_READY'):
-        check_final_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),
+        validate_review_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),
                            {'next_action':'BUILD_PLANS','reason':'forged'})
 
 
 def test_priority_guard_accepts_ready_build_and_policy_hold(team_storage):
     result=run_priority(team_storage)
-    assert check_final_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),result)==result
+    assert validate_review_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),result)==result
     team_storage[0].work_cases[CASE]['policy']=None;team_storage[2].refresh_binding()
     result=run_priority(team_storage)
     assert result.next_action=='HOLD'
-    assert check_final_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),result)==result
+    assert validate_review_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),result)==result
 
 
 @pytest.mark.parametrize('ids',[[],['qv-a'],['qv-a','qv-b','qv-b'],['qv-a','foreign']])
@@ -639,7 +651,7 @@ def test_priority_final_guard_rejects_stale_or_foreign_calculation(priority_requ
         tools._priority_store.priority_records[output.questions[0].calculation_ref]['record']['break_even_amount']='1'
     if fault=='foreign_case':context=RunContext('foreign',1)
     with pytest.raises(OutputValidationError):
-        check_final_output(R.INFO_PRIORITY,priority_input(storage),context,output)
+        validate_review_output(R.INFO_PRIORITY,priority_input(storage),context,output)
 
 
 def test_conditional_sensitivity_does_not_extrapolate_missing_tier_price(team_storage):
@@ -802,7 +814,7 @@ def test_unknown_either_side_stored_proof_and_read_only_final_guard(team_storage
             assert Decimal(question.break_even_amount)==(Decimal(10000) if side=='INCUMBENT' else Decimal(-10000))
     monkeypatch.setattr(tools._priority_store,'save_break_even',lambda *args:pytest.fail('Final guard wrote'))
     for _ in range(2):
-        assert check_final_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),result)==result
+        assert validate_review_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),result)==result
     assert (records,saved,team_storage[3].records)==before
 
 
@@ -817,10 +829,10 @@ def test_cost_low_value_requires_dominance_and_cannot_be_manually_reclassified(t
     assert result.questions[0].priority=='LOW_VALUE'
     record=tools.read_break_even(repo,scope,result.questions[0].calculation_ref)
     assert 'STRICTLY_DOMINATED' in record.priority_basis
-    assert check_final_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),result)==result
+    assert validate_review_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),result)==result
     result.questions[0].priority=QuestionPriority.MUST_CONFIRM
     with pytest.raises(OutputValidationError,match='CLASSIFICATION_MISMATCH'):
-        check_final_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),result)
+        validate_review_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),result)
 
 
 def test_not_calculable_is_never_low_value(team_storage):
@@ -925,12 +937,12 @@ def test_low_value_hold_has_no_draft_dependency_and_final_guard_is_read_only(tea
     before=deepcopy((tools._priority_store.priority_records,team_storage[3].records))
     monkeypatch.setattr(tools._priority_store,'save_break_even',lambda *args:pytest.fail('Final guard wrote'))
     for _ in range(2):
-        assert check_final_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),result)==result
+        assert validate_review_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),result)==result
     assert (tools._priority_store.priority_records,team_storage[3].records)==before
     for change in ({'draft_ids':['unnecessary']},{'next_action':'REQUEST_CLARIFICATION'},
                    {'next_action':'BUILD_PLANS'},{'questions':[]},{'unknown_fields':['cost_terms']}):
         with pytest.raises(OutputValidationError):
-            check_final_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),result.model_copy(update=change))
+            validate_review_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),result.model_copy(update=change))
 
 
 def test_inquiry_groups_preserve_assessments_but_only_select_actionable_priorities():
@@ -960,10 +972,10 @@ def test_final_guard_mixed_draft_subset_contract(team_storage,monkeypatch):
     result.next_action=type(result.next_action).REQUEST_CLARIFICATION;result.unknown_fields=report['unknown_fields']
     draft=tools._registry['create_mail_draft'].func('CLARIFICATION','supplier-b',[required],priority_runtime(team_storage))
     result.draft_ids=[draft['draft_id']]
-    assert check_final_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),result)==result
+    assert validate_review_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),result)==result
     saved[draft['draft_id']]['questions'].append(result.questions[0].model_dump(mode='json'))
     with pytest.raises(OutputValidationError,match='CLARIFICATION_DRAFT_MISMATCH'):
-        check_final_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),result)
+        validate_review_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),result)
 
 
 @pytest.mark.parametrize('phrase',['배송비 상품가격에 포함','배송비 단가 포함'])
@@ -1001,6 +1013,419 @@ def test_included_cost_wording_through_registered_plan_and_offer(team_storage,ph
     ('단가: 5500원/kg\n변경 단가: 6500원/kg\n배송비 단가 포함',False),
     ('단가: -5500원/kg\n배송비 단가 포함',False),
     ('단가: 55\n00\n배송비 단가 포함',False),
+    ('단가: 5500원/kg\n2026-11-01 이후 납품분부터 인상 단가 적용',True),
+    ('단가: 5500원/kg\n2026-11-01 이후 납품분부터 인상 단가 적용 6500원',False),
+    ('단가: 15500원/kg\n2026-11-01 이후 납품분부터 인상 단가 적용\n참고: 5500',False),
 ])
 def test_numeric_source_cost_inclusion_is_not_a_price_or_number_donor(source,valid):
     assert tools.team_bridge_team_data_numeric_field_source(source,'5500','unit_price') is valid
+
+
+def proposed_business_projection_without_review_facts(storage):
+    """Explicit proposed CaseStore projection; no new DB table or fake mail source.
+
+    The real backend producer of these business/contract fields remains an owner
+    dependency. Supplier facts below use the extractor's existing evidence shape.
+    """
+    common,_,facts,refs,_=storage
+    case=common.work_cases[CASE]
+    for key in ('as_of','period','terms','fixed_commitment','repricing_scope'):
+        case[key]=deepcopy(facts.facts[key]['value'])
+    case['incumbent_supplier_id']='supplier-a'
+    case['policy']['switching_costs']={'supplier-b':'0'}
+    for qid,row in common.quote_versions.items():
+        for field,value in facts.facts[qid+'.terms']['value'].items():
+            raw=field+': '+value
+            common.mail_messages[row.source_mail_id]['body_text']+='\n'+raw
+            entry={'raw_value':value,'value':value,'mail_id':row.source_mail_id,'location':row.source_mail_id+' 본문'}
+            row.checks_jsonb[field]={'state':'STATED','value':value}
+            row.evidence_jsonb[field]=entry
+            row.mail_normalized[row.source_mail_id]['fields'][field]=entry
+    from test_agents45_team_data import configure_review_stores
+    configure_review_stores(common,references=refs)
+
+
+def test_native_case_and_quote_inputs_need_no_review_facts_row(team_storage):
+    proposed_business_projection_without_review_facts(team_storage)
+    result=run_plan(team_storage)
+    assert result.next_action=='PLANS_PROPOSED',result
+
+
+def mvp_order_inputs(storage,monkeypatch):
+    """Existing schema inputs only. The execution clock is an explicit double."""
+    common,_,_,refs,_=storage
+    for qid in ('qv-a','qv-b'):
+        row=common.quote_versions[qid]
+        for kind in ('SHIPPING','HANDLING'):
+            amount=next(c['amount'] for c in row.cost_terms_jsonb if c['cost_type']==kind)
+            set_review_cost(storage,qid,kind=kind,amount=amount,basis='회당')
+    from test_agents45_team_data import configure_review_stores
+    configure_review_stores(common,references=refs)
+    common.work_cases[CASE]['policy']={'allow_split':True,'allocation_step':'100'}
+    monkeypatch.setattr(tools,'execution_as_of',lambda:'2026-11-02')
+
+
+def test_mvp_order_needs_no_unproduced_business_or_switching_fields(team_storage,monkeypatch):
+    from test_agents45_price_tiers import run_counter
+    mvp_order_inputs(team_storage,monkeypatch)
+    case=team_storage[0].get_work_case(CASE)
+    assert not {'as_of','period','terms','fixed_commitment','switching_costs'}&case.keys()
+    assert 'switching_costs' not in case['policy']
+    snapshot=team_storage[4].snapshot(team_storage[1])
+    computed=tools.compute_plan_set(snapshot['data'])
+    assert computed['outcome']=='SUCCESS',computed
+    tools.ReviewCalculator(team_storage[4],None).context(team_storage[1])
+    result=run_plan(team_storage)
+    assert result.next_action=='PLANS_PROPOSED',result
+    assert any(p.plan_type=='SPLIT' for p in result.plans)
+    snapshot=team_storage[4].snapshot(team_storage[1]);data=snapshot['data']
+    assert data['scope_kind']=='MVP_ORDER' and data['period'] is None and data['fixed_commitment'] is None
+    assert all(q['costs']['switching'] is None for q in data['quotes'])
+    assert any(e.get('kind')=='EXECUTION' for e in snapshot['evidence'].values())
+    output=run_counter(team_storage,result)
+    assert output.next_action=='HOLD' and 'work_case.repricing_scope' in output.unknown_fields
+
+
+@pytest.mark.parametrize('addition',['as_of','period','terms','repricing_scope','fixed_commitment','together'])
+def test_order_optional_information_does_not_select_contract_scope(team_storage,monkeypatch,addition):
+    mvp_order_inputs(team_storage,monkeypatch)
+    case=team_storage[0].work_cases[CASE]
+    optional={'as_of':'2026-11-02','period':{'from':'2026-11-20','to':'2026-11-20'},
+              'terms':{'tax_basis':'EXCLUDED','payment_terms':'검수 후 30일'},'repricing_scope':'ALL_INCUMBENT_CHANGEABLE',
+              'fixed_commitment':{'supplier_id':'supplier-a','quantity':'0','verified':True}}
+    case.update(optional if addition=='together' else {addition:optional[addition]})
+    if addition in ('terms','together'):
+        for row in team_storage[0].quote_versions.values():
+            value=optional['terms']['payment_terms'];mid=row.source_mail_id
+            team_storage[0].mail_messages[mid]['body_text']+='\npayment_terms: '+value
+            row.checks_jsonb['payment_terms']={'state':'STATED','value':value}
+            entry={'raw_value':value,'value':value,'mail_id':mid,'location':mid+' 본문'}
+            row.evidence_jsonb['payment_terms']=entry
+            row.mail_normalized[mid]['fields']['payment_terms']=deepcopy(entry)
+    priority=run_priority(team_storage)
+    assert priority.next_action=='BUILD_PLANS',priority
+    plans=run_plan(team_storage)
+    assert plans.next_action=='PLANS_PROPOSED' and any(p.plan_type=='SPLIT' for p in plans.plans),plans
+    data=team_storage[4].snapshot(team_storage[1])['data']
+    assert data['scope_kind']=='MVP_ORDER' and data['period'] is None
+    if addition in ('fixed_commitment','together'):assert data['fixed_commitment']['quantity']=='0'
+    if addition in ('repricing_scope','together'):assert data['repricing_scope']=='ALL_INCUMBENT_CHANGEABLE'
+    if addition in ('terms','together'):assert data['terms']['payment_terms']=='검수 후 30일'
+
+
+def test_order_positive_contract_remains_unsupported(team_storage,monkeypatch):
+    mvp_order_inputs(team_storage,monkeypatch)
+    team_storage[0].work_cases[CASE]['fixed_commitment']={'supplier_id':'supplier-a','quantity':'100','verified':True}
+    result=run_plan(team_storage)
+    assert result.next_action=='HOLD' and result.unknown_fields==['TEAM_FIXED_ALLOCATION_UNREPRESENTABLE']
+
+
+def future_order_inputs(storage,monkeypatch,*,condition='delivery'):
+    """Current schema/source doubles: review Oct 30, increase Nov 1, delivery Nov 5."""
+    mvp_order_inputs(storage,monkeypatch)
+    monkeypatch.setattr(tools,'execution_as_of',lambda:'2026-10-30')
+    common=storage[0];common.work_cases[CASE]['due_date']='2026-11-05'
+    for row in common.quote_versions.values():
+        mid=row.source_mail_id
+        common.mail_messages[mid]['body_text']=common.mail_messages[mid]['body_text'].replace('delivery_date: 2026-11-20','delivery_date: 2026-11-05')
+        row.checks_jsonb['delivery_date']['value']='2026-11-05'
+        entry=row.evidence_jsonb['delivery_date'];entry.update(raw_value='2026-11-05',value='2026-11-05')
+        row.mail_normalized[mid]['fields']['delivery_date']=deepcopy(entry)
+        if condition!='missing':
+            value='2026-11-01 이후 '+('발주분' if condition=='order' else '납품분')+'부터 인상 단가 적용'
+            common.mail_messages[mid]['body_text']+='\ndelivery_terms: '+value
+            row.checks_jsonb['delivery_terms']={'state':'STATED','value':value}
+            entry={'raw_value':value,'value':value,'mail_id':mid,'location':mid+' 본문'}
+            row.evidence_jsonb['delivery_terms']=entry
+            row.mail_normalized[mid]['fields']['delivery_terms']=deepcopy(entry)
+
+
+def test_future_increase_with_stated_delivery_application_uses_registered_path(team_storage,monkeypatch):
+    future_order_inputs(team_storage,monkeypatch)
+    model=extraction_model(team_storage,monkeypatch)
+    state=team_graph(team_storage,model).invoke({**graph_state(team_storage,start='REPLY'),'mail_ids':['mail-qv-a','mail-qv-b']})
+    assert state['steps'][1].next_action=='BUILD_PLANS',state['steps']
+    assert state['steps'][2].next_action=='PLANS_PROPOSED'
+    assert any(p.plan_type=='SPLIT' for p in state['plans'])
+    current=team_storage[0].get_work_case(CASE)['latest_quote_version_ids']
+    scope=ExecutionScope(CASE,1,tuple(sorted(current)))
+    snapshot=tools._ReviewAccess(RunContext(CASE,1),R.RESPONSE_PLAN).snapshot(scope)
+    data=snapshot['data']
+    assert data['as_of']=='2026-10-30' and data['due_date']=='2026-11-05'
+    assert data['incumbent']['effective_date']=='2026-11-01'
+    assert data['incumbent']['old_unit_price']=='5000' and data['incumbent']['requested_unit_price']=='5500'
+    for q in data['quotes']:
+        assert q['price_application']['basis']=='DELIVERY'
+        assert q['price_application']['on_date']=='2026-11-05'
+        assert q['price_application']['source_ref'] in snapshot['evidence']
+    for fault in ('effective','on_date','missing_proof'):
+        forged=deepcopy(data);incumbent=next(q for q in forged['quotes'] if q['supplier_id']=='supplier-a')
+        if fault=='effective':incumbent['price_effective_from']='2026-10-01'
+        if fault=='on_date':incumbent['price_application']['on_date']='2026-10-31'
+        if fault=='missing_proof':incumbent.pop('price_application')
+        assert tools.compute_plan_set(forged)['outcome']=='REVIEW_REQUIRED'
+    # Repeated independent guards must not issue new calculation/draft/result records.
+    checked=run_plan(team_storage,scope=scope)
+    stored=deepcopy((team_storage[3].records,team_storage[0].agent_runs))
+    for _ in range(2):validate_review_output(R.RESPONSE_PLAN,PlanIn(case_id=CASE,input_revision=1,quote_version_ids=current),RunContext(CASE,1),checked)
+    assert (team_storage[3].records,team_storage[0].agent_runs)==stored
+    assert any('PRICE_APPLICATION:' in c for p in checked.plans for c in p.conditions)
+
+
+@pytest.mark.parametrize('gap',['missing','order','unextracted','mismatched_date','before_effective','expired','future_received','tampered'])
+def test_future_increase_never_uses_deadline_as_unstated_price_basis(team_storage,monkeypatch,gap):
+    future_order_inputs(team_storage,monkeypatch,condition=gap if gap in ('missing','order') else 'delivery')
+    common=team_storage[0];row=common.quote_versions['qv-a'];mid=row.source_mail_id
+    if gap=='unextracted':
+        row.checks_jsonb.pop('delivery_terms');row.evidence_jsonb.pop('delivery_terms');row.mail_normalized[mid]['fields'].pop('delivery_terms')
+    if gap in ('mismatched_date','tampered'):
+        value=row.evidence_jsonb['delivery_terms']['raw_value']
+        common.mail_messages[mid]['body_text']=common.mail_messages[mid]['body_text'].replace(value,value.replace('2026-11-01','2026-11-02'))
+        if gap=='mismatched_date':
+            value=value.replace('2026-11-01','2026-11-02')
+            row.checks_jsonb['delivery_terms']['value']=value
+            row.evidence_jsonb['delivery_terms'].update(raw_value=value,value=value)
+            row.mail_normalized[mid]['fields']['delivery_terms']=deepcopy(row.evidence_jsonb['delivery_terms'])
+    if gap=='before_effective':
+        common.mail_messages[mid]['body_text']=common.mail_messages[mid]['body_text'].replace('delivery_date: 2026-11-05','delivery_date: 2026-10-31')
+        row.checks_jsonb['delivery_date']['value']='2026-10-31'
+        row.evidence_jsonb['delivery_date'].update(raw_value='2026-10-31',value='2026-10-31')
+    if gap=='expired':
+        common.mail_messages[mid]['body_text']=common.mail_messages[mid]['body_text'].replace('valid_until: 2026-11-30','valid_until: 2026-10-29')
+        row.valid_until='2026-10-29';row.evidence_jsonb['valid_until'].update(raw_value='2026-10-29',value='2026-10-29')
+    if gap=='future_received':common.mail_messages[mid]['received_at']='2026-11-01T00:00:00+00:00'
+    result=run_plan(team_storage)
+    assert not result.plans
+    if gap in ('unextracted','tampered'):
+        assert result.next_action=='RECHECK_SOURCE' and 'delivery_terms' in result.unknown_fields,result
+    else:assert result.next_action=='HOLD',result
+    if gap=='missing':assert 'work_case.price_application_basis_unconfirmed' in result.unknown_fields,result
+
+
+def test_actual_extractor_to_mvp_order_without_proposed_work_inputs(team_storage,monkeypatch):
+    mvp_order_inputs(team_storage,monkeypatch)
+    model=extraction_model(team_storage,monkeypatch)
+    result=team_graph(team_storage,model).invoke({**graph_state(team_storage,start='REPLY'),'mail_ids':['mail-qv-a','mail-qv-b']})
+    assert [s.role for s in result['steps']]==[R.INFO_EXTRACTOR,R.INFO_PRIORITY,R.RESPONSE_PLAN,R.COUNTER_OFFER]
+    assert result['steps'][1].next_action=='BUILD_PLANS' and result['steps'][2].next_action=='PLANS_PROPOSED'
+    assert result['status']=='ON_HOLD' and 'policy.min_unit_price' in result['unresolved']
+    assert any(p.plan_type=='SPLIT' for p in result['plans'])
+    assert not {'as_of','period','terms','fixed_commitment'}&team_storage[0].get_work_case(CASE).keys()
+
+
+@pytest.mark.parametrize('gap',['period_charge','declared_switching','mandatory_payment','unknown_shipping'])
+def test_mvp_order_actual_missing_constraints_are_not_filled_with_defaults(team_storage,monkeypatch,gap):
+    mvp_order_inputs(team_storage,monkeypatch)
+    case=team_storage[0].work_cases[CASE]
+    if gap=='period_charge':set_review_cost(team_storage,amount='10000',basis='비교기간 전체')
+    if gap=='declared_switching':case['policy']['switching_costs']={'supplier-b':None}
+    if gap=='mandatory_payment':case['mandatory_conditions']={'payment_terms':'검수 후 30일'}
+    if gap=='unknown_shipping':missing_shipping(team_storage)
+    result=run_plan(team_storage)
+    assert not result.plans
+    if gap=='period_charge':assert result.next_action=='HOLD' and result.unknown_fields==['cost_terms.comparison_period_required']
+    if gap=='declared_switching':assert result.next_action=='HOLD' and any(k.endswith('.switching_cost') for k in result.unknown_fields)
+    if gap=='mandatory_payment':assert result.next_action=='NEEDS_EVIDENCE' and result.unknown_fields==['payment_terms']
+    if gap=='unknown_shipping':
+        assert result.next_action=='NEEDS_EVIDENCE' and result.unknown_fields==['cost_terms']
+        calculated=tools.calculate_break_even.func(list(team_storage[1].quote_ids),'qv-b',priority_runtime(team_storage))
+        assert calculated['status']=='STORED_CONDITIONAL',calculated
+        assert calculated['period'] is None and calculated['question']['calculation_ref']
+
+
+def test_counter_only_policy_and_repricing_do_not_block_priority_or_plans(team_storage):
+    proposed_business_projection_without_review_facts(team_storage)
+    case=team_storage[0].work_cases[CASE]
+    case.pop('repricing_scope')
+    for key in ('min_unit_price','max_unit_price','max_total_cost','price_increment','skip_if_request_not_more_than_alternative'):
+        case['policy'].pop(key)
+    assert run_priority(team_storage).next_action=='BUILD_PLANS'
+    assert run_plan(team_storage).next_action=='PLANS_PROPOSED'
+
+
+def stored_policy_skip_scenario(storage):
+    """Existing explicit skip flag, versioned test policy, and a costlier quote.
+
+    This exercises the implemented policy flag; it is not evidence that C4 has
+    adopted this rule. No flag is switched on just to obtain a passing result.
+    """
+    full_volume(storage)
+    common,_,facts,_,_=storage
+    row=common.quote_versions['qv-b'];row.unit_price='6000'
+    row.evidence_jsonb['unit_price'].update(value='6000',raw_value='6000')
+    common.mail_messages[row.source_mail_id]['body_text']=common.mail_messages[row.source_mail_id]['body_text'].replace('unit_price: 5400','unit_price: 6000')
+    common.work_cases[CASE]['policy_version']='SYNTHETIC-policy-v1'
+    facts.refresh_binding()
+
+
+def install_test_only_skip_policy(storage,monkeypatch,decision='ALLOW'):
+    """Fictional evaluator injected only in tests; NOT an adopted C4 policy."""
+    from app.agents.schemas import SkipPolicyCheck
+    class TestOnlyC4:
+        def check_skip(self,context,scope,policy,calculation):
+            case=storage[0].get_work_case(scope.case_id)
+            assert case['input_revision']==context.input_revision==scope.revision
+            comparison=calculation.result['comparison']
+            assert Decimal(comparison['keep_total_cost'])<=Decimal(comparison['best_alternative_total_cost'])
+            return SkipPolicyCheck(decision=decision,policy_id=policy.policy_id,
+                policy_version=case.get('policy_version'),
+                policy_digest=tools.calculation_digest(policy.model_dump(mode='json',exclude_unset=True)),
+                condition='TEST_ONLY_FICTIONAL_C4: verified requested-price keep total <= all alternatives')
+    monkeypatch.setattr(tools,'_skip_policy_verifier',TestOnlyC4())
+
+
+def test_skip_policy_evidence_reaches_price_pass_and_existing_card_route(team_storage,monkeypatch):
+    from test_agents45_price_tiers import run_counter
+    stored_policy_skip_scenario(team_storage)
+    install_test_only_skip_policy(team_storage,monkeypatch)
+    plan=run_plan(team_storage)
+    output=run_counter(team_storage,plan)
+    assert output.next_action=='COUNTER_OFFER_SKIPPED',output
+    assert not output.target and not output.draft_ids
+    state={**graph_state(team_storage),'plans':plan.plans,'last_action':output.next_action,
+           'counter_offer':None,'counter_offer_skip_reason':output.reason,'draft_ids':[]}
+    assert price_validation(state)['price_check']==PriceCheck.PASS
+    visited=[]
+    def stored_card_double(state):
+        visited.append(state['counter_offer_skip_reason'])
+        return {'card_id':'SYNTHETIC-CARD'}
+    graph=build_graph(AgentRunner(PriorityModel(messages=iter([])),runs=team_storage[0]),
+        team_storage[0].current_input_revision,Nodes(preprocess=lambda state:{},review_card=stored_card_double))
+    result=graph.invoke(graph_state(team_storage))
+    assert result['status']=='COMPLETE' and result['card_id']=='SYNTHETIC-CARD' and visited
+    assert not result['draft_ids']
+
+
+def test_actual_extractor_with_proposed_business_inputs_without_review_facts(team_storage,monkeypatch):
+    proposed_business_projection_without_review_facts(team_storage)
+    # Tax comes from the actual quote evidence, not duplicated work input.
+    team_storage[0].work_cases[CASE]['terms'].pop('tax_basis')
+    for store in (tools._priority_store,tools._plan_store,tools._counter_offer_store):
+        monkeypatch.setattr(store,'load_review_facts',lambda *args:pytest.fail('Duplicate ReviewFacts read'))
+    model=extraction_model(team_storage,monkeypatch)
+    state={**graph_state(team_storage,start='REPLY'),'mail_ids':['mail-qv-a','mail-qv-b']}
+    result=team_graph(team_storage,model).invoke(state)
+    assert [s.role for s in result['steps']]==[R.INFO_EXTRACTOR,R.INFO_PRIORITY,R.RESPONSE_PLAN,R.COUNTER_OFFER]
+    assert result['status']=='ON_HOLD' and 'create_mail_draft' in result['unresolved']
+    assert result['steps'][1].next_action=='BUILD_PLANS'
+    current=team_storage[0].get_work_case(CASE)['latest_quote_version_ids']
+    snapshot=tools._ReviewAccess(RunContext(CASE,1),R.RESPONSE_PLAN).snapshot(ExecutionScope(CASE,1,tuple(sorted(current))))
+    assert snapshot['data']['terms']['tax_basis']=='EXCLUDED'
+    business=[v for v in snapshot['evidence'].values() if v.get('kind') in ('WORK_CASE','POLICY')]
+    assert business and all('mail_id' not in v for v in business)
+    assert all(team_storage[0].quote_versions[qid].checks_jsonb['payment_terms']['state']=='STATED' for qid in current)
+
+
+@pytest.mark.parametrize('field',['period','terms','fixed_commitment','as_of'])
+def test_native_optional_work_inputs_are_not_global_requirements(team_storage,monkeypatch,field):
+    proposed_business_projection_without_review_facts(team_storage)
+    monkeypatch.setattr(tools,'execution_as_of',lambda:'2026-11-02')
+    team_storage[0].work_cases[CASE].pop(field)
+    result=run_priority(team_storage)
+    if field=='period':
+        # This fixture declares a period charge; only that cost needs its scope.
+        assert result.next_action=='HOLD' and result.unknown_fields==['cost_terms.comparison_period_required']
+    else:
+        assert result.next_action=='BUILD_PLANS',result
+        assert run_plan(team_storage).next_action=='PLANS_PROPOSED'
+    assert not result.draft_ids
+
+
+@pytest.mark.parametrize('source_present',[True,False])
+def test_native_supplier_terms_missing_are_not_work_condition_questions(team_storage,source_present):
+    proposed_business_projection_without_review_facts(team_storage)
+    common,_,_,_,_=team_storage;row=common.quote_versions['qv-b']
+    raw=row.evidence_jsonb['payment_terms']['raw_value']
+    row.checks_jsonb.pop('payment_terms');row.evidence_jsonb.pop('payment_terms')
+    if not source_present:
+        common.mail_messages[row.source_mail_id]['body_text']=common.mail_messages[row.source_mail_id]['body_text'].replace('payment_terms: '+raw,'payment_terms: 미확인')
+    result=run_plan(team_storage)
+    assert result.next_action==('RECHECK_SOURCE' if source_present else 'NEEDS_EVIDENCE')
+    assert result.unknown_fields==['payment_terms']
+
+
+def test_native_counter_only_missing_conditions_leave_split_plans_intact(team_storage):
+    from test_agents45_price_tiers import run_counter
+    proposed_business_projection_without_review_facts(team_storage)
+    case=team_storage[0].work_cases[CASE];case.pop('repricing_scope')
+    case['policy'].pop('price_increment')
+    plans=run_plan(team_storage)
+    assert plans.next_action=='PLANS_PROPOSED' and any(p.plan_type=='SPLIT' for p in plans.plans)
+    result=run_counter(team_storage,plans)
+    assert result.next_action=='HOLD'
+    assert set(result.unknown_fields)=={'work_case.repricing_scope','policy.price_increment'}
+
+
+def test_unconfirmed_split_permission_is_explicit_scope_limit_not_global_hold(team_storage):
+    from test_agents45_price_tiers import run_counter
+    full_volume(team_storage)
+    proposed_business_projection_without_review_facts(team_storage)
+    team_storage[0].work_cases[CASE]['policy'].pop('allow_split')
+    assert run_priority(team_storage).next_action=='BUILD_PLANS'
+    plans=run_plan(team_storage)
+    assert plans.next_action=='PLANS_PROPOSED'
+    assert {p.plan_type for p in plans.plans}=={'KEEP','SWITCH'}
+    assert all('SCOPE_LIMITATION: SPLIT_PERMISSION_UNCONFIRMED' in p.conditions for p in plans.plans)
+    assert run_counter(team_storage,plans).unknown_fields==['policy.allow_split']
+
+
+@pytest.mark.parametrize('policy',['unconfigured','unconfirmed','deny','missing_version'])
+def test_skip_unconfirmed_or_denied_policy_never_completes(team_storage,monkeypatch,policy):
+    from test_agents45_price_tiers import run_counter
+    stored_policy_skip_scenario(team_storage)
+    if policy!='unconfigured':
+        install_test_only_skip_policy(team_storage,monkeypatch,
+            decision={'unconfirmed':'UNCONFIRMED','deny':'DENY'}.get(policy,'ALLOW'))
+    if policy=='missing_version':team_storage[0].work_cases[CASE].pop('policy_version');team_storage[2].refresh_binding()
+    plans=run_plan(team_storage);before=deepcopy(team_storage[3].records)
+    result=run_counter(team_storage,plans)
+    assert result.next_action=='HOLD' and not result.target and not result.draft_ids
+    assert result.unknown_fields==[{'deny':'SKIP_NOT_PERMITTED','missing_version':'policy.skip_identity_or_version_unconfirmed'}.get(policy,'policy.counter_offer_skip_rule_unconfirmed')]
+    assert team_storage[3].records==before
+
+
+@pytest.mark.parametrize('fault',['missing_ref','forged_ref','revision','policy_version','policy_value','record','foreign_case','policy_race','target','draft','deny'])
+def test_skip_guard_and_price_node_reject_invalid_evidence_without_writes(team_storage,monkeypatch,fault):
+    from test_agents45_price_tiers import run_counter
+    stored_policy_skip_scenario(team_storage);install_test_only_skip_policy(team_storage,monkeypatch)
+    plans=run_plan(team_storage);original=run_counter(team_storage,plans);output=original.model_copy(deep=True)
+    common,scope,facts,refs,_=team_storage
+    data=CounterOfferIn(case_id=CASE,input_revision=scope.revision,quote_version_ids=list(scope.quote_ids),validated_plans=plans.plans)
+    before=deepcopy(refs.records)
+    monkeypatch.setattr(refs,'put_if_current',lambda *args:pytest.fail('Read-only skip verification wrote'))
+    for _ in range(2):
+        assert validate_review_output(R.COUNTER_OFFER,data,RunContext(CASE,1),original)==original
+        assert price_validation({**graph_state(team_storage),'plans':plans.plans,'last_action':original.next_action,
+            'counter_offer_skip_reason':original.reason,'counter_offer':None,'draft_ids':[]})['price_check']==PriceCheck.PASS
+    assert refs.records==before
+    if fault=='missing_ref':output.reason='The model claims skipping is fine'
+    if fault=='forged_ref':output.reason=tools.skip_output_reason('invented')
+    if fault=='revision':common.work_cases[CASE]['input_revision']=2
+    if fault=='policy_version':common.work_cases[CASE]['policy_version']='SYNTHETIC-policy-v2';facts.refresh_binding()
+    if fault=='policy_value':common.work_cases[CASE]['policy']['max_unit_price']='5400';facts.refresh_binding()
+    if fault=='record':
+        row=next(r for r in refs.records.values() if r['kind']=='OFFER_CALCULATION')
+        row['payload']['result']['comparison']['keep_total_cost']='1'
+    if fault=='foreign_case':
+        row=next(r for r in refs.records.values() if r['kind']=='OFFER_CALCULATION')
+        row['scope']['case_id']='foreign-case'
+    if fault=='policy_race':
+        original_check=tools._skip_policy_verifier.check_skip
+        def change_after_read(*args):
+            checked=original_check(*args)
+            common.work_cases[CASE]['policy_version']='SYNTHETIC-policy-race'
+            facts.refresh_binding()
+            return checked
+        monkeypatch.setattr(tools._skip_policy_verifier,'check_skip',change_after_read)
+    if fault=='target':
+        from app.agents.schemas import CounterOfferTarget
+        output.target=CounterOfferTarget(supplier_id='supplier-a',target_unit_price='1',
+            basis_quote_version_ids=['qv-a'],alternative_plan_ref='forged',policy_ref='forged')
+    if fault=='draft':output.draft_ids=['unnecessary']
+    if fault=='deny':install_test_only_skip_policy(team_storage,monkeypatch,decision='DENY')
+    with pytest.raises((OutputValidationError,KeyError)):
+        validate_review_output(R.COUNTER_OFFER,data,RunContext(CASE,1),output)
+    if fault=='deny':
+        state={**graph_state(team_storage),'plans':plans.plans,'last_action':output.next_action,
+               'counter_offer_skip_reason':output.reason,'counter_offer':None,'draft_ids':[]}
+        assert price_validation(state)['price_check']==PriceCheck.FIX

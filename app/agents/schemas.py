@@ -328,9 +328,9 @@ class ComparisonPeriod(StrictModel):
 
 
 class TradeTerms(StrictModel):
-    delivery_location: str
-    delivery_terms: str
-    payment_terms: str
+    delivery_location: str | None = None
+    delivery_terms: str | None = None
+    payment_terms: str | None = None
     tax_basis: Literal['INCLUDED', 'EXCLUDED', 'EXEMPT']
 
 
@@ -343,21 +343,22 @@ class ReviewItem(StrictModel):
 
 
 class ReviewPolicy(StrictModel):
-    policy_id: str
-    source_ref: str
-    approved: StrictBool
-    valid_from: str
-    valid_to: str
-    allow_split: StrictBool
-    max_suppliers: int
+    policy_id: str | None = None
+    source_ref: str | None = None
+    approved: StrictBool | None = None
+    valid_from: str | None = None
+    valid_to: str | None = None
+    allow_split: StrictBool | None = None
+    max_suppliers: int | None = None
     allocation_step: DecimalStr
-    min_unit_price: DecimalStr
-    max_unit_price: DecimalStr
-    max_total_cost: DecimalStr
-    price_increment: DecimalStr
-    skip_if_request_not_more_than_alternative: StrictBool
-    allow_partial_comparison: StrictBool
+    min_unit_price: DecimalStr | None = None
+    max_unit_price: DecimalStr | None = None
+    max_total_cost: DecimalStr | None = None
+    price_increment: DecimalStr | None = None
+    skip_if_request_not_more_than_alternative: StrictBool | None = None
+    allow_partial_comparison: StrictBool | None = None
     max_increase_rate: DecimalStr | None = None
+    switching_costs: dict[str, DecimalStr] = {}
 
 
 class FixedCommitment(StrictModel):
@@ -393,6 +394,14 @@ class ReviewCosts(StrictModel):
     switching: DecimalStr | None
 
 
+class PriceApplication(StrictModel):
+    """Internal, source-verified application of a future quote; no new DB input."""
+    basis: Literal['DELIVERY']
+    on_date: str
+    effective_from: str
+    source_ref: str
+
+
 class ComparableQuote(StrictModel):
     supplier_id: str
     quote_id: str
@@ -423,6 +432,8 @@ class ComparableQuote(StrictModel):
     pack_multiple: DecimalStr | None = None
     pack_multiple_unit: str | None = None
     pack_multiple_source_ref: str | None = None
+    price_effective_from: str | None = None
+    price_application: PriceApplication | None = None
 
 
 class PurchaseReviewInput(StrictModel):
@@ -430,13 +441,15 @@ class PurchaseReviewInput(StrictModel):
     revision: int = Field(strict=True, ge=0)
     data_kind: Literal['SYNTHETIC', 'LIVE']
     as_of: str
-    period: ComparisonPeriod
+    period: ComparisonPeriod | None
+    scope_kind: Literal['EXPLICIT_PERIOD', 'MVP_ORDER'] = 'EXPLICIT_PERIOD'
+    due_date: str | None = None
     item: ReviewItem
     unit: str
     currency: str
     terms: TradeTerms
     incumbent: IncumbentNotice
-    fixed_commitment: FixedCommitment
+    fixed_commitment: FixedCommitment | None
     changeable_quantity: DecimalStr
     repricing_scope: Literal['ALL_INCUMBENT_CHANGEABLE', 'KEEP_ONLY'] | None
     quotes: list[ComparableQuote]
@@ -465,9 +478,9 @@ class ItemAttributes(StrictModel):
 
 
 class SupplierTradeTerms(StrictModel):
-    delivery_location: str
-    delivery_terms: str
-    payment_terms: str
+    delivery_location: str | None = None
+    delivery_terms: str | None = None
+    payment_terms: str | None = None
 
 
 class FixedQuantityFact(StrictModel):
@@ -520,11 +533,22 @@ class PlanCalculationRecord(StrictModel):
     bundle_ref: str
 
 
+class SkipPolicyCheck(StrictModel):
+    """Backend policy decision. IDs/versions are opaque, never issued by an agent."""
+    decision: Literal['ALLOW', 'DENY', 'UNCONFIRMED']
+    policy_id: str | None = None
+    policy_version: str | None = None
+    policy_digest: str
+    condition: str
+
+
 class PriceCalculationRecord(StrictModel):
     status: Literal['CALCULATED']
     result: dict
-    target: CounterOfferTarget
+    target: CounterOfferTarget | None
     bundle_ref: str
+    policy_ref: str | None = None
+    skip_policy: SkipPolicyCheck | None = None
 
 
 class PriceValidationRecord(StrictModel):
@@ -576,7 +600,7 @@ class BreakEvenRecord(StrictModel):
     rounded_component_limit: DecimalStr | None
     quantity: DecimalStr
     quantity_unit: str
-    period: ComparisonPeriod
+    period: ComparisonPeriod | None
     baseline_total: DecimalStr | None
     basis_quote_version_ids: list[str]
     allocation_feasible: StrictBool

@@ -21,7 +21,7 @@ from app.agents.tools import calculation_digest as digest
 from app.agents.tools import OutputValidationError as BridgeError, ExecutionScope as Scope
 from app.agents.tools import _ReviewAccess as ReviewAccess, review_record_digest as team_record_digest
 from app.agents.tools import MissingReviewData as MissingTeamData
-from app.agents.agents import check_final_output
+from app.agents.agents import validate_review_output
 from app.agents.tools import ReviewCalculator as BridgeService, model_payload as wire
 from app.agents.schemas import RunContext
 
@@ -189,7 +189,7 @@ def test_team_records_through_product_registration_to_stage4_and_stage5(team_sto
 @pytest.mark.parametrize('fault,expected', [
     ('policy', 'policy'), ('cost', 'cost_terms'),
     ('facts', 'review_facts.fixed_commitment'), ('references', 'PlanStore.save_plan_set'),
-    ('all_facts', 'review_facts.period'),
+    ('all_facts', 'cost_terms.comparison_period_required'),
     ('suppliers', 'QuoteStore.get_quote_version(case_id, quote_version_id)'),
 ])
 def test_missing_dependencies_hold_without_defaults(team_storage, fault, expected):
@@ -344,7 +344,6 @@ def test_no_split_requires_no_split_repricing_rule_and_keep_can_stand_alone(team
     ('changed_source', 'RECHECK_SOURCE', 'unit_price'),
     ('missing_price_and_policy', 'HOLD', 'policy'),
     ('unsupported_cost_basis', 'NEEDS_EVIDENCE', 'cost_terms'),
-    ('split_scope', 'HOLD', 'review_facts.repricing_scope'),
 ])
 def test_missing_facts_extraction_and_configuration_use_distinct_actions(team_storage, fault, action, field):
     common, _, supplement, refs, _ = team_storage
@@ -626,10 +625,10 @@ def test_final_guard_team_plan_repeats_without_reference_or_result_writes(team_s
     def forbidden(*args):pytest.fail('Final guard attempted a ValidationStore write')
     monkeypatch.setattr(refs, 'put_if_current', forbidden)
     for _ in range(2):
-        assert check_final_output(R.RESPONSE_PLAN, data, context, output) == output
+        assert validate_review_output(R.RESPONSE_PLAN, data, context, output) == output
     forged = wire(output);forged['plans'][0]['total_amount'] = '1'
     with pytest.raises(BridgeError, match='PLAN_REFERENCE_MISMATCH'):
-        check_final_output(R.RESPONSE_PLAN, data, context, forged)
+        validate_review_output(R.RESPONSE_PLAN, data, context, forged)
     assert (refs.records, common.agent_runs) == before
 
 
@@ -646,12 +645,12 @@ def test_final_guard_team_policy_hold_requires_no_supplements_or_validation_stor
     monkeypatch.setattr(ReviewAccess, 'snapshot', forbidden)
     forbid_final_writes(monkeypatch, repo)
     for _ in range(2):
-        assert check_final_output(role, data, context, output).next_action == 'HOLD'
+        assert validate_review_output(role, data, context, output).next_action == 'HOLD'
     # Even without policy, cross-case/stale quote data cannot become a valid HOLD.
     common.quote_versions['qv-b'].work_case_id = 'foreign-case'
     # MemoryStore removes that foreign row from the case's latest quote IDs.
     with pytest.raises(BridgeError, match='STALE_QUOTE_VERSIONS'):
-        check_final_output(role, data, context, output)
+        validate_review_output(role, data, context, output)
     assert not refs.records and not common.agent_runs
 
 
@@ -661,7 +660,7 @@ def test_final_guard_team_proposal_requires_validation_store(team_storage):
     configure_review_stores(common, supplements=supplement)
     data = PlanIn(case_id=UUID(CASE), input_revision=scope.revision, quote_version_ids=list(scope.quote_ids))
     with pytest.raises(MissingTeamData) as rejected:
-        check_final_output(R.RESPONSE_PLAN, data, RunContext(CASE, scope.revision), output)
+        validate_review_output(R.RESPONSE_PLAN, data, RunContext(CASE, scope.revision), output)
     assert rejected.value.fields == ['PlanStore.read_plan_calculation']
 
 
@@ -685,6 +684,6 @@ def test_final_guard_team_validation_row_cannot_replace_missing_shared_draft_loo
     monkeypatch.setattr(refs, 'put_if_current', forbidden)
     for _ in range(2):
         with pytest.raises(MissingTeamData) as rejected:
-            check_final_output(R.COUNTER_OFFER, data, context, payload)
+            validate_review_output(R.COUNTER_OFFER, data, context, payload)
         assert rejected.value.fields == ['create_mail_draft.resolve']
     assert (refs.records, common.agent_runs) == before

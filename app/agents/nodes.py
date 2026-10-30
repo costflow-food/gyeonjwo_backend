@@ -31,7 +31,7 @@ def price_validation(state) -> dict:
 
 
 def _validate_output(state, *, counter):
-    from app.agents.agents import check_final_output
+    from app.agents.agents import validate_review_output
     from app.agents.schemas import (AgentRole, PlanIn, CounterOfferIn, RunContext,
                                     PlanCheck, PriceCheck, RunStatus, ProcessingStep)
     from app.agents.tools import MissingReviewData, OutputValidationError
@@ -40,24 +40,25 @@ def _validate_output(state, *, counter):
     reason_key = key + '_reason'
     def hold(fields):
         return {'status': RunStatus.ON_HOLD, 'processing_step': ProcessingStep.ON_HOLD, 'unresolved': fields}
-    if counter and state.get('last_action') == 'COUNTER_OFFER_SKIPPED':
-        return hold(['SKIPPED_EVIDENCE_REQUIRED'])
+    skipped = counter and state.get('last_action') == 'COUNTER_OFFER_SKIPPED'
     args = {'case_id': state['case_id'], 'input_revision': state['input_revision'],
             'quote_version_ids': state['quote_version_ids']}
     data = CounterOfferIn(**args, validated_plans=state.get('plans', [])) if counter else PlanIn(**args)
     output = ({'next_action': 'COUNTER_OFFER_PROPOSED', 'target': state.get('counter_offer'),
                'draft_ids': state.get('draft_ids', [])} if counter else
               {'next_action': 'PLANS_PROPOSED', 'plans': state.get('plans', [])})
+    if skipped:
+        output.update(next_action='COUNTER_OFFER_SKIPPED')
     try:
-        checked = check_final_output(role, data, RunContext(str(data.case_id), data.input_revision),
-                                     {**output, 'reason': 'deterministic graph validation'})
+        checked = validate_review_output(role, data, RunContext(str(data.case_id), data.input_revision),
+                                     {**output, 'reason': state.get('counter_offer_skip_reason') or 'missing skip reference' if skipped else 'deterministic graph validation'})
         return {key: checks.PASS, reason_key: None, **({} if counter else {'plans': checked.plans})}
     except MissingReviewData as exc:
         if exc.action in ('NEEDS_EVIDENCE', 'RECHECK_SOURCE'):
             return {key: checks.NEED_INFO, reason_key: exc.action, 'pending_questions': exc.fields}
         return hold(exc.fields)
     except OutputValidationError as exc:
-        if exc.code in ('PLAN_REFERENCE_MISMATCH', 'PLAN_ALLOCATION_TOTAL_OR_SET_MISMATCH',
+        if exc.code in ('SKIP_NOT_PERMITTED', 'PLAN_REFERENCE_MISMATCH', 'PLAN_ALLOCATION_TOTAL_OR_SET_MISMATCH',
                         'PLAN_SCHEMA_INVALID', 'TARGET_CALCULATION_MISMATCH', 'VALIDATION_TARGET_MISMATCH',
                         'INDEPENDENT_PRICE_VALIDATION_FAILED', 'FINAL_INPUT_OR_OUTPUT_SCHEMA_INVALID'):
             return {key: checks.FIX, reason_key: exc.code}

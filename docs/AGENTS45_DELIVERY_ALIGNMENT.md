@@ -1,3 +1,353 @@
+# PR #22 최신 보완 — 주문 범위 안정성·미래 인상 사전 검토 (2026-10-30)
+
+이번 절은 아래 663/656 당시 기록보다 우선한다. 기존 소스와 663 결과를 보존한 뒤 두 경로만 보완했다.
+HEAD `074c6d63eee70cd674b5381af06fc9a0f42ce154`와 작업 브랜치는 그대로다. fetch 후 대상 SHA도
+`5f6cc1a3d9fc0d3be1e248a0b5e743c6f55a2498`로 동일했다. 현재 브랜치에 병합/등록하지 않았다.
+
+## 범위와 적용 조건
+
+- `_QuoteMapper.__init__`: 현재 work_cases는 합의된 단일 주문 MVP다. as_of/period/terms/
+  fixed_commitment/repricing_scope의 유무로 계약 업무를 추론하지 않는다. 기존 명시적 기간 계산용
+  legacy 보충 모델 프로파일은 호환 범위로만 유지하며 실제 생산 경로로 보고하지 않는다.
+  동일 주문에 각 선택 정보 또는 모두를 추가해도 `scope_kind=MVP_ORDER`, 계산 period=None을 유지한다.
+  명시된 terms/repricing_scope/fixed=0 값은 보존하며, 양수 고정 계약은 계속
+  `TEAM_FIXED_ALLOCATION_UNREPRESENTABLE` HOLD다. 새 DB/API/사용자 입력 필드는 요구하지 않는다.
+- 선택 terms는 버리지 않고 업무 필수조건과 대조한다. 명시된 필수/요구 결제 조건의 업체 근거가
+  없으면 RECHECK_SOURCE/NEEDS_EVIDENCE로 막는다. 해당 업체를 제외한 구매안으로 우회하지 않는다.
+  일반 주문에 없는 통합 terms/as_of/fixed를 필수화하던 과거 테스트 기대값도 수정했다.
+  업무 period가 별도로 제공되어도 계약 모드로 전환하지 않는다. 기간형 비용은 그 범위가 원문 검증된
+  단일 납품일과 정확히 같은 하루인 경우에만 주문 비용으로 연결한다. 범위가 없거나 다르면 기존 비용 HOLD를 유지한다.
+- 판단일과 가격 적용일을 분리했다. 판단일 2026-10-30에 수신·유효한 견적의 2026-11-01 인상 조건을
+  사전 검토할 수 있다. 2026-11-05는 업무의 요청 납품 기한이며 자동 가격 적용 기준일이 아니다.
+  정상 재현은 원문 `2026-11-01 이후 납품분부터 인상 단가 적용`이 실제 ①의 delivery_terms로 저장되고,
+  별도 원문 검증된 업체 delivery_date=2026-11-05와 일치하는 경우다. 인상 요청 단가 5500과
+  기존 단가 5000은 구분되며 판단일을 미래로 옮기지 않는다.
+- `PriceApplication`과 ComparableQuote의 price_effective_from/price_application은 기존 견적의
+  effective_from + checks_jsonb.delivery_terms/delivery_date + evidence_jsonb에서 재구성하는 **내부 계산 모델**이다.
+  새 DB 저장 구조나 LLM이 넣는 도구 인자가 아니다. 업무/revision/견적/원문 참조를 결합하고 최종 검사에서
+  읽기 전용으로 다시 대조한다. 구매안 conditions에 AS_OF/적용 납품일/인상 적용일/FUTURE_QUOTED_PRICE를 표시한다.
+- 적용 근거 없음 → `work_case.price_application_basis_unconfirmed` HOLD.
+  원문에 조건이 있지만 추출 누락 → delivery_terms RECHECK_SOURCE.
+  발주분 등 다른 사건 기준은 납품일로 대체하지 않고 현재 지원 범위 HOLD다. 생산자 추가를 정상 MVP의
+  선결 조건으로 요구하지 않는다. 인상일과 조건 날짜 충돌/적용일 이전 실제 납품도 HOLD한다.
+  현재 해석 범위는 ISO 날짜 + 이후 납품분부터 적용이라는 명시적 조건이며, 해석되지 않는 문구는 허용 근거가 아니다.
+  만료 견적·판단일 이후 수신 견적도 계속 차단한다. 유효기간과 가격 적용일을 같은 필드로 취급하지 않는다.
+- 정상 경로에서 드러난 원문 가격 검사의 `인상 단가 적용` 오인도 수정했다. 숫자가 없는 적용 설명만
+  가격 제시 구절에서 분리하며 숫자가 붙은 실제 단가/부분 일치/다른 필드 숫자 차용 검사는 유지한다.
+  가격 적용 근거의 위조·누락·날짜 변경과 반복 최종 검사의 무저장도 검증했다.
+
+## 재현과 최종 검사
+
+동일한 저장소 의존성만 설치한 기존 새 venv를 사용했다. 제품 모델/저장소/시계는 명시적 대역이며,
+등록 도구와 실제 팀 그래프 경로를 실행한 것이다. 운영 모델·DB·메일 연결 성공을 뜻하지 않는다.
+아래 횟수는 합산하지 않는다.
+
+| 실행 | 결과 |
+|---|---|
+| 수정 전 두 경로 회귀 | 15 failed / 1 passed / 156 deselected |
+| 1차 집중 수정 후 | 16 passed / 156 deselected |
+| 기존 ③④⑤ 영향 회귀 | 332 passed / 4 xfailed / 6 failed; 구형 전역 필수 기대 4건과 명시 결제 조건 누락 우회 2건을 확인해 보완 |
+| 영향받은 기대/조건·숫자 근거 검사 | 40 passed / 135 deselected |
+| 최종 소스의 임시 FINAL_CHECKS 통합 | 58 passed / 0 skipped / 0 xfailed / 0 failed / 192 deselected |
+| 최종 소스 `pytest tests -k agent` 1회 | **682 passed / 20 skipped / 4 xfailed / 0 failed / 282 deselected**, 13 의존성 경고, 394.45초 |
+
+20 skipped는 실제 모델 opt-in 시험이다. 현재 로컬 strict xfail 4건은 Runner 미등록 상태이므로 유지한다.
+임시 통합은 최신 대상의 별도 detached worktree에만 `FINAL_CHECKS` 세 역할을 check_review_output에 등록했다.
+기존 위조 총액/구매 참조/가격 검증 참조/초안 ID 4건을 --runxfail로 실행해 COMPLETED 이전 FAILED를 확인했다.
+선택 정보/미래 적용 정상·거부 사례도 이 등록 경로로 통과했다. 대상 Runner/dispatcher AST를 보존했고
+현재 제품 함수 AST와 tools/schemas/nodes/테스트 바이트가 임시 시험본과 같은지 대조했다.
+로컬 Runner 본문/graph.py는 변경하지 않았다. 전체 대상 브랜치 회귀를 실행했다는 뜻은 아니다.
+모든 실행의 OFFLINE_AUDIT는 real_key_reads=0, network_attempts=0, evals_or_reports_reads=0이다.
+
+로그/환경 루트: `C:\Users\user\AppData\Local\Temp\gyeonjwo-pr22-repro-20261030-dee8971a`.
+이번 파일은 order-future-before.txt, order-future-after.txt, order-future-impact.txt,
+order-future-affected.txt, **order-future-integration.txt/.xml**, **order-future-final.txt/.xml**이다.
+이번 보완 직전 663 소스 대비 패치 **after-663.patch**는 제품/테스트/이 문서 4파일의 증분이며 HEAD 전체 패치가 아니다.
+663의 clean-final.txt/.xml 및 기존 AGENTS45_REVIEW.patch/after-656.patch는 이전 스냅샷으로 그대로 보존했다.
+663 로그 SHA-256: `a01e9dffd896f2f1e2f0002a095e2f1ee9ca562c59e8e598ed77da98f6dd9f57`.
+
+최종 실행 명령(저장소 루트, 아래 절의 새 환경 설치 명령으로 준비한 $cleanEnv):
+```powershell
+$env:PYTEST_DISABLE_PLUGIN_AUTOLOAD='1'
+$env:PYTHONNOUSERSITE='1'
+Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+& "$cleanEnv\Scripts\python.exe" -B -X utf8 -m pytest tests -k agent --offline -q -p no:cacheprovider --tb=short -rx
+```
+임시 대상 트리에서는 같은 환경으로 다음을 실행했다.
+```powershell
+python -B -X utf8 -m pytest tests/test_agent_runner.py tests/test_agents45_product_registration.py tests/test_agents345_priority.py -k 'open_runner_direct_output or final_check or final_guard_repeated or stage4_real_runner or native or order_optional_information or order_positive_contract or future_increase or numeric_source_cost_inclusion' --runxfail --offline -q -p no:cacheprovider --tb=short -rx
+```
+
+기존 실제 Store/원자적 revision 저장, 공통 초안 생성·조회, 전체 견적 전달, 로컬 FINAL_CHECKS 등록,
+C4 미합의 정책 잔여는 유지한다. commit/push/PR 갱신·실제 API/DB/메일 호출은 하지 않았다.
+
+---
+
+# 663 passed 당시 기록 — 아래 입력 범위 설명은 위 최신 절로 보완됨
+
+# PR #22 MVP 입력 범위·FINAL_CHECKS·깨끗한 환경 (2026-10-30)
+
+이 절이 아래의 **656 passed 당시 기록**보다 우선한다. 당시 코드·로그·검토 패치는 보존했다.
+HEAD는 `074c6d63eee70cd674b5381af06fc9a0f42ce154`, 작업 브랜치는 `feature/agents-4-5`다.
+이번 fetch에서 대상 `origin/feature/agents-integration`은
+`5f6cc1a3d9fc0d3be1e248a0b5e743c6f55a2498`이며 담당 원격 head는 로컬 HEAD와 같다.
+현재 브랜치에 대상 변경을 병합하지 않았다. commit/push/PR 갱신 및 실제 모델·DB·메일 호출은 하지 않았다.
+
+## 입력 생산자 재점검과 MVP 범위 수정
+
+ReviewFacts 저장 행 제거는 실제 DB 연결 완료가 아니다. `CaseStore.get_work_case`,
+`QuoteStore.latest_quote_version/insert_quote_version`은 현재 역할 실행의 Protocol이며,
+검증에서는 `tests/agent_memory_store.py`의 MemoryStore를 쓴다. 운영 work_cases 저장·조회 어댑터는 미연결이다.
+①의 실제 코드 경로는 등록 도구 `store_structured_mail` → `save_structured_quote` →
+`QuoteVersionRecord` → `QuoteStore.insert_quote_version`이다. 단가·수량·세금·납기·비용·근거를
+이 경로의 checks/evidence/cost JSON에서 재사용한다. 별도 ReviewFacts 재입력을 요구하지 않는다.
+
+계산기에 맞추기 위한 DB/API/사용자 입력 확장은 하지 않았다. `PurchaseReviewInput.scope_kind=MVP_ORDER`는
+내부 계산 범위 표시다. 기존 단일 주문과 명시된 조건만 평가하며, 기간 계약 계산은 별도 범위다.
+
+| 항목 | 실제 모델·생산/저장·조회 확인 | 이번 처리와 남은 한계 |
+|---|---|---|
+| as_of | 기존 06의 agent_runs.started_at과 실행 시각은 존재하지만 CaseStore.as_of 생산·조회는 없다. 내부 PurchaseReviewInput/PlanSetRecord.bundle에는 계산 시점이 있다. | `execution_as_of()`가 서버 UTC 실행일을 제공한다. 메일/납품일을 판단일로 대입하지 않는다. 기존 계산 참조 저장·조회에 시점을 결합한다. 업무 입력 추가 없음. 자정 경계나 재실행에서 날짜가 달라진 참조는 재검토 대상이다. |
+| period | 내부 ComparisonPeriod/ReviewFacts 모델 외 현재 work_cases용 생성·저장·조회 경로 없음. | 단일 주문은 None이며 기간 총액을 주장하지 않는다. 실제 원문 비용이 `비교기간 전체` 등 기간을 요구할 때만 `cost_terms.comparison_period_required`로 HOLD한다. due_date/effective_from/valid_until에서 기간을 만들지 않는다. |
+| terms | ① QUOTE_FIELDS의 tax_terms/delivery_location/delivery_terms/payment_terms → QuoteVersionRecord.checks_jsonb/evidence_jsonb → 최신 견적 조회. 업무 요구는 기존 mandatory_conditions_jsonb → CaseStore.get_work_case. 별도 통합 terms 생산자는 없다. | 세금 기준은 일치하고 원문 검증된 견적에서 구성한다. 업무가 명시한 필수 조건만 대조한다. 미지정 장소/결제 조건을 필수 입력으로 늘리지 않으며 미지정 조건의 충족도 인증하지 않는다. 명시된 필수 결제 조건이 견적에 없으면 NEEDS_EVIDENCE다. |
+| fixed_commitment | 내부 FixedCommitment/ReviewFacts 모델만 있고 현재 역할의 원계약 매핑·저장·조회 생산자는 없다. 구형 ReviewPipeline/ReferenceRepository에는 contracts/purchase_plans 조회가 있으나 현재 UUID work_cases 계약과 다르다. | 단일 주문은 계약 배분 기능을 평가하지 않고 None을 보존한다. 확인된 0으로 바꾸지 않는다. 명시된 양수 고정 계약은 기존 `TEAM_FIXED_ALLOCATION_UNREPRESENTABLE` 범위 제한으로 HOLD. 구형 파이프라인의 월 기간 추론을 가져오지 않는다. |
+| switching_costs | 내부 ReviewPolicy.switching_costs 외 현재 ① 비용 유형은 SHIPPING/HANDLING이며 별도 전환비 생성·저장·조회 경로 없음. | 별도 전환 비용을 새 필수 입력으로 요구하지 않는다. 단일 주문의 견적 상품값·SHIPPING/HANDLING만 계산하고 범위를 출력한다. 미신고 전환비가 0으로 확인됐다는 뜻이 아니다. 별도 전환 비용이 명시되면 지원 범위/미확인 사유로 HOLD한다. |
+
+`policy_supplier_limit`의 최대 2곳은 합의된 MVP 탐색 제한이며 회사 정책에 max_suppliers=2를 써 넣지 않는다.
+분산 허용은 실제 policy_jsonb 값이 있을 때만 적용한다. 내부 정책 digest 출처는 가짜 메일이나 C4 정책 ID가 아니다.
+세금·가격·원문·배송비 미확인 차단과 단가 구간/MOQ/포장 배수/배분별 재가격·독립 총액 검사는 유지했다.
+미확인 배송비는 여전히 비교의 확정 총액이 아니며, LOW_VALUE만 남아 현재 ④로 진행할 수 없으면
+`LOW_VALUE_PLAN_CONTRACT_REQUIRED` HOLD다. 불필요한 질문/초안을 만들지 않는다.
+
+정상 최소 시나리오는 실제 ① 저장 형식의 견적 + 기존 업무 quantity/unit/품목/명시 필수조건 +
+기존 정책 JSON의 분산 허용/배분 간격으로 ③→④ 진행한다. period/fixed/통합 terms/전환비 입력은 넣지 않는다.
+기존 업체는 원문 previous_unit_price 근거가 있는 유일한 업체로 확인하며 임의 선택하지 않는다.
+⑤에만 필요한 가격 범위·증분·재가격 범위·C4 정책이 없으면 ⑤만 HOLD한다.
+
+`test_actual_extractor_to_mvp_order_without_proposed_work_inputs`는 등록된 ① 저장 도구에서 이 경로를 재현한다.
+테스트의 업무/정책 dict는 **기존 스키마에 맞춘 MemoryStore 대역 입력**이다. 운영 입력 UI/API나 DB 어댑터를
+실행한 증거는 아니다. 실행 시계도 고정 대역이다. 별도 ReviewFacts 저장 행은 없다.
+`proposed_business_projection_without_review_facts` 및
+`test_actual_extractor_with_proposed_business_inputs_without_review_facts`는 수동 기간/조건/고정 물량을 넣는
+구형 호환 프로파일의 **가상 입력 시험**이며 실제 생산자 연결 성공으로 집계하지 않는다.
+
+남은 실제 HOLD/보완 재현은 `test_mvp_order_actual_missing_constraints_are_not_filled_with_defaults`다.
+기간형 비용에 기간 없음 → HOLD, 명시된 별도 전환비 → 범위 HOLD,
+업무 필수 결제 조건의 업체 근거 없음 → NEEDS_EVIDENCE, 미확인 배송비 → 확정 총액 생성 금지다.
+업무/정책 부족을 거래처 질문으로 돌리지 않는다. 없는 period/fixed/전환비 생산자 추가는 정상 MVP의 선결 조건이 아니다.
+기간 계약·고정 배분·별도 전환비를 실제 지원할지와 그 의미/근거만 필요 시 팀이 결정한다.
+
+## 최신 FINAL_CHECKS 호환과 실제 연결 위치
+
+대상 브랜치에는 5인자 dispatcher `check_final_output(role,data,context,output,messages)`와
+`FINAL_CHECKS`가 있다. 로컬 4인자 함수는 **`validate_review_output`**으로 이름을 분리했고,
+5인자 **`check_review_output`** adapter를 제공한다. messages에서 실행 권한을 복원하지 않으며
+typed data/RunContext와 저장된 근거만 검증한다. 검사 예외를 HOLD나 정상 완료로 바꾸지 않는다.
+
+담당자 연결은 대상 agents.py의 기존 `FINAL_CHECKS`에서 INFO_PRIORITY/RESPONSE_PLAN/COUNTER_OFFER를
+`check_review_output`에 등록하는 것이다. 기존 Runner try 안의 dispatcher 호출은
+`finish_agent_run(COMPLETED)` 앞에 있으며 오류는 기존 FAILED 저장 경로로 전파된다.
+현재 로컬 Runner 본문과 graph.py는 수정하지 않았고 실제 등록은 아직 하지 않았다.
+노드 내부 호출만 `validate_review_output`으로 전환했다.
+
+최신 대상 SHA의 별도 detached 임시 worktree에 현재 제품 함수/tools/schemas/nodes와 검사 파일을 적용하고,
+**그 임시 트리에만** 위 세 역할을 등록해 기존 Runner 검사를 실행했다.
+`test_open_runner_direct_output_must_not_complete_forged_result`의 총액/구매 참조/가격 검증 참조/초안 ID
+네 재현은 `--runxfail`로 실행했으며 잘못된 출력이 COMPLETED 이전 FAILED로 차단됐다.
+정상/반복 검사의 무저장도 포함해 **13 passed / 0 skipped / 0 xfailed / 0 failed / 62 deselected**다.
+이는 명시적으로 등록한 임시 통합 결과이고 현재 작업 브랜치의 연결 완료가 아니다.
+현재 제품 함수 AST와 tools/schemas/nodes 바이트가 임시 시험본과 같은 것도 대조했다.
+로컬 strict xfail 4건은 그대로 남긴다. 최신 대상 전체 회귀를 실행한 것으로 표현하지 않는다.
+
+재현 명령(임시 통합 트리에서, 아래 새 환경 Python 사용):
+```powershell
+python -B -X utf8 -m pytest tests/test_agent_runner.py tests/test_agents45_product_registration.py -k 'open_runner_direct_output or final_check or final_guard_repeated or stage4_real_runner' --runxfail --offline -q -p no:cacheprovider --tb=short -rx
+```
+
+정책 생략은 기존 `SkipPolicyVerifier.check_skip`와 `ReviewCalculator.checked_skip`,
+`validate_review_output` → `price_validation` → 기존 PASS 카드 라우팅 구조를 유지한다.
+ALLOW 시험은 명시적인 테스트 전용 가상 정책이다. 운영 C4 조건/ID·버전 발급은 미합의여서 기본 HOLD이며,
+`skip_if_request_not_more_than_alternative`만으로 허용하지 않는다. 모든 검사는 읽기 전용이다.
+
+## 저장소 의존성만 설치한 새 환경의 최종 검사
+
+개인 check.py/.preupload/외부 패키지 .pth 없이 Python 3.14.7의 새 venv를 만들었다.
+`include-system-site-packages=false`, site-packages의 .pth 0개이며 경로도 새 환경/표준 라이브러리만 확인했다.
+네트워크 다운로드는 **설치 단계에서만** 사용했다. 설치는 기존 requirements-dev.txt(기존 requirements.txt 포함)만 사용했고
+`pip check`는 No broken requirements found였다. pytest 9.1.1/langchain 1.4.7/langgraph 1.2.18/
+langchain-core 1.7.3/pydantic 2.14.2에서 실행했다. 새 전용 실행기는 없다.
+
+저장소 루트에서 재현하는 명령(venv 경로는 임의의 새 임시 경로):
+```powershell
+$cleanEnv = Join-Path $env:TEMP ('gyeonjwo-offline-' + [guid]::NewGuid().ToString('N'))
+python -I -m venv $cleanEnv
+& "$cleanEnv\Scripts\python.exe" -I -m pip install -r requirements-dev.txt
+& "$cleanEnv\Scripts\python.exe" -I -m pip check
+$env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = '1'
+$env:PYTHONNOUSERSITE = '1'
+Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+& "$cleanEnv\Scripts\python.exe" -B -X utf8 -m pytest tests -k agent --offline -q -p no:cacheprovider --tb=short -rx
+```
+
+최종 제품·테스트 소스에서 전체 범위를 **한 번** 실행한 결과:
+**663 passed / 20 skipped / 4 xfailed / 0 failed / 282 deselected**, 의존성 경고 13건, 86.16초.
+20 skipped는 실제 모델 opt-in 시험, 4 strict xfailed는 현재 로컬 Runner 미등록 위조 출력 재현이다.
+OFFLINE_AUDIT: real_key_reads=0, network_attempts=0, evals_or_reports_reads=0.
+중간 영향 검사의 횟수는 합산하지 않는다. 최종 실행 후 제품·테스트 추가 수정은 없다.
+
+이번 임시 환경/통합 트리/최종 로그 위치는
+`C:\Users\user\AppData\Local\Temp\gyeonjwo-pr22-repro-20261030-dee8971a`다.
+최종 로그 `clean-final.txt`, JUnit `clean-final.xml`; 이번 보완 전후 diff는 `after-656.patch`다.
+이 경로는 실행 산출물 위치이며 저장소 재현의 의존성이 아니다.
+656 당시 로그 `../verification/agents345-final-20261030.txt`와 JUnit은 그대로 보존했다.
+로그 SHA-256은 `93a879ad2fe305f7dd4222d1bebfcc040d8b5e5f986e0137255ee3d46a7387b5`다.
+기존 AGENTS45_REVIEW.patch는 당시 스냅샷이며 이번 diff와 다르다. 이력과 이번 수치는 합산하지 않는다.
+
+담당자 잔여: 실제 Case/Quote/역할별 Store 어댑터와 원자적 revision 조건부 저장,
+위 FINAL_CHECKS 등록, 공통 `create_mail_draft` 생성·`DraftLookupStore` 조회,
+초기/부분 회신에서 `PriorityIn/PlanIn.quote_version_ids`에 업체별 최신 전체 견적 집합 전달,
+실제 C4 정책 판정과 정책 버전 관리다. 계산기 전용 필드 생산자 확대를 이 잔여의 해결책으로 요구하지 않는다.
+
+---
+
+# 아래는 656 passed 당시 기록 — 위 최신 절의 입력 범위·이름·연결 결과로 대체됨
+
+# PR #22 로컬 보완 — ReviewFacts 생산 경로·생략 검증
+
+이 절이 아래 직전 PR·과거 인계 기록보다 우선한다. 기준 HEAD는 `074c6d63eee70cd674b5381af06fc9a0f42ce154`,
+브랜치는 feature/agents-4-5다. 원격 head는 기준과 동일했고, base feature/agents-integration은
+`5f6cc1a`로 진행돼 FINAL_CHECKS 등록 API가 추가됐다. 이번에는 fetch/비교만 했고 병합하지 않았다.
+실제 LLM·DB·메일 호출, commit/push/PR 갱신은 수행하지 않았다. 기존 검토 패치는 과거 스냅샷으로 그대로 보존했다.
+
+## 확인한 팀 계약과 적용 경계
+
+처음 조회한 과거 Notion ID는 접근 오류였고 브라우저 읽기도 URL 확인 실패로 중단했다.
+이후 사용자가 제공한 새 URL은 Notion 커넥터로 직접 읽었다(반환 스냅샷 시각 2026-10-29).
+- [06 데이터 스키마](https://app.notion.com/p/207589077583836b99a38199bc2a64ce): work_cases의 quantity/unit/due_date,
+  mandatory_conditions_jsonb/policy_jsonb, quote_versions의 불변 원문 근거, agent_runs/workflow_logs의 policy_version을 확인했다.
+  별도 ReviewFacts 테이블은 없다. 06의 SQL 시뮬레이션/설계와 현재 Python 어댑터 구현은 구분한다.
+- [07 에이전트 구성도](https://app.notion.com/p/ed8589077583838f808c811959862e8b): 업체 값은 원문 검증,
+  분산 미확정은 분산 범위 제한, 역제안 정책 부재는 ⑤ 보류로 구분한다. 회사 가격 정책의 구체화는 팀 결정이다.
+- [02 요구사항 AC-23](https://app.notion.com/p/99558907758383d9b18d01519214b9bd): 가능한 구매안 검토와
+  역제안 정책 부재를 분리한다. A1의 생략→가격 검증→카드 연결은 기존 graph.py 라우팅에서도 확인했다.
+
+C4의 구체 생략 조건과 정책 ID/버전 발급 규칙은 확인되지 않았다. 사용자도 미확정으로 명시했다.
+기존 skip_if_request_not_more_than_alternative는 계산기의 후보 판정이며 승인된 C4 규칙으로 취급하지 않는다.
+메일 발송 승인 OFF는 역제안 생성 생략 허가가 아니다. 아래의 ALLOW 시험은 명시적인 테스트 전용 가상 정책이다.
+
+## 필드·실제 위치·생산자·근거·기능 대응
+
+T=app/agents/tools.py, S=app/agents/schemas.py. CaseStore는 물리 DB 행을 그대로 노출하는 API가 아니라 기존 서버 조회 계약이다.
+새 테이블·필수 ReviewFacts 저장 행을 요구하지 않는다. 아래에서 “투영 제안”은 현재 06의 확정 컬럼/생산자가 있다는 뜻이 아니다.
+
+| 계산 필드 | 실제 위치 / 조회 경로 | 생성·수정 주체와 근거 | 사용 기능 / 없을 때 |
+|---|---|---|---|
+| 품목·규격·필수 조건 | work_cases.item_name/specification/mandatory_conditions_jsonb → CaseStore; 견적 checks_jsonb/evidence_jsonb | 업무 조건 확인·편집/백엔드, ① 원문 저장 | ③④⑤; 명시 필수 위반을 선호 점수로 상쇄하지 않음 |
+| 비교 수량·단위 | work_cases.quantity/unit → CaseStore | 요청 업무 입력·검증된 최초 추출 저장 주체. 업체 available_quantity와 구분 | ③④⑤; 미확정은 내부 조건 HOLD, 업체 공급량으로 대체하지 않음 |
+| 단가·공급량·가격 적용/유효일 | quote_versions의 unit_price/available_quantity/effective_from/valid_until, evidence_jsonb | ① store_structured_mail/QuoteStore.insert_quote_version, 원문·견적 버전 | ③④⑤; 원문과 추출 불일치는 RECHECK_SOURCE. 과거 가격은 현재 대안으로 쓰지 않음 |
+| 세금 | quote_versions.checks_jsonb.tax_terms + evidence_jsonb | ①의 원문 STATED 값 | 같은 세금 기준 확인 후 사용. 업무 terms에 중복 입력하지 않아도 확인된 일치 견적에서 내부 기준을 구성; 혼합 기준 추정 금지 |
+| 납품일·소요일수 | checks_jsonb.delivery_date/lead_time + evidence_jsonb | ① 원문 | 확정 납품일은 단일 공급일로만 사용. 납기·유효기간·비교기간을 동일시하거나 기간을 확장하지 않음 |
+| 배송·기타 비용·요율·포함 여부 | cost_terms_jsonb 및 원문 근거 | ①, period_cost/공용 계산 | ③ 영향 판단·④ 배분·⑤ 재가격; 미확인과 명시 0/단가 포함을 구분 |
+| 업체 납품지·납품/결제 조건 | checks_jsonb + evidence_jsonb | 이번에 기존 ①의 QUOTE_FIELDS에 delivery_location/delivery_terms/payment_terms를 추가. 같은 저장 도구가 원문 검증 후 기존 JSON에 저장 | ③④⑤; ReviewFacts 사본 불필요. 원문 답 있음/추출 없음은 RECHECK_SOURCE, 원문에도 없으면 해당 업체 조건 확인 |
+| MOQ·포장 배수 | 현재 ① DTO는 pricing_terms_jsonb의 moq/pack_multiple와 단위·근거. 최신 06은 moq_quantity/moq_unit 및 order_increment_quantity/order_increment_unit 전용 컬럼 | ①/DB 어댑터 담당 | 기존 숫자/단위/배분 회귀 보존. 최신 전용 컬럼→현재 DTO의 근거 보존 매핑은 담당자 잔여. JSON을 새 원장에 자동 채우는 migration은 하지 않음 |
+| 판단 시점 as_of | 06 agent_runs.started_at 등 실행 스냅샷에서 CaseStore.as_of로 투영 제안 | 실행 백엔드; 날짜 기준/시점 고정 합의 필요 | ③④⑤의 견적·정책 유효성. 현재 시각/메일 시각/정책 시작일을 임의 대입하지 않음 |
+| 비교기간 period | 현재 06 WORK_CASES에 별도 확정 필드 없음. 업무/계약 정보를 CaseStore.period로 투영하는 최소 제안 | 업무 조건·계약 담당자, 저장 JSON 키/입력 UI·API 합의 잔여 | 현재 기간 계산에 필요. due_date로 생성하지 않고 work_case.period HOLD |
+| 요구 거래조건 terms | 업무의 납품지·납품/요구 결제 조건을 CaseStore.terms로 투영 제안 | 업무 조건 편집·서버. 저장 위치/키 합의 잔여, 업체 조건을 요구조건으로 복사하지 않음 | ③④⑤ 동일조건 비교; work_case.terms HOLD. quote의 세금 값은 독립 원문 출처로 결합 |
+| 기존 업체 | CaseStore.incumbent_supplier_id 명시 투영 또는 previous_unit_price 근거를 가진 유일한 업체 | 업무/계약 담당 또는 ①의 인상 원문 근거 | 모호하면 임의 선택하지 않고 HOLD |
+| 고정 계약 물량 | 06에 확정된 계약 물량 원장 없음. CaseStore.fixed_commitment의 명시 검증 값 투영 제안 | 계약/업무 담당, 원래 계약/업무 근거 | 현재 팀 연결 프로필은 명시적 fixed=0만 지원. 누락을 0으로 채우지 않음. 양수는 TEAM_FIXED_ALLOCATION_UNREPRESENTABLE로 범위 제한 유지 |
+| 전환 비용 | 기존 전용 견적 저장 항목 없음. 명시된 비용을 policy_jsonb의 switching_costs → CaseStore.policy로 투영하는 선택 제안 | 회사 정책/업무 비용 담당; HANDLING과 포함/중복 여부 합의 필요 | 알려진 값만 사용. 기존 업체는 비적용 None, 대안 비용을 임의 0 처리하지 않음. 별도 입력 필요 여부/생산자는 팀 잔여 |
+| 분산 허용·배분 간격·업체 수 | policy_jsonb → CaseStore.policy | 회사 정책 담당, 승인된 정책 스냅샷 | ④; allow_split 미확정이면 None을 보존하고 KEEP/SWITCH만 평가, SPLIT_PERMISSION_UNCONFIRMED를 결과 범위에 표시. 분산 허용으로 바꾸지 않음 |
+| 재가격 범위 repricing_scope | 현재 06의 전용 필드/생산자 없음. 합의된 회사/계약 조건의 CaseStore 투영 제안 | 정책/계약 담당 | ③④는 차단하지 않음. 분산 재가격이 필요한 ⑤만 work_case.repricing_scope HOLD |
+| 역제안 가격 한도·증분·추가 정책 | policy_jsonb → CaseStore.policy, S.ReviewPolicy의 선택 필드 | 회사 정책 담당 | ⑤에서 require_counter_offer_inputs가 필요한 경로만 요구. ③④ 구매안의 VALID를 해당 값의 존재로 대신하지 않음 |
+| 생략 정책 식별·버전 | policy_jsonb의 근거 + agent_runs/workflow_logs.policy_version | 정책 담당과 실행/저장 어댑터. 발급·조회 규칙 미확정 | 운영 생략 기본 HOLD. ID·버전은 불투명한 기존 값으로만 전달하며 에이전트가 발급하지 않음 |
+
+CaseStore의 as_of/period/terms/fixed_commitment 등 선택 투영은 새로운 영속 구조가 아니라 현재 계산 입력의 서버 매핑 경계다.
+현재 DB/API가 이 값을 생산·반환한다는 증거는 없으므로 정상 운영 연결 완료로 보고하지 않는다.
+최소 후속 변경은 기존 업무/정책/계약 저장 위치와 편집 주체를 확정하고, 동일 revision/실행의 조회 결과에 위 선택 필드를 투영하는 것이다.
+확인된 06 컬럼·원문 값과 아직 미합의인 투영을 위 표에서 구분했다. 새 필수 저장 테이블은 만들지 않았다.
+
+## 구현한 데이터 연결과 생략 검증 구조
+
+- PriorityStore/PlanStore/CounterOfferStore에서 load_review_facts 필수 메서드를 제거했다.
+  _ReviewAccess.supplements는 완전한 업무 투영이 있으면 조회하지 않는다. 과거 대역/호환용 조회는 선택적으로만 남았다.
+  _QuoteMapper는 현재 견적의 STATED/evidence와 업무·정책 값을 우선 사용한다.
+  내부 근거는 WORK_CASE/POLICY와 case_id/revision/field/value/source digest로 결합하며 가짜 메일을 만들지 않는다.
+- ⑤ 전용 가격 한도·증분·생략/부분 비교 정책과 분산 재가격 범위는 require_counter_offer_inputs에서 요구한다.
+  ③ 비교/④ 구매안은 이 값이 없다는 이유만으로 일괄 HOLD하지 않는다. 미확정 구매 비용과 필수 조건 차단은 유지한다.
+  분산 허용 None은 조건 제한을 명시하며, 확인된 분산을 삭제하거나 허용 값을 생성하지 않는다.
+- T.SkipPolicyVerifier.check_skip(context, scope, policy: ReviewPolicy, calculation: PriceCalculationRecord)
+  → S.SkipPolicyCheck(decision=ALLOW/DENY/UNCONFIRMED, policy_id, policy_version, policy_digest, condition)를 추가했다.
+  use_role_stores(skip_policy=...)로 명시 주입한다. 기본 None이며 C4 미확정 HOLD다.
+  이 인터페이스는 정책 소유자가 구현할 최소 연결 경계이지 새 정책 ID/버전 발급 규칙이 아니다.
+- calculate_counter_offer의 기존 계산 후보 NO_COUNTER_NEEDED는 독립 계산 검사와 외부 정책 판정까지 통과해야
+  실제 POLICY/PLAN_SET/OFFER_CALCULATION 참조를 저장하고 생략 결과를 반환한다.
+  기존 PriceCalculationRecord에 target=None, policy_ref, skip_policy를 허용했다. 별도 필수 저장 종류/테이블은 추가하지 않았다.
+  저장소는 현재 업무·revision·견적/source와 생산 실행을 원자적으로 묶어야 한다. C4 실제 어댑터/저장 계약은 미연결이다.
+- Out/graph 입력 필드를 임의 확장하지 않기 위해 기존 reason에 표준 계산 참조를 전달하고 기존
+  counter_offer_skip_reason 경로를 사용한다. reason 텍스트 자체는 허용 근거가 아니다.
+  ReviewCalculator.checked_skip은 참조 조회·같은 정책/현재 판정·버전·구매안 전체·독립 총액·현재 원본을 다시 대조한다.
+  check_final_output과 price_validation은 읽기 전용이다. 정상 ALLOW만 PASS, 금지 DENY는 FIX,
+  정책/근거 누락은 내부 HOLD, 위조·다른 업무·과거 revision/정책 및 조회 중 변경은 거부한다.
+  생략 결과의 target/초안은 금지한다. 검증에서 초안·결과·새 참조를 저장하지 않는다.
+- graph.py 기존 SKIPPED→price_validation→PASS→review_card를 그대로 사용한다. 테스트의 review_card는 저장 대역이다.
+  실제 기본 review_card 구현/DB 저장이 완료된 것은 아니다. 운영 C4가 미확정인 상태에서 생략을 기본 허용하지 않는다.
+
+## 원격 팀 변경과 공통 연결 잔여
+
+원격 `5f6cc1a`는 FINAL_CHECKS와 5인자 check_final_output(role,data,context,output,messages)을 도입했다.
+현재 로컬의 4인자 동명 최종 검증 함수와 이름이 충돌하므로 이후 병합 담당자가 이름을 분리해야 한다.
+최소 연결안은 로컬 검증을 validate_review_output 등으로 이름 분리하고, 그 함수를 부르는 5인자 adapter를
+FINAL_CHECKS의 ③④⑤에 등록하는 것이다. Runner 본문을 다시 바꾸는 우회는 필요하지 않다.
+이번에는 Runner·graph.py·팀 원격 변경을 수정/병합하지 않았고 기존 strict xfail 4건도 유지했다.
+실제 Store의 조건부 저장/정책 버전 조회, 공통 초안 생성·조회, 초기·부분 회신 전체 견적 전달도 기존 담당자 잔여다.
+
+## 이번 검증과 저장소 단독 재현
+
+수정 전: check-56에서 ReviewFacts/⑤ 전용 조건 2건 실패, check-58에서 기존 생략 무조건 HOLD를 재현했다.
+check-60은 442 passed / 20 skipped / 4 xfailed / 1 failed(옛 review_facts.period 기대),
+check-61은 영향 28 passed, check-62는 생략 보안 영향 15 passed였다.
+check-63의 분산 필드 생략 경로 KeyError를 수정해 check-64 영향 3 passed,
+check-65의 실제 ① 저장/업무·업체 조건 분리 영향 11 passed를 확인했다. 중간 로그는 보존하며 합산하지 않는다.
+
+최종 제품/테스트 소스에서 전체 `pytest tests -k agent`를 **한 번** 실행했다.
+**656 passed / 20 skipped / 4 xfailed / 0 failed / 282 deselected**, 의존성 경고 13건.
+20 skipped는 실제 모델 시험, 4 strict xfailed는 로컬 Runner 미연결의 총액/구매 참조/가격 검증 참조/초안 ID 재현이다.
+실행 로그: `../verification/agents345-final-20261030.txt`, JUnit: `../verification/agents345-final-20261030.xml`.
+OFFLINE_AUDIT: real_key_reads=0, network_attempts=0, evals_or_reports_reads=0.
+630은 직전 PR의 과거 결과이며 이번 결과로 재사용하지 않았다.
+
+기존 개인 check.py 없이 실행했으며 tests/conftest.py에 표준 pytest --offline 옵션을 추가했다.
+키/서비스 환경·live opt-in을 제거하고 실제 .env 읽기·네트워크·과거 evals/reports 읽기를 차단한다.
+pytest.ini의 pythonpath=. 및 pytest 기본 테스트 경로만 사용하며 별도 실행기는 추가하지 않았다.
+필요 개발 의존성은 기존 requirements-dev.txt(기존 requirements.txt 포함)에 있다.
+확인한 검사 환경: Python 3.14.7, pytest 9.1.1, langchain 1.4.7, langgraph 1.2.18,
+langchain-openai 1.7.3, pydantic 2.14.1. 새 환경 다운로드/설치 자체는 이번에 수행하지 않았다.
+
+저장소 루트에서의 설치·실행 명령(PowerShell):
+
+```powershell
+py -3.14 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+$env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = '1'
+$env:PYTHONDONTWRITEBYTECODE = '1'
+Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+.\.venv\Scripts\python.exe -B -X utf8 -m pytest tests -k agent --offline -q -p no:cacheprovider --tb=short -rx
+```
+
+이번 실제 명령은 같은 pytest 인자와 환경 설정에서 인터프리터만 기존
+`..\..\.preupload\team_venv\Scripts\python.exe`를 사용하고 `--junitxml=..\verification\agents345-final-20261030.xml`을 더했다.
+이 가상환경은 .pth로 사전 설치 패키지 디렉터리를 참조한다. 이는 설치 환경이며 제품 코드·테스트 데이터·차단 설정은 저장소 파일이다.
+앞선 개인 check.py가 숨겨 제공하던 환경 제거·plugin autoload 비활성·key/network/artifact 차단은 위 명령과 conftest로 드러냈다.
+개인 runner의 bootstrap 코드나 과거 보고서를 읽는 의존성은 없다.
+
+허용 생략→실제 가격 검증 PASS→기존 카드 callback 호출은 가상 C4/카드 저장 대역에서 확인했다.
+운영 C4 정책 합의·정책 ID/버전 발급·실제 DB CAS·카드/메일 저장 통합 성공을 의미하지 않는다.
+LOW_VALUE·비용·배분·구간·재가격·원문·참조 및 읽기 전용 회귀는 이번 전체 범위에 포함된다.
+
+---
+
+# 이하 직전 PR 검토·과거 인계 기록
+
 # ③·④·⑤ 공통 구조 이관 및 외부 검토 비용 명세 보완 — 2026-10-30
 
 이 절이 아래 과거 기록보다 우선한다. 기존 checkout/feature/agents-4-5의 HEAD는
