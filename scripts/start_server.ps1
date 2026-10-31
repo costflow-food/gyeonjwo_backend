@@ -24,7 +24,7 @@ try {
         } finally { $env:BACKEND_PORT = $previousBackendPort }
     } else {
         $backendPython = Join-Path $backendRoot '.venv\Scripts\python.exe'
-        if (-not (Test-Path -LiteralPath $backendPython)) { throw 'Create .venv and install requirements-dev.txt first.' }
+        if (-not (Test-Path -LiteralPath $backendPython)) { throw 'Create .venv and install requirements.txt first.' }
         & $backendPython -m uvicorn app.main:app --host 127.0.0.1 --port $Port --workers 1
         if ($LASTEXITCODE -ne 0) { throw 'Local server exited with an error.' }
     }

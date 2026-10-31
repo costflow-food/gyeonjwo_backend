@@ -1,4 +1,5 @@
 import ipaddress
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, Request
@@ -8,6 +9,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from app.api.dependencies import bearer
 from app.api.responses import Envelope, api_json
 from app.core.errors import ServiceError
+from app.core.request_context import current_request_id
 from app.features.mailboxes.application.auth import google_principal
 from app.features.mailboxes.application.service import GoogleConnectionService
 from app.features.mailboxes.domain.schemas import GoogleConnection, GoogleConnectRequest
@@ -17,6 +19,7 @@ from app.features.mailboxes.infrastructure.repository import MailboxRepository
 from app.shared.infrastructure.db.client import make_server_client
 
 router = APIRouter(prefix='/api/v1/mailboxes/google', tags=['Google mailbox'])
+logger = logging.getLogger('uvicorn.error.gmail_receive')
 
 
 def make_mailbox_service(settings):
@@ -59,7 +62,17 @@ def get_mailbox_service(request: Request):
 def connect(payload: GoogleConnectRequest, request: Request,
     principal=Depends(require_google_user), service=Depends(get_mailbox_service),
     idempotency_key: Annotated[str | None, Header(alias='Idempotency-Key')] = None):
-    result = service.connect(principal, payload, idempotency_key)
+    request_id = current_request_id()
+    logger.info('gmail connect_started request_id=%s', request_id)
+    try:
+        result = service.connect(principal, payload, idempotency_key)
+    except Exception:
+        logger.warning('gmail connect_failed request_id=%s code=CONNECTION_NOT_CONFIRMED', request_id)
+        raise
+    status = result.body.get('data', {}).get('status')
+    safe_status = status if status in {'CONNECTED', 'PARTIAL', 'NEEDS_RECONNECT', 'FAILED', 'NOT_CONNECTED'} else 'REJECTED'
+    logger.info('gmail connect_completed request_id=%s connection_status=%s http_status=%d',
+                request_id, safe_status, result.status)
     worker = getattr(request.app.state, 'connected_mailbox_worker', None)
     if worker:
         worker.wake.set()
