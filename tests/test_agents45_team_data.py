@@ -178,12 +178,12 @@ def test_team_records_through_product_registration_to_stage4_and_stage5(team_sto
     assert price['payload']['target']['target_unit_price'] == '5416'
     assert price['payload']['target']['basis_quote_version_ids'] == ['qv-a']
     assert price['agent_run_id'] == 'run-2'
-    assert out.next_action == 'HOLD' and out.unknown_fields == ['create_mail_draft']
+    assert out.next_action == 'HOLD' and out.unknown_fields == ['create_counter_offer_draft']
     assert out.target is None and out.draft_ids == []
     assert common.agent_runs['run-1']['output_jsonb'] == plan.model_dump(mode='json')
     assert common.agent_runs['run-2']['output_jsonb'] == out.model_dump(mode='json')
     assert not any(r['kind'] in ('AGENT_RESULT', 'DRAFT') for r in refs.records.values())
-    assert before == tools._registry and 'create_mail_draft' not in before and 'check_comparability' in before
+    assert before == tools._registry and 'create_counter_offer_draft' not in before and 'check_comparability' in before
 
 
 @pytest.mark.parametrize('fault,expected', [
@@ -318,7 +318,7 @@ def test_irrelevant_supplements_are_not_needed_for_same_plans_and_price(team_sto
     assert out.next_action == 'PLANS_PROPOSED'
     result = AgentRunner(ToolDrivenModel(messages=iter([])), runs=common)(R.COUNTER_OFFER,
         CounterOfferIn(case_id=UUID(CASE), input_revision=1, quote_version_ids=list(scope.quote_ids), validated_plans=out.plans))
-    assert result.next_action == 'HOLD' and result.unknown_fields == ['create_mail_draft']
+    assert result.next_action == 'HOLD' and result.unknown_fields == ['create_counter_offer_draft']
     assert [r for r in refs.records.values() if r['kind'] == 'PRICE_VALIDATION'][-1]['payload']['target']['target_unit_price'] == '5416'
 
 
@@ -369,7 +369,7 @@ def test_missing_facts_extraction_and_configuration_use_distinct_actions(team_st
     assert not refs.records
 
 
-@pytest.mark.parametrize('field', ['policy', 'create_mail_draft', 'PlanStore.read_plan_calculation'])
+@pytest.mark.parametrize('field', ['policy', 'create_counter_offer_draft', 'PlanStore.read_plan_calculation'])
 def test_upstream_development_questions_are_not_sent_to_supplier(team_storage, field):
     common, scope, _, refs, _ = team_storage
     out = AgentRunner(ToolDrivenModel(messages=iter([])), runs=common)(R.RESPONSE_PLAN,
@@ -529,7 +529,7 @@ def test_review_revision_zero_uses_team_contract(team_storage):
     assert result.next_action == 'PLANS_PROPOSED' and result.plans
     outcome=AgentRunner(ToolDrivenModel(messages=iter([])), runs=common)(R.COUNTER_OFFER,
         CounterOfferIn(case_id=UUID(CASE), input_revision=0, quote_version_ids=list(scope.quote_ids), validated_plans=result.plans))
-    assert outcome.next_action=='HOLD' and outcome.unknown_fields==['create_mail_draft']
+    assert outcome.next_action=='HOLD' and outcome.unknown_fields==['create_counter_offer_draft']
     assert any(r['kind']=='PRICE_VALIDATION' for r in refs.records.values())
     assert all(r['scope']['revision']==0 for r in refs.records.values())
 
@@ -685,5 +685,5 @@ def test_final_guard_team_validation_row_cannot_replace_missing_shared_draft_loo
     for _ in range(2):
         with pytest.raises(MissingTeamData) as rejected:
             validate_review_output(R.COUNTER_OFFER, data, context, payload)
-        assert rejected.value.fields == ['create_mail_draft.resolve']
+        assert rejected.value.fields == ['create_counter_offer_draft.resolve']
     assert (refs.records, common.agent_runs) == before

@@ -63,10 +63,10 @@ class PriorityModel(ToolDrivenModel):
                         for i,q in enumerate(collection):
                             if (q['supplier_id'],q['field'])==(question['supplier_id'],question['field']):collection[i]=question
             groups = report['question_groups']
-            drafts = [json.loads(m.content)['draft_id'] for m in history if m.name == 'create_mail_draft']
+            drafts = [json.loads(m.content)['draft_id'] for m in history if m.name == 'create_clarification_draft']
             if len(drafts) < len(groups):
                 group = groups[len(drafts)]
-                return call('create_mail_draft', {'purpose':'CLARIFICATION', **group})
+                return call('create_clarification_draft', {'purpose':'CLARIFICATION', **group})
             return final(action, questions=report['questions'], draft_ids=drafts, unknown_fields=report['unknown_fields'])
         return final(action, questions=report.get('questions', []), draft_ids=[],
                      unknown_fields=report['unknown_fields'] + report.get('missing_dependencies', []))
@@ -116,7 +116,7 @@ def full_volume(storage):
 def install_clarification_storage_double(storage, monkeypatch):
     common = storage[0];saved = {}
     @tool
-    def create_mail_draft(purpose: str, supplier_id: str, questions: list[Question], runtime: ToolRuntime[RunContext]) -> dict:
+    def create_clarification_draft(purpose: str, supplier_id: str, questions: list[Question], runtime: ToolRuntime[RunContext]) -> dict:
         """SYNTHETIC storage-only common draft contract double; never sends mail."""
         context = runtime.context
         assert purpose == 'CLARIFICATION'
@@ -126,7 +126,7 @@ def install_clarification_storage_double(storage, monkeypatch):
         saved[ref] = {'purpose':purpose,'case_id':context.case_id,'input_revision':context.input_revision,'supplier_id':supplier_id,
                       'questions':[q.model_dump(mode='json') for q in questions], 'send_authorized':False}
         return {'draft_id':ref, 'send_authorized':False}
-    monkeypatch.setitem(tools._registry, 'create_mail_draft', create_mail_draft)
+    monkeypatch.setitem(tools._registry, 'create_clarification_draft', create_clarification_draft)
     class ClarificationLookup:
         def read_clarification_draft(self,context,scope,ref):
             return deepcopy(saved[ref])
@@ -162,7 +162,7 @@ def test_missing_required_fields_group_by_supplier_and_no_fake_draft(team_storag
     absent_field(team_storage, 'available_quantity')
     result = run_priority(team_storage, pending=['unit_price','unit_price'])
     assert result.next_action == 'HOLD' and result.draft_ids == []
-    assert 'create_mail_draft' in result.unknown_fields
+    assert 'create_clarification_draft' in result.unknown_fields
     assert {(q.supplier_id,q.field) for q in result.questions} == {('supplier-b','unit_price'),('supplier-b','available_quantity')}
     assert all(q.priority == 'MUST_CONFIRM' for q in result.questions)
     saved = install_clarification_storage_double(team_storage, monkeypatch)
@@ -262,7 +262,7 @@ def test_real_graph_plan_to_priority_waits_only_for_stored_draft(team_storage,mo
 def test_real_graph_normal_plan_counter_stops_at_actual_draft_dependency(team_storage):
     state=team_graph(team_storage).invoke(graph_state(team_storage))
     assert [s.role for s in state['steps']]==[R.RESPONSE_PLAN,R.COUNTER_OFFER]
-    assert state['status']=='ON_HOLD' and 'create_mail_draft' in state['unresolved']
+    assert state['status']=='ON_HOLD' and 'create_counter_offer_draft' in state['unresolved']
     assert 'card_id' not in state and state['draft_ids']==[]
 
 
@@ -316,7 +316,7 @@ def test_actual_extraction_priority_plan_counter_graph_path(team_storage,monkeyp
                                                  'mail_ids':['mail-qv-a','mail-qv-b']})
     assert [s.role for s in state['steps']]==[R.INFO_EXTRACTOR,R.INFO_PRIORITY,R.RESPONSE_PLAN,R.COUNTER_OFFER]
     assert state['status']=='ON_HOLD' and state['plans'] and state['draft_ids']==[]
-    assert 'create_mail_draft' in state['unresolved']
+    assert 'create_counter_offer_draft' in state['unresolved']
 
 
 def test_source_mismatch_returns_to_real_extractor(team_storage,monkeypatch):
@@ -350,7 +350,8 @@ def test_reply_new_revision_reenters_and_old_reference_is_rejected(team_storage,
     state=team_graph(team_storage,model).invoke({**graph_state(team_storage,start='REPLY'),
         'input_revision':2,'mail_ids':['mail-qv-a','mail-qv-b']})
     assert [s.role for s in state['steps']]==[R.INFO_EXTRACTOR,R.INFO_PRIORITY,R.RESPONSE_PLAN,R.COUNTER_OFFER]
-    assert state['status']=='ON_HOLD' and 'create_mail_draft.validation_binding' in state['unresolved']
+    # ③ 보완 요청 초안 도구만 등록됐다. ⑤ 역제안 초안 도구(create_counter_offer_draft)는 따로라 아직 없다 (C8)
+    assert state['status']=='ON_HOLD' and 'create_counter_offer_draft' in state['unresolved']
     new_input=PlanIn(case_id=CASE,input_revision=2,quote_version_ids=state['quote_version_ids'])
     with pytest.raises(OutputValidationError):
         validate_review_output(R.RESPONSE_PLAN,new_input,RunContext(CASE,2),previous)
@@ -890,7 +891,7 @@ def test_included_cost_without_amount_reaches_plan_and_offer_without_imputation(
     assert next(c for c in common.quote_versions['qv-b'].cost_terms_jsonb if c['cost_type']==kind)['amount'] is None
     result=run_plan(team_storage)
     assert result.next_action=='PLANS_PROPOSED'
-    assert run_counter(team_storage,result).unknown_fields==['create_mail_draft']
+    assert run_counter(team_storage,result).unknown_fields==['create_counter_offer_draft']
 
 
 @pytest.mark.parametrize('fault',['missing_inclusion','false_inclusion','forged_true','changed_source','forged_amount'])
@@ -970,7 +971,7 @@ def test_final_guard_mixed_draft_subset_contract(team_storage,monkeypatch):
     monkeypatch.setattr(tools,'inspect_comparability',lambda *args:deepcopy(report))
     result.questions.append(required)
     result.next_action=type(result.next_action).REQUEST_CLARIFICATION;result.unknown_fields=report['unknown_fields']
-    draft=tools._registry['create_mail_draft'].func('CLARIFICATION','supplier-b',[required],priority_runtime(team_storage))
+    draft=tools._registry['create_clarification_draft'].func('CLARIFICATION','supplier-b',[required],priority_runtime(team_storage))
     result.draft_ids=[draft['draft_id']]
     assert validate_review_output(R.INFO_PRIORITY,priority_input(team_storage),RunContext(CASE,1),result)==result
     saved[draft['draft_id']]['questions'].append(result.questions[0].model_dump(mode='json'))
@@ -991,7 +992,7 @@ def test_included_cost_wording_through_registered_plan_and_offer(team_storage,ph
     assert plan.next_action=='PLANS_PROPOSED',plan
     assert {a.quote_version_id for p in plan.plans for a in p.allocations}=={'qv-a','qv-b'}
     result=run_counter(team_storage,plan)
-    assert result.next_action=='HOLD' and result.unknown_fields==['create_mail_draft']
+    assert result.next_action=='HOLD' and result.unknown_fields==['create_counter_offer_draft']
     bundle=next(r['payload']['bundle'] for r in refs.records.values() if r['kind']=='PLAN_SET')
     for p in bundle['plans']:
         if p['status']=='VALID':
@@ -1306,7 +1307,7 @@ def test_actual_extractor_with_proposed_business_inputs_without_review_facts(tea
     state={**graph_state(team_storage,start='REPLY'),'mail_ids':['mail-qv-a','mail-qv-b']}
     result=team_graph(team_storage,model).invoke(state)
     assert [s.role for s in result['steps']]==[R.INFO_EXTRACTOR,R.INFO_PRIORITY,R.RESPONSE_PLAN,R.COUNTER_OFFER]
-    assert result['status']=='ON_HOLD' and 'create_mail_draft' in result['unresolved']
+    assert result['status']=='ON_HOLD' and 'create_counter_offer_draft' in result['unresolved']
     assert result['steps'][1].next_action=='BUILD_PLANS'
     current=team_storage[0].get_work_case(CASE)['latest_quote_version_ids']
     snapshot=tools._ReviewAccess(RunContext(CASE,1),R.RESPONSE_PLAN).snapshot(ExecutionScope(CASE,1,tuple(sorted(current))))

@@ -114,7 +114,7 @@ def test_normal_imports_register_only_four_owned_tools_and_preserve_shared_contr
     assert OWN <= tools._registry.keys()
     assert {'get_case_context', 'read_mail_evidence', 'save_agent_result', 'store_structured_mail'} <= tools._registry.keys()
     assert {'check_comparability', 'calculate_break_even'} <= tools._registry.keys()
-    assert 'create_mail_draft' not in tools._registry
+    assert 'create_counter_offer_draft' not in tools._registry
     for name in OWN:
         schema = tools._registry[name].tool_call_schema.model_json_schema()
         assert not {'case_id', 'input_revision', 'runtime', 'agent_run_id'} & set(schema.get('properties', {}))
@@ -156,7 +156,7 @@ def test_stage5_computes_and_validates_then_holds_for_real_missing_shared_draft(
     validations = [r['payload'] for r in repo._records.values() if r['kind'] == 'PRICE_VALIDATION']
     assert validations and validations[-1]['status'] == 'PASS'
     assert validations[-1]['target']['target_unit_price'] == '5416'
-    assert result.next_action == 'HOLD' and result.unknown_fields == ['create_mail_draft']
+    assert result.next_action == 'HOLD' and result.unknown_fields == ['create_counter_offer_draft']
     assert result.target is None and result.draft_ids == []
     assert not any(r['kind'] == 'DRAFT' for r in repo._records.values())
     assert common.agent_runs['run-2']['output_jsonb'] == result.model_dump(mode='json')
@@ -419,7 +419,7 @@ def test_final_guard_nonproposal_does_not_bypass_trusted_scope(storage, monkeypa
     ('NEEDS_EVIDENCE', [], 'UNRESOLVED_FIELDS_REQUIRED'),
     ('RECHECK_SOURCE', [], 'UNRESOLVED_FIELDS_REQUIRED'),
     ('RECHECK_SOURCE', ['policy'], 'RECHECK_FIELDS_INVALID'),
-    ('NEEDS_EVIDENCE', ['create_mail_draft'], 'INTERNAL_FIELDS_REQUIRE_HOLD'),
+    ('NEEDS_EVIDENCE', ['create_counter_offer_draft'], 'INTERNAL_FIELDS_REQUIRE_HOLD'),
     ('HOLD', [''], 'UNRESOLVED_FIELDS_INVALID'),
 ])
 def test_final_guard_checks_nonproposal_field_contract(storage, action, fields, code):

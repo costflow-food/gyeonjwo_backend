@@ -2496,7 +2496,7 @@ class _ReviewAccess:
     def resolve_draft(self, scope, ref):
         self.check_scope(scope)
         if _draft_lookup_store is None:
-            raise MissingReviewData(['create_mail_draft.resolve'])
+            raise MissingReviewData(['create_counter_offer_draft.resolve'])
         value = _draft_lookup_store.read_counter_offer_draft(self.context, scope, ref)
         return DraftBinding.model_validate(value).model_dump(mode='json')
 
@@ -3137,7 +3137,7 @@ def model_payload(value):
     return value.model_dump(mode='json') if hasattr(value, 'model_dump') else deepcopy(value)
 
 def internal_review_fields(fields):
-    return [f for f in fields if f in ('policy', 'create_mail_draft', 'check_comparability', 'fixed_commitment', 'repricing_scope', 'as_of') or f.startswith(('work_case.', 'policy.', 'review_facts.', 'ValidationStore', 'PlanStore', 'CounterOfferStore', 'PriorityStore', 'CaseStore', 'QuoteStore', 'RunContext', 'ReviewRepository', 'create_mail_draft.', 'check_comparability.'))]
+    return [f for f in fields if f in ('policy', 'create_clarification_draft', 'create_counter_offer_draft', 'check_comparability', 'fixed_commitment', 'repricing_scope', 'as_of') or f.startswith(('work_case.', 'policy.', 'review_facts.', 'ValidationStore', 'PlanStore', 'CounterOfferStore', 'PriorityStore', 'CaseStore', 'QuoteStore', 'RunContext', 'ReviewRepository', 'create_clarification_draft.', 'create_counter_offer_draft.', 'check_comparability.'))]
 
 def comparison_period_label(data):
     return 'PERIOD:'+data['period']['from']+'/'+data['period']['to'] if data['period'] is not None else 'ORDER_SCOPE: no comparison-period or contract-allocation assertion'
@@ -3393,7 +3393,7 @@ class ReviewCalculator:
         return target
 
     def create_draft(self, scope, target):
-        raise MissingReviewData(['create_mail_draft'])
+        raise MissingReviewData(['create_counter_offer_draft'])
 
     def check_output(self, scope, role, output, *, for_save=False):
 
@@ -3599,7 +3599,7 @@ def priority_readiness(report, *, draft_available):
                           reason='LOW_VALUE 평가 근거는 보존합니다. 현재 ④는 미확인 비용을 유지한 조건부 구매안을 지원하지 않아 내부 계약 보완이 필요합니다. 거래처 문의 대상은 없습니다.')
             return result
         result['next_action'] = 'REQUEST_CLARIFICATION' if draft_available and report['question_groups'] else 'HOLD'
-        result['missing_dependencies'] = [] if draft_available else ['create_mail_draft']
+        result['missing_dependencies'] = [] if draft_available else ['create_clarification_draft']
         result['draft_required'] = True
     return result
 
@@ -3883,10 +3883,10 @@ def check_comparability(quote_version_ids: list[str], runtime: ToolRuntime[RunCo
     def inspect(service, scope, data):
         result = inspect_comparability(service.repo, scope)
         if role != AgentRole.INFO_PRIORITY: return result
-        available = 'create_mail_draft' in _registry and callable(getattr(_draft_lookup_store, 'read_clarification_draft', None))
+        available = 'create_clarification_draft' in _registry and callable(getattr(_draft_lookup_store, 'read_clarification_draft', None))
         ready = priority_readiness(result, draft_available=available)
-        if not available and 'create_mail_draft' in _registry and ready.get('draft_required'):
-            ready['missing_dependencies'] = ['create_mail_draft.read_clarification_draft']
+        if not available and 'create_clarification_draft' in _registry and ready.get('draft_required'):
+            ready['missing_dependencies'] = ['create_clarification_draft.read_clarification_draft']
         return ready
     return _dispatch_review(runtime, role, role, inspect, inspect=False, quote_version_ids=quote_version_ids)
 
@@ -3944,8 +3944,8 @@ def validate_counter_offer(target: CounterOfferTarget, calculation_ref: str, run
     """목표 조건·가격·대안·정책·근거를 독립 검증한다. 공통 초안 의존성 누락은 완료가 아니다."""
     def validate(service, scope, data):
         checked = service.validate_target(scope, target, calculation_ref)
-        return {'valid':True,'target':model_payload(checked),'next_step':'create_mail_draft',
-                'missing_dependencies':(['create_mail_draft'] if 'create_mail_draft' not in _registry else
-                    ['create_mail_draft.validation_binding'] if not callable(getattr(_draft_lookup_store, 'read_counter_offer_draft', None)) else []),
+        return {'valid':True,'target':model_payload(checked),'next_step':'create_counter_offer_draft',
+                'missing_dependencies':(['create_counter_offer_draft'] if 'create_counter_offer_draft' not in _registry else
+                    ['create_counter_offer_draft.validation_binding'] if not callable(getattr(_draft_lookup_store, 'read_counter_offer_draft', None)) else []),
                 'send_authorized':False}
     return _dispatch_review(runtime, _agent_role(runtime), AgentRole.COUNTER_OFFER, validate)

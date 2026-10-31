@@ -124,7 +124,7 @@ def test_split_crossing_tier_and_counter_reassessment_keep_quantity_price_eviden
         row=next(r for r in rows if r['type']=='SPLIT' and supplier_line(r)['quantity']==qty)
         assert (supplier_line(row)['unit_price'],row['total_cost'])==(price,total)
     outcome=run_counter(team_storage,result)
-    assert outcome.next_action=='HOLD' and outcome.unknown_fields==['create_mail_draft']
+    assert outcome.next_action=='HOLD' and outcome.unknown_fields==['create_counter_offer_draft']
     offer=next(r['payload']['result'] for r in team_storage[3].records.values() if r['kind']=='OFFER_CALCULATION')
     assert offer['offer']['target_unit_price']=='5310'
     for row in offer['comparison']['plans_at_proposed_price']:

@@ -220,9 +220,9 @@ unknown_fields=[LOW_VALUE_UNCONFIRMED_COST_PLAN_CONTRACT_REQUIRED]와 내부 계
 양쪽 비용 미확인의 RELATION은 식으로 설명하고 단일 확정 금액을 만들지 않는다. 저장 실패/계약 누락이면 HOLD한다.
 calculation_ref=null인 계산 결과는 완료가 아니다. 참조를 만들거나 조건부 역전 금액을 확정 총액으로 쓰지 않는다.
 질문 답변이 더 이상 필요 없고 비교가 PASS면 BUILD_PLANS, questions=[], draft_ids=[]로 반환한다.
-NEEDS_EVIDENCE이고 question_groups가 있으면 실제 공통 create_mail_draft의 선언된 계약으로 그 문의 대상만 CLARIFICATION 초안을 만든다.
+NEEDS_EVIDENCE이고 question_groups가 있으면 실제 공통 create_clarification_draft의 선언된 계약으로 그 문의 대상만 CLARIFICATION 초안을 만든다.
 그 도구가 없거나 현재 업무·revision·질문에 연결된 내부 draft_ids를 얻지 못하면 HOLD, draft_ids=[]로 두고
-unknown_fields에 create_mail_draft 또는 create_mail_draft.validation_binding 의존성을 명시한다.
+unknown_fields에 create_clarification_draft 또는 create_clarification_draft.validation_binding 의존성을 명시한다.
 REQUEST_CLARIFICATION은 실제 공통 초안 도구 결과의 ID가 있는 경우만 반환한다. 발송하지 않는다.
 보완 대기는 그래프가 종료하며 새 회신은 새 revision의 REPLY 실행이다. 예전 참조/질문을 그대로 재사용하지 않는다.
 최종 PriorityOut은 Runner만 저장한다. 도구 오류·권한/revision 위반을 성공이나 가짜 초안 ID로 우회하지 않는다.''',
@@ -250,9 +250,9 @@ save_agent_result는 중간 기록만 저장한다. 최종 응답 저장은 Agen
 price_check_reason이 있으면 허용 도구로 다시 계산·검증한다. 도구가 HOLD/NEEDS_EVIDENCE/RECHECK_SOURCE이면
 해당 next_action과 unknown_fields를 그대로 전달한다. 개발 의존성·회사 정책을 거래처 질문으로 보내지 않는다.
 검증 결과의 missing_dependencies가 있으면 해당 항목을 unknown_fields에 넣어 HOLD한다.
-공통 create_mail_draft가 실제 제공되면 그 도구의 선언된 입력 계약으로 검증된 target과 근거 참조를 연결한다.
+공통 create_counter_offer_draft가 실제 제공되면 그 도구의 선언된 입력 계약으로 검증된 target과 근거 참조를 연결한다.
 입력 계약으로 검증 참조를 전달할 수 없거나 초안과 검증 target의 결합을 확인할 수 없으면
-unknown_fields=['create_mail_draft.validation_binding']으로 HOLD한다. 인자나 초안 ID를 추측하지 않는다.
+unknown_fields=['create_counter_offer_draft.validation_binding']으로 HOLD한다. 인자나 초안 ID를 추측하지 않는다.
 공통 도구가 같은 업무·revision·검증 target에 결합된 초안 ID를 반환한 경우에만
 그 target과 draft_ids를 그대로 COUNTER_OFFER_PROPOSED로 전달한다.
 HOLD에서는 target=null, draft_ids=[]로 둔다. 가격 검증 성공만으로 초안 완료를 주장하지 않는다.
@@ -611,7 +611,7 @@ def check_priority_output(service, scope, output):
         if report['status'] != 'NEEDS_EVIDENCE' or not report['question_groups'] or actual.keys() != expected.keys() or set(output.unknown_fields) != set(report['unknown_fields']):
             raise tools.OutputValidationError('PRIORITY_REQUEST_MISMATCH')
         reader = getattr(tools._draft_lookup_store, 'read_clarification_draft', None)
-        if not callable(reader): raise tools.MissingReviewData(['create_mail_draft.read_clarification_draft'])
+        if not callable(reader): raise tools.MissingReviewData(['create_clarification_draft.read_clarification_draft'])
         groups = {}
         for q in actual.values():
             if q.priority in ('MUST_CONFIRM', 'CAN_CHANGE_CHOICE'):
