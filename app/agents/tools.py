@@ -37,7 +37,9 @@
 | validate_purchase_plan    | ④     | 배분안 → 총액·위반 사유·탐색 범위                               | 위와 같음                         |
 | calculate_counter_offer   | ⑤     | 기존·요청 가격·대안 총액·회사 정책 → 목표 조건별 비용            | 정책 없는 인상률 생성 금지        |
 | validate_counter_offer    | ⑤     | 목표 조건 → 가격 범위·정책 검증 결과                            | 위와 같음                         |
-| create_mail_draft         | ②③⑤   | 목적(RFQ/CLARIFICATION/COUNTER_OFFER)·대상·근거·스타일 → 초안 ID | 내부 저장만, 발송은 백엔드        |
+| create_rfq_draft          | ②     | 대상 업체·RFQ 템플릿 → 업체별 초안 ID                            | 내부 저장만, 발송은 백엔드        |
+| create_clarification_draft| ③     | 업체·질문 묶음·근거 → 보완 요청 초안 ID                          | 내부 저장만, 발송은 백엔드        |
+| create_counter_offer_draft| ⑤     | 검증된 목표 조건(validation_ref)·문안 → 역제안 초안 ID           | 내부 저장만, 발송은 백엔드        |
 """
 import hashlib
 import re
@@ -58,11 +60,12 @@ _COMMON = ('get_case_context', 'read_mail_evidence', 'save_agent_result')
 
 ROLE_TOOLS = {
     AgentRole.INFO_EXTRACTOR: _COMMON + ('store_structured_mail',),
-    AgentRole.CANDIDATE: _COMMON + ('search_supplier_evidence', 'crawl_supplier_candidates', 'create_mail_draft'),
-    AgentRole.INFO_PRIORITY: _COMMON + ('check_comparability', 'calculate_break_even', 'create_mail_draft'),
+    AgentRole.CANDIDATE: _COMMON + ('search_supplier_evidence', 'crawl_supplier_candidates', 'create_rfq_draft'),
+    AgentRole.INFO_PRIORITY: _COMMON + ('check_comparability', 'calculate_break_even',
+                                        'create_clarification_draft'),
     AgentRole.RESPONSE_PLAN: _COMMON + ('check_comparability', 'build_plan_candidates', 'validate_purchase_plan'),
     AgentRole.COUNTER_OFFER: _COMMON + ('check_comparability', 'calculate_counter_offer', 'validate_counter_offer',
-                                        'create_mail_draft'),
+                                        'create_counter_offer_draft'),
 }
 KNOWN_TOOLS = frozenset(name for names in ROLE_TOOLS.values() for name in names)
 
@@ -963,7 +966,7 @@ def store_structured_mail(fields: list[QuoteField], runtime: ToolRuntime[RunCont
     return save_structured_quote(_quote_store, context, fields, price_tiers or [], cost_terms or [], item_notes or [])
 
 
-# ② CANDIDATE: search_supplier_evidence (+ 공용 create_mail_draft는 아래 구역)
+# ② CANDIDATE: search_supplier_evidence, create_rfq_draft
 #   06 work_cases·suppliers·supplier_items·purchase_history 기준. 후보·제외·체크리스트·선호 점수는 코드가 판정하고
 #   LLM은 결과를 옮기고 RFQ 문장만 쓴다. 가격 값은 점수 계산에만 쓰고 돌려주지 않는다(BR-03).
 
@@ -979,7 +982,7 @@ _SPEC_SIZE = re.compile(rf'(\d+(?:\.\d+)?)\s*({_UNIT_WORDS})')
 
 
 class CandidateStore(CaseStore, Protocol):
-    """search_supplier_evidence·create_mail_draft의 후보 조회 저장소 (06). 소유 범위는 구현이 검사한다."""
+    """search_supplier_evidence·create_rfq_draft의 후보 조회 저장소 (06). 소유 범위는 구현이 검사한다."""
 
     def get_candidate_conditions(self, case_id: str) -> dict | None:
         """work_cases의 {input_revision, item_name, standardized_item_key, specification,
@@ -1192,7 +1195,7 @@ def candidate_summary(checklist: list[dict]) -> str:
 
 
 def evaluate_candidates(store: CandidateStore, context: RunContext) -> dict:
-    """search_supplier_evidence의 본체. create_mail_draft도 같은 판정으로 대상 업체를 다시 확인한다.
+    """search_supplier_evidence의 본체. create_rfq_draft도 같은 판정으로 대상 업체를 다시 확인한다.
     가: 품목 취급 근거 없음 → 조회 범위 밖 / 나: 인상 요청 업체 → INCUMBENT / 다: 필수 FAIL → REQUIRED_FAIL /
     라: 필수 UNKNOWN → 후보(RFQ로 확인) / 마: 필수 모두 PASS → 후보"""
     case = _read(lambda: store.get_candidate_conditions(context.case_id))
@@ -1267,7 +1270,7 @@ def evaluate_candidates(store: CandidateStore, context: RunContext) -> dict:
         entry['label'] = EXCLUDE_LABELS[entry['code']]
     result['summary'] = search_summary(result, case.get('item_name') or item_key)
     if not candidates:      # 초안을 만들 업체가 없다. LLM이 빈 목록으로 초안을 시도하지 않게 다음 행동을 알려준다
-        result['next'] = '후보가 없다. create_mail_draft를 부르지 말고 바로 HOLD로 최종 응답한다. reason에는 summary를 쓴다.'
+        result['next'] = '후보가 없다. create_rfq_draft를 부르지 말고 바로 HOLD로 최종 응답한다. reason에는 summary를 쓴다.'
     return result | {'ignored_preferences': ignored} if ignored else result
 
 
@@ -1284,7 +1287,7 @@ def search_supplier_evidence(runtime: ToolRuntime[RunContext]) -> dict:
       excluded(supplier_id·code: INCUMBENT·REQUIRED_FAIL·OVER_LIMIT·label: 한글 사유),
       summary(구매담당자가 읽는 조회 결과 문장. HOLD면 reason에 이 문장을 쓴다)
     - CONDITIONS_MISSING: 업무 품목이 정해지지 않았다 / REVISION_CHANGED / CASE_NOT_FOUND
-    메일에 들어갈 품목·수량·납기 값과 질문 문장은 돌려주지 않는다. create_mail_draft가 자리표시자로 채운다.
+    메일에 들어갈 품목·수량·납기 값과 질문 문장은 돌려주지 않는다. create_rfq_draft가 자리표시자로 채운다.
     '''
     result = evaluate_candidates(_candidate_store, _run_context(_candidate_store, runtime))
     # LLM이 메일 본문에 값을 직접 옮겨 쓰지 않게 메일용 값(rfq_facts)과 질문 문장(questions)은 보여주지 않는다
@@ -1294,7 +1297,7 @@ def search_supplier_evidence(runtime: ToolRuntime[RunContext]) -> dict:
     return result
 
 
-# 공용(②③⑤) create_mail_draft — 이번에는 RFQ만. CLARIFICATION·COUNTER_OFFER는 ③⑤ 담당과 합의 후 추가한다.
+# ② create_rfq_draft (초안 도구는 역할별로 나눈다: RFQ·CLARIFICATION·COUNTER_OFFER. 저장 본체 save_mail_drafts는 RFQ만 처리)
 #   LLM은 대상 업체 전체에 쓸 템플릿을 한 번만 쓰고 사실은 자리표시자로 둔다. 서버가 업체마다 값을 채워 업체별 초안
 #   행을 만든다. 템플릿이 검사에 걸리면 다시 묻지 않고 RFQ 기본 문안으로 대신한다(발송 승인 OFF면 사람이 보지 않는다).
 #   06 mail_drafts에 DRAFT로 저장만 하고, 승인(ON)·자동 발송(OFF)은 백엔드가 발송 직전 설정으로 정한다.
@@ -1344,7 +1347,7 @@ class MailDraftRecord(StrictModel):
 
 
 class MailDraftStore(CandidateStore, Protocol):
-    """create_mail_draft의 저장소 (06 mail_drafts·mail_send_settings)."""
+    """초안 도구의 저장소 (06 mail_drafts·mail_send_settings)."""
 
     def current_send_settings(self, case_id: str) -> dict:
         """mail_send_settings.style_jsonb (인사·서명 등). 없으면 {}."""
@@ -1392,7 +1395,7 @@ def _template_issue(subject: str, body: str, names: set[str]) -> str | None:
 
 def save_mail_drafts(store: MailDraftStore, context: RunContext, purpose: str, supplier_ids: list[str], subject: str,
                      body: str) -> dict:
-    """create_mail_draft의 본체. 템플릿 하나로 업체별 초안 행을 만든다."""
+    """create_rfq_draft의 본체. 템플릿 하나로 업체별 초안 행을 만든다."""
     if purpose != 'RFQ':
         return _draft_rejected('UNSUPPORTED_PURPOSE')
     supplier_ids = list(dict.fromkeys(supplier_ids))
@@ -1457,9 +1460,8 @@ def save_mail_drafts(store: MailDraftStore, context: RunContext, purpose: str, s
 
 @register
 @tool
-def create_mail_draft(purpose: str, supplier_ids: list[str], subject: str, body: str,
-                      runtime: ToolRuntime[RunContext]) -> dict:
-    '''업체에 보낼 메일 초안을 저장한다(발송하지 않는다). 지금은 purpose "RFQ"(견적 요청)만 된다.
+def create_rfq_draft(supplier_ids: list[str], subject: str, body: str, runtime: ToolRuntime[RunContext]) -> dict:
+    '''업체에 보낼 견적 요청(RFQ) 메일 초안을 저장한다(발송하지 않는다).
     supplier_ids: search_supplier_evidence의 candidates 중 RFQ를 보낼 업체 전부. 한 번에 보낸다.
     subject·body: 모든 업체에 같이 쓰는 템플릿이다. 문장만 쓰고 사실은 자리표시자로 쓴다.
       {업체명}(받는 업체) {품목} {규격} {수량} {납기일} {회신기한}(오늘+2일) {질문목록}
@@ -1470,6 +1472,6 @@ def create_mail_draft(purpose: str, supplier_ids: list[str], subject: str, body:
     - DRAFTED: drafts(supplier_id·draft_id), rejected(supplier_id·code: 초안을 만들지 않은 업체),
       summary(실제로 초안을 만든 업체 기준 구매담당자용 문장. 최종 응답 reason에 쓴다), template(LLM 또는
       DEFAULT: 템플릿이 검사에 걸려 기본 문안으로 대신했다. adjusted에 이유가 있다. 다시 보내지 않는다), hints
-    - REJECTED: code(UNSUPPORTED_PURPOSE·NO_SUPPLIERS) 또는 모든 업체가 rejected / REVISION_CHANGED / CASE_NOT_FOUND
+    - REJECTED: code(NO_SUPPLIERS) 또는 모든 업체가 rejected / REVISION_CHANGED / CASE_NOT_FOUND
     '''
-    return save_mail_drafts(_draft_store, _run_context(_draft_store, runtime), purpose, supplier_ids, subject, body)
+    return save_mail_drafts(_draft_store, _run_context(_draft_store, runtime), 'RFQ', supplier_ids, subject, body)

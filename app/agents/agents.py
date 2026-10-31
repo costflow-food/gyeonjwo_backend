@@ -139,9 +139,9 @@ next_action:
 1. get_case_context로 업무를 확인한다. REVISION_CHANGED·CASE_NOT_FOUND면 다른 도구를 부르지 말고 바로 HOLD를 반환한다.
 2. search_supplier_evidence를 한 번 부른다(인자 없음). 후보·제외·체크리스트·선호 점수는 도구가 정한 것이다.
    - CONDITIONS_MISSING·REVISION_CHANGED·CASE_NOT_FOUND면 다른 도구를 부르지 말고 바로 HOLD로 최종 응답한다.
-   - candidates가 비어 있으면 create_mail_draft를 부르지 말고 바로 HOLD로 최종 응답한다.
+   - candidates가 비어 있으면 create_rfq_draft를 부르지 말고 바로 HOLD로 최종 응답한다.
      reason에는 검색 결과의 summary 문장을 그대로 쓴다.
-3. candidates가 있을 때만 create_mail_draft(purpose "RFQ", supplier_ids, subject, body)를 한 번만 부른다.
+3. candidates가 있을 때만 create_rfq_draft(supplier_ids, subject, body)를 한 번만 부른다.
    - supplier_ids에는 candidates의 supplier_id를 모두 넣는다. 업체마다 따로 부르지 않는다.
    - subject·body는 모든 업체에 같이 쓰는 템플릿이다. 사실은 자리표시자로 쓴다.
      {업체명}(견적을 요청받는 업체) {품목} {규격} {수량} {납기일} {회신기한}(오늘+2일, 도구가 채움) {질문목록}
@@ -176,12 +176,12 @@ next_action:
   checklist·preference_score·evidence_refs는 search_supplier_evidence 결과를 그대로 옮긴다. 바꾸거나 지어내지 않는다.
   reason은 담당자가 읽을 한 문장이다(어떤 필수 조건이 확인됐고, 무엇을 견적 회신으로 확인하는지).
   가격·물량을 추측해 쓰지 않는다.
-- 최종 응답의 reason(전체)은 SEND_RFQ면 create_mail_draft 결과의 summary, HOLD면 search_supplier_evidence 결과의
+- 최종 응답의 reason(전체)은 SEND_RFQ면 create_rfq_draft 결과의 summary, HOLD면 search_supplier_evidence 결과의
   summary 문장을 그대로 쓴다.
 - reason은 모두 구매담당자가 읽는 한국어 문장이다. 영문 코드(INCUMBENT·REQUIRED_FAIL·PASS·UNKNOWN 등)와
   필드 이름(scope.searched·excluded·standardized_item_key 등)은 쓰지 않는다. 코드는 아래처럼 바꿔 쓴다.
   INCUMBENT → 인상을 요청한 업체 / REQUIRED_FAIL → 필수 조건 불충족 / PASS → 확인됨 / UNKNOWN → 견적 회신으로 확인
-- draft_ids: create_mail_draft의 drafts에 있는 draft_id만 넣는다.
+- draft_ids: create_rfq_draft의 drafts에 있는 draft_id만 넣는다.
 - unknown_fields: 후보 checklist에서 required가 true이고 state가 UNKNOWN인 항목을 "<supplier_id>.<condition>"으로 넣는다.
 
 next_action:
@@ -306,7 +306,7 @@ def _check_candidates(output: AgentOutput, messages: list) -> AgentOutput:
     summary = next((r['summary'] for r in reversed(searches) if r.get('summary')), None)
     searched = [r for r in searches if r.get('status') == 'OK']
     found = {c['supplier_id']: c for c in (searched[-1]['candidates'] if searched else [])}
-    drafted = {d['draft_id']: d['supplier_id'] for r in _tool_results(messages, 'create_mail_draft')
+    drafted = {d['draft_id']: d['supplier_id'] for r in _tool_results(messages, 'create_rfq_draft')
                if r.get('status') == 'DRAFTED' for d in r.get('drafts', [])}
     ids = list(dict.fromkeys(output.draft_ids))
     if not set(ids) <= set(drafted):
@@ -329,9 +329,9 @@ def _check_candidates(output: AgentOutput, messages: list) -> AgentOutput:
                   for sid in suppliers if sid in found]
     unknown_fields = [f"{c['supplier_id']}.{check['condition']}" for c in candidates for check in c['checklist']
                       if check['required'] and check['state'] == 'UNKNOWN']
-    # 전체 사유는 실제로 초안을 만든 업체 기준 문장(create_mail_draft의 summary)으로 둔다. 검색 시점 문장은
+    # 전체 사유는 실제로 초안을 만든 업체 기준 문장(create_rfq_draft의 summary)으로 둔다. 검색 시점 문장은
     # 연락처가 없어 초안을 못 만든 업체까지 "견적을 요청합니다"로 쓰므로 LLM 문장을 쓰지 않는다
-    draft_summary = next((r['summary'] for r in reversed(_tool_results(messages, 'create_mail_draft'))
+    draft_summary = next((r['summary'] for r in reversed(_tool_results(messages, 'create_rfq_draft'))
                           if r.get('summary')), None)
     return type(output).model_validate(output.model_dump() | {
         'next_action': 'SEND_RFQ', 'draft_ids': ids, 'candidates': candidates, 'unknown_fields': unknown_fields,
