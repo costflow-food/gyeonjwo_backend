@@ -1,0 +1,224 @@
+{
+  "id": "86b0d2ad-00c8-5223-8f90-c5a0b993754c",
+  "inputs": {
+    "scenario": "normal-13",
+    "case_id": "15582535-f1b8-5326-8dc9-978888285fd0",
+    "snapshot": {
+      "usage": "EVAL_ONLY",
+      "revision": 1,
+      "data": {
+        "schema_version": "kan.plan.v0",
+        "contract_revision": "prototype-1",
+        "data_kind": "SYNTHETIC",
+        "request_id": "SYNTHETIC-EVAL_ONLY-PLAN-V3-13-ALL_INCUMBENT_CHANGEABLE-fixed0",
+        "revision": 1,
+        "as_of": "2026-11-02",
+        "period": {
+          "from": "2026-11-20",
+          "to": "2026-11-20"
+        },
+        "item": {
+          "item_id": "strawberry|KR|A|FROZEN",
+          "name": "냉동딸기",
+          "origin": "KR",
+          "grade": "A",
+          "processing": "FROZEN",
+          "specification": "국산 A등급 IQF 10kg 박스"
+        },
+        "unit": "kg",
+        "currency": "KRW",
+        "terms": {
+          "delivery_location": "SYNTHETIC EVAL_ONLY 물류센터",
+          "delivery_terms": "SYNTHETIC EVAL_ONLY 1회 납품",
+          "payment_terms": "SYNTHETIC EVAL_ONLY 검수 후 30일",
+          "tax_basis": "EXCLUDED"
+        },
+        "incumbent": {
+          "supplier_id": "7e793781-af2c-5ddb-ada4-f37aa5c1f58e",
+          "old_unit_price": "5000",
+          "requested_unit_price": "5500",
+          "effective_date": "2026-11-01",
+          "source_ref": "gyeonjwo_synthetic_v1/csv/mail_messages.csv#id=5d7ecba4-42df-5356-9e1b-6b4dade69364/body_text",
+          "verified": true
+        },
+        "fixed_commitment": {
+          "supplier_id": "7e793781-af2c-5ddb-ada4-f37aa5c1f58e",
+          "quantity": "0",
+          "unit_price": "5000",
+          "period": {
+            "from": "2026-11-20",
+            "to": "2026-11-20"
+          },
+          "source_ref": "synthetic-eval-only://plan-v3/SYNTHETIC-EVAL_ONLY-PLAN-V3-13-ALL_INCUMBENT_CHANGEABLE-fixed0#EXPLICIT-FIXED-CONTRACT-ASSUMPTION",
+          "verified": true
+        },
+        "changeable_quantity": "1000",
+        "repricing_scope": "ALL_INCUMBENT_CHANGEABLE",
+        "quotes": [
+          {
+            "supplier_id": "7e793781-af2c-5ddb-ada4-f37aa5c1f58e",
+            "quote_id": "SOURCE-MAIL-5d7ecba4-42df-5356-9e1b-6b4dade69364",
+            "version": 1,
+            "received_on": "2026-10-26",
+            "valid_from": "2026-10-26",
+            "valid_until": "2026-11-20",
+            "supply_from": "2026-11-20",
+            "supply_to": "2026-11-20",
+            "item": {
+              "item_id": "strawberry|KR|A|FROZEN",
+              "name": "냉동딸기",
+              "origin": "KR",
+              "grade": "A",
+              "processing": "FROZEN",
+              "specification": "국산 A등급 IQF 10kg 박스"
+            },
+            "unit": "kg",
+            "currency": "KRW",
+            "terms": {
+              "delivery_location": "SYNTHETIC EVAL_ONLY 물류센터",
+              "delivery_terms": "SYNTHETIC EVAL_ONLY 1회 납품",
+              "payment_terms": "SYNTHETIC EVAL_ONLY 검수 후 30일",
+              "tax_basis": "EXCLUDED"
+            },
+            "unit_price": "5500",
+            "moq": "0",
+            "available_quantity": "1000",
+            "lead_days": 0,
+            "costs": {
+              "transport": "0",
+              "other_logistics": "0",
+              "switching": "0"
+            },
+            "cost_scope": "PER_SUPPLIER_PER_PERIOD",
+            "cost_source_ref": "synthetic-eval-only://plan-v3/SYNTHETIC-EVAL_ONLY-PLAN-V3-13-ALL_INCUMBENT_CHANGEABLE-fixed0#cost-assumption/7e793781-af2c-5ddb-ada4-f37aa5c1f58e",
+            "source_ref": "gyeonjwo_synthetic_v1/csv/mail_messages.csv#id=5d7ecba4-42df-5356-9e1b-6b4dade69364/body_text",
+            "source_verified": true,
+            "eligibility": "CONFIRMED"
+          },
+          {
+            "supplier_id": "727ceedb-881e-54c0-bee7-4b730161e91d",
+            "quote_id": "SOURCE-MAIL-867c21fa-f657-5a28-add3-99021fd293d8",
+            "version": 1,
+            "received_on": "2026-10-29",
+            "valid_from": "2026-10-29",
+            "valid_until": "2026-11-30",
+            "supply_from": "2026-11-20",
+            "supply_to": "2026-11-20",
+            "item": {
+              "item_id": "strawberry|KR|A|FROZEN",
+              "name": "냉동딸기",
+              "origin": "KR",
+              "grade": "A",
+              "processing": "FROZEN",
+              "specification": "국산 A등급 IQF 10kg 박스"
+            },
+            "unit": "kg",
+            "currency": "KRW",
+            "terms": {
+              "delivery_location": "SYNTHETIC EVAL_ONLY 물류센터",
+              "delivery_terms": "SYNTHETIC EVAL_ONLY 1회 납품",
+              "payment_terms": "SYNTHETIC EVAL_ONLY 검수 후 30일",
+              "tax_basis": "EXCLUDED"
+            },
+            "unit_price": "5400",
+            "moq": "0",
+            "available_quantity": "600",
+            "lead_days": 0,
+            "costs": {
+              "transport": "10000",
+              "other_logistics": "0",
+              "switching": "0"
+            },
+            "cost_scope": "PER_SUPPLIER_PER_PERIOD",
+            "cost_source_ref": "synthetic-eval-only://plan-v3/SYNTHETIC-EVAL_ONLY-PLAN-V3-13-ALL_INCUMBENT_CHANGEABLE-fixed0#cost-assumption/727ceedb-881e-54c0-bee7-4b730161e91d",
+            "source_ref": "gyeonjwo_synthetic_v1/csv/mail_messages.csv#id=867c21fa-f657-5a28-add3-99021fd293d8/body_text; gyeonjwo_synthetic_v1/attachments/attachment_texts.json#quote_B_13.pdf",
+            "source_verified": true,
+            "eligibility": "CONFIRMED"
+          }
+        ],
+        "policy": {
+          "policy_id": "SYNTHETIC-EVAL_ONLY-POLICY-V3",
+          "source_ref": "synthetic-eval-only://plan-v3/SYNTHETIC-EVAL_ONLY-PLAN-V3-13-ALL_INCUMBENT_CHANGEABLE-fixed0#NOT-COMPANY-POLICY",
+          "approved": true,
+          "valid_from": "2026-11-02",
+          "valid_to": "2026-11-20",
+          "allow_split": true,
+          "max_suppliers": 2,
+          "allocation_step": "100",
+          "min_unit_price": "5000",
+          "max_unit_price": "5500",
+          "max_total_cost": "5500000",
+          "price_increment": "1",
+          "skip_if_request_not_more_than_alternative": true,
+          "allow_partial_comparison": false
+        }
+      },
+      "quote_bindings": {
+        "EVAL_ONLY:15582535-f1b8-5326-8dc9-978888285fd0:SOURCE-MAIL-5d7ecba4-42df-5356-9e1b-6b4dade69364:v1": {
+          "supplier_id": "7e793781-af2c-5ddb-ada4-f37aa5c1f58e",
+          "quote_id": "SOURCE-MAIL-5d7ecba4-42df-5356-9e1b-6b4dade69364",
+          "version": 1,
+          "kind": "CURRENT"
+        },
+        "EVAL_ONLY:15582535-f1b8-5326-8dc9-978888285fd0:SOURCE-MAIL-867c21fa-f657-5a28-add3-99021fd293d8:v1": {
+          "supplier_id": "727ceedb-881e-54c0-bee7-4b730161e91d",
+          "quote_id": "SOURCE-MAIL-867c21fa-f657-5a28-add3-99021fd293d8",
+          "version": 1,
+          "kind": "CURRENT"
+        },
+        "EVAL_ONLY:15582535-f1b8-5326-8dc9-978888285fd0:BEFORE": {
+          "supplier_id": "7e793781-af2c-5ddb-ada4-f37aa5c1f58e",
+          "kind": "BEFORE",
+          "unit_price": "5000"
+        }
+      },
+      "notice_quote_ids": [
+        "EVAL_ONLY:15582535-f1b8-5326-8dc9-978888285fd0:BEFORE",
+        "EVAL_ONLY:15582535-f1b8-5326-8dc9-978888285fd0:SOURCE-MAIL-5d7ecba4-42df-5356-9e1b-6b4dade69364:v1"
+      ],
+      "evidence": {
+        "synthetic-eval-only://plan-v3/SYNTHETIC-EVAL_ONLY-PLAN-V3-13-ALL_INCUMBENT_CHANGEABLE-fixed0#cost-assumption/727ceedb-881e-54c0-bee7-4b730161e91d": {
+          "excerpt": "SYNTHETIC / EVAL_ONLY 근거 조회 대역. 실제 원문 진위 검증 아님.",
+          "source_ref": "synthetic-eval-only://plan-v3/SYNTHETIC-EVAL_ONLY-PLAN-V3-13-ALL_INCUMBENT_CHANGEABLE-fixed0#cost-assumption/727ceedb-881e-54c0-bee7-4b730161e91d"
+        },
+        "gyeonjwo_synthetic_v1/csv/mail_messages.csv#id=5d7ecba4-42df-5356-9e1b-6b4dade69364/body_text": {
+          "excerpt": "SYNTHETIC / EVAL_ONLY 근거 조회 대역. 실제 원문 진위 검증 아님.",
+          "source_ref": "gyeonjwo_synthetic_v1/csv/mail_messages.csv#id=5d7ecba4-42df-5356-9e1b-6b4dade69364/body_text"
+        },
+        "synthetic-eval-only://plan-v3/SYNTHETIC-EVAL_ONLY-PLAN-V3-13-ALL_INCUMBENT_CHANGEABLE-fixed0#cost-assumption/7e793781-af2c-5ddb-ada4-f37aa5c1f58e": {
+          "excerpt": "SYNTHETIC / EVAL_ONLY 근거 조회 대역. 실제 원문 진위 검증 아님.",
+          "source_ref": "synthetic-eval-only://plan-v3/SYNTHETIC-EVAL_ONLY-PLAN-V3-13-ALL_INCUMBENT_CHANGEABLE-fixed0#cost-assumption/7e793781-af2c-5ddb-ada4-f37aa5c1f58e"
+        },
+        "synthetic-eval-only://plan-v3/SYNTHETIC-EVAL_ONLY-PLAN-V3-13-ALL_INCUMBENT_CHANGEABLE-fixed0#NOT-COMPANY-POLICY": {
+          "excerpt": "SYNTHETIC / EVAL_ONLY 근거 조회 대역. 실제 원문 진위 검증 아님.",
+          "source_ref": "synthetic-eval-only://plan-v3/SYNTHETIC-EVAL_ONLY-PLAN-V3-13-ALL_INCUMBENT_CHANGEABLE-fixed0#NOT-COMPANY-POLICY"
+        },
+        "synthetic-eval-only://plan-v3/SYNTHETIC-EVAL_ONLY-PLAN-V3-13-ALL_INCUMBENT_CHANGEABLE-fixed0#EXPLICIT-FIXED-CONTRACT-ASSUMPTION": {
+          "excerpt": "SYNTHETIC / EVAL_ONLY 근거 조회 대역. 실제 원문 진위 검증 아님.",
+          "source_ref": "synthetic-eval-only://plan-v3/SYNTHETIC-EVAL_ONLY-PLAN-V3-13-ALL_INCUMBENT_CHANGEABLE-fixed0#EXPLICIT-FIXED-CONTRACT-ASSUMPTION"
+        },
+        "gyeonjwo_synthetic_v1/csv/mail_messages.csv#id=867c21fa-f657-5a28-add3-99021fd293d8/body_text; gyeonjwo_synthetic_v1/attachments/attachment_texts.json#quote_B_13.pdf": {
+          "excerpt": "SYNTHETIC / EVAL_ONLY 근거 조회 대역. 실제 원문 진위 검증 아님.",
+          "source_ref": "gyeonjwo_synthetic_v1/csv/mail_messages.csv#id=867c21fa-f657-5a28-add3-99021fd293d8/body_text; gyeonjwo_synthetic_v1/attachments/attachment_texts.json#quote_B_13.pdf"
+        }
+      }
+    },
+    "quote_ids": [
+      "EVAL_ONLY:15582535-f1b8-5326-8dc9-978888285fd0:BEFORE",
+      "EVAL_ONLY:15582535-f1b8-5326-8dc9-978888285fd0:SOURCE-MAIL-5d7ecba4-42df-5356-9e1b-6b4dade69364:v1",
+      "EVAL_ONLY:15582535-f1b8-5326-8dc9-978888285fd0:SOURCE-MAIL-867c21fa-f657-5a28-add3-99021fd293d8:v1"
+    ]
+  },
+  "outputs": {
+    "status": "COMPLETE",
+    "send_authorized": false,
+    "target_unit_price": "5416"
+  },
+  "metadata": {
+    "usage": "EVAL_ONLY",
+    "data_kind": "SYNTHETIC",
+    "input_sha256": "21e0985c7a199f2c745430dfcc492c2fc502aa3b508e77f76a4d19832df229ef",
+    "team_base_sha": "5ceb6a30bd5bc2f8c78273ba54709e29b2721ae4",
+    "upstream": "scripted 1/3; no real extraction or priority agent"
+  }
+}

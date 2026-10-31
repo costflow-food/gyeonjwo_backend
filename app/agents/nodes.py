@@ -17,7 +17,7 @@ def plan_validation(state) -> dict:
     """④ 구매안의 총액·공급량·규격·납기·MOQ·분산 정책 검증.
     반환: {'plan_check': PlanCheck, 'plan_check_reason': str | None, 'plans': 검증된 안 (PASS일 때),
            'pending_questions': ③에 넘길 미확인 (NEED_INFO일 때)}"""
-    raise NotImplementedError
+    return _validate_output(state, counter=False)
 
 
 def price_validation(state) -> dict:
@@ -27,7 +27,42 @@ def price_validation(state) -> dict:
     PASS → 검토 카드, FIX(정책 범위 밖 목표 조건·허용되지 않는 생략) → ⑤, NEED_INFO(근거·정책 없음) → ③.
     반환: {'price_check': PriceCheck, 'price_check_reason': ⑤에 넘길 사유 (FIX일 때),
            'pending_questions': ③에 넘길 미확인 (NEED_INFO일 때)}"""
-    raise NotImplementedError
+    return _validate_output(state, counter=True)
+
+
+def _validate_output(state, *, counter):
+    from app.agents.agents import validate_review_output
+    from app.agents.schemas import (AgentRole, PlanIn, CounterOfferIn, RunContext,
+                                    PlanCheck, PriceCheck, RunStatus, ProcessingStep)
+    from app.agents.tools import MissingReviewData, OutputValidationError
+    role = AgentRole.COUNTER_OFFER if counter else AgentRole.RESPONSE_PLAN
+    key, checks = ('price_check', PriceCheck) if counter else ('plan_check', PlanCheck)
+    reason_key = key + '_reason'
+    def hold(fields):
+        return {'status': RunStatus.ON_HOLD, 'processing_step': ProcessingStep.ON_HOLD, 'unresolved': fields}
+    skipped = counter and state.get('last_action') == 'COUNTER_OFFER_SKIPPED'
+    args = {'case_id': state['case_id'], 'input_revision': state['input_revision'],
+            'quote_version_ids': state['quote_version_ids']}
+    data = CounterOfferIn(**args, validated_plans=state.get('plans', [])) if counter else PlanIn(**args)
+    output = ({'next_action': 'COUNTER_OFFER_PROPOSED', 'target': state.get('counter_offer'),
+               'draft_ids': state.get('draft_ids', [])} if counter else
+              {'next_action': 'PLANS_PROPOSED', 'plans': state.get('plans', [])})
+    if skipped:
+        output.update(next_action='COUNTER_OFFER_SKIPPED')
+    try:
+        checked = validate_review_output(role, data, RunContext(str(data.case_id), data.input_revision),
+                                     {**output, 'reason': state.get('counter_offer_skip_reason') or 'missing skip reference' if skipped else 'deterministic graph validation'})
+        return {key: checks.PASS, reason_key: None, **({} if counter else {'plans': checked.plans})}
+    except MissingReviewData as exc:
+        if exc.action in ('NEEDS_EVIDENCE', 'RECHECK_SOURCE'):
+            return {key: checks.NEED_INFO, reason_key: exc.action, 'pending_questions': exc.fields}
+        return hold(exc.fields)
+    except OutputValidationError as exc:
+        if exc.code in ('SKIP_NOT_PERMITTED', 'PLAN_REFERENCE_MISMATCH', 'PLAN_ALLOCATION_TOTAL_OR_SET_MISMATCH',
+                        'PLAN_SCHEMA_INVALID', 'TARGET_CALCULATION_MISMATCH', 'VALIDATION_TARGET_MISMATCH',
+                        'INDEPENDENT_PRICE_VALIDATION_FAILED', 'FINAL_INPUT_OR_OUTPUT_SCHEMA_INVALID'):
+            return {key: checks.FIX, reason_key: exc.code}
+        raise
 
 
 def review_card(state) -> dict:

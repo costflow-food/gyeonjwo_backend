@@ -14,7 +14,7 @@ API 오류 응답의 next_action(app.core.errors)과는 다른 값이다.
 """
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Generic, TypeVar
 from uuid import UUID
 
 from pydantic import Field, StrictBool, model_validator
@@ -318,3 +318,304 @@ AGENT_IO = {
 }
 
 RunCaseOutput.model_rebuild()
+
+
+# Shared calculation inputs. These are backend/store models, not model-created
+# replacements for RunContext or evidence. Optional values remain unknown.
+class ComparisonPeriod(StrictModel):
+    from_date: str = Field(alias='from')
+    to: str
+
+
+class TradeTerms(StrictModel):
+    delivery_location: str | None = None
+    delivery_terms: str | None = None
+    payment_terms: str | None = None
+    tax_basis: Literal['INCLUDED', 'EXCLUDED', 'EXEMPT']
+
+
+class ReviewItem(StrictModel):
+    name: str
+    specification: str
+    origin: str | None = None
+    grade: str | None = None
+    processing: str | None = None
+
+
+class ReviewPolicy(StrictModel):
+    policy_id: str | None = None
+    source_ref: str | None = None
+    approved: StrictBool | None = None
+    valid_from: str | None = None
+    valid_to: str | None = None
+    allow_split: StrictBool | None = None
+    max_suppliers: int | None = None
+    allocation_step: DecimalStr
+    min_unit_price: DecimalStr | None = None
+    max_unit_price: DecimalStr | None = None
+    max_total_cost: DecimalStr | None = None
+    price_increment: DecimalStr | None = None
+    skip_if_request_not_more_than_alternative: StrictBool | None = None
+    allow_partial_comparison: StrictBool | None = None
+    max_increase_rate: DecimalStr | None = None
+    switching_costs: dict[str, DecimalStr] = {}
+
+
+class FixedCommitment(StrictModel):
+    supplier_id: str
+    quantity: DecimalStr
+    unit_price: DecimalStr | None = None
+    period: ComparisonPeriod | None = None
+    verified: StrictBool
+    source_ref: str
+
+
+class IncumbentNotice(StrictModel):
+    supplier_id: str
+    old_unit_price: DecimalStr
+    requested_unit_price: DecimalStr
+    effective_date: str
+    source_ref: str
+    verified: StrictBool
+
+
+class QuantityPriceTier(StrictModel):
+    min_quantity: DecimalStr | None
+    max_quantity: DecimalStr | None
+    min_inclusive: StrictBool
+    max_inclusive: StrictBool
+    unit_price: DecimalStr
+    source_ref: str
+
+
+class ReviewCosts(StrictModel):
+    transport: DecimalStr | None
+    other_logistics: DecimalStr | None
+    switching: DecimalStr | None
+
+
+class PriceApplication(StrictModel):
+    """Internal, source-verified application of a future quote; no new DB input."""
+    basis: Literal['DELIVERY']
+    on_date: str
+    effective_from: str
+    source_ref: str
+
+
+class ComparableQuote(StrictModel):
+    supplier_id: str
+    quote_id: str
+    version: int = Field(strict=True, ge=1)
+    received_on: str
+    valid_from: str | None
+    valid_until: str | None
+    supply_from: str | None
+    supply_to: str | None
+    item: ReviewItem
+    unit: str | None
+    currency: str | None
+    terms: TradeTerms
+    unit_price: DecimalStr | None
+    moq: DecimalStr | None
+    available_quantity: DecimalStr | None
+    lead_days: int | None
+    costs: ReviewCosts
+    cost_rates: dict[Literal['transport', 'other_logistics'], DecimalStr] = {}
+    cost_scope: str
+    cost_source_ref: str
+    source_ref: str
+    source_verified: StrictBool | None
+    eligibility: Literal['CONFIRMED', 'NEEDS_INFO', 'INVALID']
+    price_tiers: list[QuantityPriceTier] | None = None
+    pricing_method: Literal['ALL_UNITS'] | None = None
+    tier_method_ref: str | None = None
+    pack_multiple: DecimalStr | None = None
+    pack_multiple_unit: str | None = None
+    pack_multiple_source_ref: str | None = None
+    price_effective_from: str | None = None
+    price_application: PriceApplication | None = None
+
+
+class PurchaseReviewInput(StrictModel):
+    request_id: str
+    revision: int = Field(strict=True, ge=0)
+    data_kind: Literal['SYNTHETIC', 'LIVE']
+    as_of: str
+    period: ComparisonPeriod | None
+    scope_kind: Literal['EXPLICIT_PERIOD', 'MVP_ORDER'] = 'EXPLICIT_PERIOD'
+    due_date: str | None = None
+    item: ReviewItem
+    unit: str
+    currency: str
+    terms: TradeTerms
+    incumbent: IncumbentNotice
+    fixed_commitment: FixedCommitment | None
+    changeable_quantity: DecimalStr
+    repricing_scope: Literal['ALL_INCUMBENT_CHANGEABLE', 'KEEP_ONLY'] | None
+    quotes: list[ComparableQuote]
+    policy: ReviewPolicy
+
+
+class ReviewSource(StrictModel):
+    mail_id: str
+    part: str = 'body'
+    page: int | None = None
+    excerpt: str
+
+
+TReviewFact = TypeVar('TReviewFact')
+
+
+class ConfirmedFact(StrictModel, Generic[TReviewFact]):
+    value: TReviewFact
+    evidence: ReviewSource | None = None
+
+
+class ItemAttributes(StrictModel):
+    origin: str | None = None
+    grade: str | None = None
+    processing: str | None = None
+
+
+class SupplierTradeTerms(StrictModel):
+    delivery_location: str | None = None
+    delivery_terms: str | None = None
+    payment_terms: str | None = None
+
+
+class FixedQuantityFact(StrictModel):
+    supplier_id: str
+    quantity: DecimalStr
+    unit_price: DecimalStr | None = None
+    period: ComparisonPeriod | None = None
+    verified: StrictBool
+
+
+class QuoteReviewFacts(StrictModel):
+    item_identity: ConfirmedFact[ItemAttributes] | None = None
+    terms: ConfirmedFact[SupplierTradeTerms] | None = None
+    valid_from: ConfirmedFact[str] | None = None
+    supply_from: ConfirmedFact[str] | None = None
+    supply_to: ConfirmedFact[str] | None = None
+    lead_days: ConfirmedFact[int] | None = None
+    switching_cost: ConfirmedFact[DecimalStr] | None = None
+    cost_scope: ConfirmedFact[str] | None = None
+
+
+class ReviewFacts(StrictModel):
+    as_of: ConfirmedFact[str] | None = None
+    period: ConfirmedFact[ComparisonPeriod] | None = None
+    item_identity: ConfirmedFact[ItemAttributes] | None = None
+    terms: ConfirmedFact[TradeTerms] | None = None
+    incumbent_supplier_id: ConfirmedFact[str] | None = None
+    fixed_commitment: ConfirmedFact[FixedQuantityFact] | None = None
+    repricing_scope: ConfirmedFact[str] | None = None
+    quotes: dict[str, QuoteReviewFacts] = {}
+
+
+class ReviewFactsRecord(StrictModel):
+    case_id: str
+    input_revision: int = Field(strict=True, ge=0)
+    quote_version_ids: list[str]
+    team_record_digest: str
+    facts: ReviewFacts
+
+
+class PlanSetRecord(StrictModel):
+    status: Literal['PASS']
+    bundle: dict
+
+
+class PlanCalculationRecord(StrictModel):
+    status: Literal['PASS']
+    plan: Plan
+    row: dict
+    bundle_ref: str
+
+
+class SkipPolicyCheck(StrictModel):
+    """Backend policy decision. IDs/versions are opaque, never issued by an agent."""
+    decision: Literal['ALLOW', 'DENY', 'UNCONFIRMED']
+    policy_id: str | None = None
+    policy_version: str | None = None
+    policy_digest: str
+    condition: str
+
+
+class PriceCalculationRecord(StrictModel):
+    status: Literal['CALCULATED']
+    result: dict
+    target: CounterOfferTarget | None
+    bundle_ref: str
+    policy_ref: str | None = None
+    skip_policy: SkipPolicyCheck | None = None
+
+
+class PriceValidationRecord(StrictModel):
+    status: Literal['PASS']
+    target: CounterOfferTarget
+    calculation_ref: str
+    validation: dict
+
+
+class PolicyRecord(StrictModel):
+    policy: ReviewPolicy
+
+
+class DraftBinding(StrictModel):
+    target: CounterOfferTarget
+    send_authorized: StrictBool
+
+
+class AllocationWarning(StrictModel):
+    quote_version_id: str
+    code: Literal['SUPPLY_SHORTAGE', 'BELOW_MOQ']
+    comparison_quantity: DecimalStr
+    limit: DecimalStr
+
+
+class UnknownCostTerm(StrictModel):
+    quote_version_id: str
+    component: Literal['SHIPPING', 'HANDLING']
+    variable: str
+
+
+class BreakEvenRecord(StrictModel):
+    """Conditional sensitivity proof, never a confirmed total or a purchase plan."""
+    alternative_quote_version_id: str
+    question_quote_version_id: str
+    supplier_id: str
+    field: Literal['cost_terms']
+    component: Literal['SHIPPING', 'HANDLING']
+    result_kind: Literal['CONDITIONAL', 'RELATION']
+    unknown_side: Literal['INCUMBENT', 'ALTERNATIVE', 'BOTH']
+    unknown_terms: list[UnknownCostTerm]
+    comparison_operator: Literal['<=', '>=']
+    choice_priority: Literal['CAN_CHANGE_CHOICE', 'LOW_VALUE']
+    priority_basis: str
+    break_even_amount: DecimalStr | None
+    raw_upper_exclusive: DecimalStr | None
+    raw_lower_inclusive: DecimalStr | None
+    offset: DecimalStr
+    rounded_component_limit: DecimalStr | None
+    quantity: DecimalStr
+    quantity_unit: str
+    period: ComparisonPeriod | None
+    baseline_total: DecimalStr | None
+    basis_quote_version_ids: list[str]
+    allocation_feasible: StrictBool
+    warnings: list[AllocationWarning]
+    source_digest: str
+    formula: str
+    condition: str
+    feasible_nonnegative_cost: StrictBool
+
+
+class ClarificationDraftBinding(StrictModel):
+    """Required shared-draft read contract; no draft writer is implemented here."""
+    purpose: Literal['CLARIFICATION']
+    case_id: str
+    input_revision: int = Field(strict=True, ge=0)
+    supplier_id: str
+    questions: list[Question]
+    send_authorized: Literal[False]
