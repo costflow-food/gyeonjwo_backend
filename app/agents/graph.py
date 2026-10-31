@@ -14,6 +14,8 @@
 역할 호출이 MAX_ROLE_CALLS_PER_RUN을 넘거나, 에이전트·노드 오류·형식 위반이면 FAILED,
 실행 중 input_revision이 바뀌면 STALE로 끝낸다. revision은 에이전트 호출마다, 그리고 검토 카드 저장 직전에 확인한다.
 역할 호출마다 next_action·reason을 steps에 쌓아 백엔드가 실행 기록으로 남긴다. HOLD 사유는 unresolved에도 넣는다.
+③④⑤는 호출 직전에 업무의 업체별 최신 견적 버전 ID 전체로 quote_version_ids를 채운다. PLAN 시작(① 없음)이나
+일부 업체만 회신한 경우에도 비교 대상이 빠지지 않게 하고, 뒤따르는 구매안·가격 검증도 같은 집합을 쓴다.
 """
 import logging
 import operator
@@ -31,6 +33,7 @@ logger = logging.getLogger('gyeonjwo')
 
 RunAgent = Callable[[AgentRole, AgentInput], AgentOutput]
 CurrentRevision = Callable[[str], int]
+LatestQuotes = Callable[[str], list[str]]
 
 
 class CaseState(TypedDict, total=False):
@@ -109,23 +112,40 @@ def _failed(reason, step=ProcessingStep.FAILED):
 
 STALE = {'status': RunStatus.STALE, 'unresolved': ['INPUT_REVISION_CHANGED']}
 
+LATEST_QUOTE_ROLES = (AgentRole.INFO_PRIORITY, AgentRole.RESPONSE_PLAN, AgentRole.COUNTER_OFFER)
 
-def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: Nodes = Nodes()):
-    """run_agent: agents.AgentRunner 또는 테스트용 가짜. current_revision: 업무의 현재 input_revision 조회(백엔드)."""
+
+def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: Nodes = Nodes(),
+                latest_quotes: LatestQuotes | None = None):
+    """run_agent: agents.AgentRunner 또는 테스트용 가짜. current_revision: 업무의 현재 input_revision 조회(백엔드).
+    latest_quotes: 업무의 업체별 최신 견적 버전 ID 조회(백엔드, work_cases의 latest_quote_version_ids와 같은 값).
+    실제 실행에서는 꼭 넘긴다. None이면 상태에 들어 있는 quote_version_ids를 그대로 쓰며, 테스트용이다."""
 
     def changed(state):
         return current_revision(state['case_id']) != state['input_revision']
+
+    def latest_quote_ids(role, state):
+        """③④⑤ 호출 전에 최신 견적 ID 전체를 읽어 상태에 넣을 값을 돌려준다. 다른 역할이면 바꾸지 않는다.
+        같은 실행 안에서도 ①이 새 견적을 저장할 수 있으므로 호출할 때마다 다시 읽는다."""
+        if latest_quotes is None or role not in LATEST_QUOTE_ROLES:
+            return {}
+        return {'quote_version_ids': list(latest_quotes(state['case_id']))}
 
     def agent_node(role):
         def node(state):
             if state.get('role_calls', 0) >= MAX_ROLE_CALLS_PER_RUN:
                 return _failed('ROLE_CALL_LIMIT')
             try:
-                output = run_agent(role, INPUTS[role](state))
+                quote_ids = latest_quote_ids(role, state)
+            except Exception:
+                logger.warning('latest quote lookup failed role=%s', role)
+                return _failed(f'{role}: QUOTE_LOOKUP_FAILED')
+            try:
+                output = run_agent(role, INPUTS[role](state | quote_ids))
             except Exception:
                 logger.warning('agent failed role=%s', role)
                 return _failed(f'{role}: AGENT_FAILED') | {'role_calls': state.get('role_calls', 0) + 1}
-            update = {'role_calls': state.get('role_calls', 0) + 1, 'processing_step': ROLE_STEPS[role]}
+            update = {'role_calls': state.get('role_calls', 0) + 1, 'processing_step': ROLE_STEPS[role]} | quote_ids
             if not isinstance(output, AGENT_IO[role][1]):
                 return update | _failed(f'{role}: INVALID_OUTPUT')
             if changed(state):

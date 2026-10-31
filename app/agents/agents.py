@@ -654,7 +654,7 @@ def check_review_output(role, data, context, output, messages):
     try:
         return validate_review_output(role, data, context, output)
     except tools.OutputValidationError as error:
-        # 데이터 부족(MissingReviewData)과 입력 견적 ID 없음(그래프가 최신 견적 집합을 아직 채우지 못하는 경우)만 해당
+        # 데이터 부족(MissingReviewData)과 입력 견적 ID 없음(그래프가 최신 견적을 채웠는데도 업무에 견적이 하나도 없는 경우)만 해당
         if not isinstance(error, tools.MissingReviewData) and getattr(error, 'code', None) not in _HOLD_INPUT_GAPS:
             raise
         carries_result = bool(getattr(output, 'plans', None) or getattr(output, 'target', None)
