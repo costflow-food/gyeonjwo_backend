@@ -46,7 +46,10 @@ class PriorityModel(ToolDrivenModel):
         report = json.loads(next(m.content for m in history if m.name == 'check_comparability'))
         action = report['next_action']
         if action == 'BUILD_PLANS':return final(action, questions=[], draft_ids=[])
-        if action == 'REQUEST_CLARIFICATION' or tools.LOW_VALUE_PLAN_CONTRACT_REQUIRED in report.get('missing_dependencies',[]):
+        low_value_hold = tools.LOW_VALUE_PLAN_CONTRACT_REQUIRED in report.get('missing_dependencies',[])
+        # 초안 도구가 없어 HOLD여도 비용 질문은 역전 계산을 먼저 해 calculation_ref를 남긴다 (최종 검사 규칙)
+        cost_hold = action == 'HOLD' and any(q['field']=='cost_terms' for q in report.get('questions',[]))
+        if action == 'REQUEST_CLARIFICATION' or low_value_hold or cost_hold:
             calculations=[json.loads(m.content) for m in history if m.name=='calculate_break_even']
             cost_questions=[q for q in report['questions'] if q['field']=='cost_terms']
             if len(calculations)<len(cost_questions):
@@ -62,6 +65,9 @@ class PriorityModel(ToolDrivenModel):
                     for collection in [report['questions'],*[g['questions'] for g in report['question_groups']]]:
                         for i,q in enumerate(collection):
                             if (q['supplier_id'],q['field'])==(question['supplier_id'],question['field']):collection[i]=question
+            if cost_hold and not low_value_hold:
+                return final(action, questions=report['questions'], draft_ids=[],
+                             unknown_fields=report['unknown_fields'] + report.get('missing_dependencies', []))
             groups = report['question_groups']
             drafts = [json.loads(m.content)['draft_id'] for m in history if m.name == 'create_clarification_draft']
             if len(drafts) < len(groups):

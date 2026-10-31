@@ -238,8 +238,7 @@ class RunnerFinalGuardMissing(AssertionError):
     pass
 
 
-@pytest.mark.xfail(strict=True, raises=RunnerFinalGuardMissing,
-    reason='OPEN orchestration gap: Runner does not call the role output guard before COMPLETED')
+# FINAL_CHECKS에 ③④⑤ 검사가 등록돼 위조 결과는 COMPLETED 저장 전에 막힌다 (이전에는 xfail로 공백을 재현)
 @pytest.mark.parametrize('fault', ['total', 'plan_reference', 'validation_reference', 'draft_id'])
 def test_open_runner_direct_output_must_not_complete_forged_result(storage, fault):
     from app.agents.tools import ReviewCalculator as BridgeService, model_payload as wire

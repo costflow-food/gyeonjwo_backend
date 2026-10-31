@@ -31,8 +31,8 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import ToolMessage
 from langchain_openai import ChatOpenAI
 
-from app.agents.schemas import (AGENT_IO, MAX_TOOL_CALLS_PER_AGENT_CALL, AgentInput, AgentOutput, AgentRole,
-                                RunContext)
+from app.agents.schemas import (AGENT_IO, MAX_TOOL_CALLS_PER_AGENT_CALL, AgentInput, AgentNextAction, AgentOutput,
+                                AgentRole, RunContext)
 from app.agents import tools
 from app.agents.tools import EXTRACTION_FIELD_NAMES, candidate_summary, tools_for
 from app.shared.infrastructure.llm import POLICY
@@ -637,11 +637,33 @@ def check_priority_output(service, scope, output):
     return output
 
 
+_HOLD_INPUT_GAPS = {'QUOTE_VERSION_IDS_REQUIRED'}   # HOLD로 둘 수 있는 입력 조건 오류 코드
+
+
 def check_review_output(role, data, context, output, messages):
     """Five-argument FINAL_CHECKS adapter; register only in the integration layer.
 
     The review guard uses trusted typed run inputs and stored evidence. It never
     reconstructs authority from model messages, and never writes final results.
     Validation errors intentionally propagate into AgentRunner's FAILED path.
+
+    예외: 결과가 HOLD이고 넘기는 결과물(구매안·목표 조건·초안 ID)이 없는데 검사에 필요한 데이터가 없어
+    MissingReviewData가 나면 HOLD를 그대로 둔다. 근거가 없어 멈춘 정상 보류를 실행 실패(FAILED)로 바꾸지 않기 위해서다.
+    결과물이 있으면 위조 여부를 확인할 수 없으므로 그대로 실패시킨다.
     """
-    return validate_review_output(role, data, context, output)
+    try:
+        return validate_review_output(role, data, context, output)
+    except tools.OutputValidationError as error:
+        # 데이터 부족(MissingReviewData)과 입력 견적 ID 없음(그래프가 최신 견적 집합을 아직 채우지 못하는 경우)만 해당
+        if not isinstance(error, tools.MissingReviewData) and getattr(error, 'code', None) not in _HOLD_INPUT_GAPS:
+            raise
+        carries_result = bool(getattr(output, 'plans', None) or getattr(output, 'target', None)
+                              or getattr(output, 'draft_ids', None))
+        if output.next_action == AgentNextAction.HOLD and not carries_result:
+            return output
+        raise
+
+
+# ③④⑤ 최종 검사 등록. 저장된 견적·계산·검증 기록과 대조해 위조된 총액·참조·초안을 막는다
+FINAL_CHECKS.update({role: check_review_output
+                     for role in (AgentRole.INFO_PRIORITY, AgentRole.RESPONSE_PLAN, AgentRole.COUNTER_OFFER)})
