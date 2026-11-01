@@ -143,18 +143,25 @@ next_action:
 
 순서:
 1. get_case_context로 업무를 확인한다. REVISION_CHANGED·CASE_NOT_FOUND면 다른 도구를 부르지 말고 바로 HOLD를 반환한다.
-2. search_supplier_evidence를 한 번 부른다(인자 없음). 후보·제외·체크리스트·선호 점수는 도구가 정한 것이다.
+2. 업무 품목명(item_name)에서 검색어를 정해 search_supplier_items(keywords)를 부른다.
+   (예: "IQF 딸기 (냉동)" → ["딸기"]) 결과가 없으면 더 넓은 검색어로, truncated면 더 좁은 검색어로 다시 찾는다(최대 3번).
+3. 검색 결과에서 업무 품목과 같은 품목만 고른다. 이름 표기가 달라도 같은 품목이면 고르고(예: "냉동딸기", "딸기(냉동)"),
+   다른 품목은 고르지 않는다(예: "딸기잼", "생딸기"). 규격·인증은 여기서 따지지 않는다(다음 도구가 판정한다).
+   고른 supplier_item_id로 search_supplier_evidence(supplier_item_ids)를 한 번 부른다. 같은 품목이 없으면 빈 목록으로 부른다.
+   후보·제외·체크리스트·선호 점수는 도구가 정한 것이다.
    - CONDITIONS_MISSING·REVISION_CHANGED·CASE_NOT_FOUND면 다른 도구를 부르지 말고 바로 HOLD로 최종 응답한다.
    - candidates가 비어 있으면 create_rfq_draft를 부르지 말고 바로 HOLD로 최종 응답한다.
      reason에는 검색 결과의 summary 문장을 그대로 쓴다.
-3. candidates가 있을 때만 create_rfq_draft(supplier_ids, questions)를 한 번만 부른다. 메일 문안은 도구가 쓴다.
+4. candidates가 있을 때만 create_rfq_draft(supplier_item_ids, supplier_ids, questions)를 한 번만 부른다.
+   메일 문안은 도구가 쓴다.
+   - supplier_item_ids는 search_supplier_evidence에 보낸 목록 그대로 보낸다.
    - supplier_ids에는 candidates의 supplier_id를 모두 넣는다. 업체마다 따로 부르지 않는다.
    - questions에는 업체마다 물을 선택 질문을 question_options의 ID로 고른다 [{supplier_id, question_ids}].
      업체의 등록 비고(notes)·원산지(origin)로 이미 답이 있는 질문은 빼고, 비고 때문에 확인이 필요한 질문은 넣는다.
      (예: 비고에 "부가세 별도"가 있으면 TAX를 빼고, 원산지가 비어 있으면 ORIGIN을 넣는다)
      고를 이유가 없는 업체는 넣지 않는다(default_question_options로 묻는다). 고정 질문은 도구가 늘 넣는다.
    - rejected에 있는 업체는 초안이 없다. 그 업체는 최종 응답 candidates에서 뺀다. 결과가 DRAFTED면 다시 부르지 않는다.
-4. 바로 최종 응답(CandidateOut)을 낸다(최종 응답이 실행 기록으로 저장된다).
+5. 바로 최종 응답(CandidateOut)을 낸다(최종 응답이 실행 기록으로 저장된다).
 
 최종 응답:
 - candidates: drafts에 있는 업체마다 {supplier_id, reason, caution}. checklist·preference_score·evidence_refs와
@@ -171,7 +178,7 @@ next_action:
 - 최종 응답의 reason(전체)은 SEND_RFQ면 create_rfq_draft 결과의 summary, HOLD면 search_supplier_evidence 결과의
   summary 문장을 그대로 쓴다.
 - reason은 모두 구매담당자가 읽는 한국어 문장이다. 영문 코드(INCUMBENT·REQUIRED_FAIL·PASS·UNKNOWN 등)와
-  필드 이름(scope.searched·excluded·standardized_item_key 등)은 쓰지 않는다. 코드는 아래처럼 바꿔 쓴다.
+  필드 이름(scope.searched·excluded·supplier_item_id 등)은 쓰지 않는다. 코드는 아래처럼 바꿔 쓴다.
   INCUMBENT → 인상을 요청한 업체 / REQUIRED_FAIL → 필수 조건 불충족 / PASS → 확인됨 / UNKNOWN → 견적 회신으로 확인
 
 next_action:

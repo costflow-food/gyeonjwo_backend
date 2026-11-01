@@ -29,7 +29,8 @@
 | read_mail_evidence        | 공통  | 메일 ID·본문/첨부·쪽 → 원문 구간·위치(페이지/셀)                | 소유·업무 범위 제한               |
 | save_agent_result         | 공통  | 역할 결과·근거·revision → 결과 ID·최신 여부                     | 입력 revision 확인                |
 | store_structured_mail     | ①     | 필드·단가 구간·비용·품목 비고·근거 → 견적 버전 ID               | 서버 검증 후 저장, 임의 SQL 불가  |
-| search_supplier_evidence  | ②     | 품목·규격·필수 조건 → 취급 근거·후보                            | 과거 단가를 현재 가격으로 안 줌   |
+| search_supplier_items     | ②     | 검색어 → 품목명에 검색어가 든 등록 품목(업체·품목·규격)          | 가격 없음, 결과 상한              |
+| search_supplier_evidence  | ②     | 같은 품목으로 고른 등록 품목 → 취급 근거·후보                   | 과거 단가를 현재 가격으로 안 줌   |
 | crawl_supplier_candidates | ②     | 허용 출처·조건 → 잠정 후보·연락처·출처 시점 (Should)            | 잠정 후보, 회신으로 확인          |
 | check_comparability       | ③④⑤   | 견적 버전·정책 → 누락·불일치·비교 범위                          | 필수·가중 조건 구분               |
 | calculate_break_even      | ③     | 확인된 비용·제약 → 역전 기준 금액·산식                          | 미확인 금액을 0원으로 보지 않음   |
@@ -37,7 +38,7 @@
 | validate_purchase_plan    | ④     | 배분안 → 총액·위반 사유·탐색 범위                               | 위와 같음                         |
 | calculate_counter_offer   | ⑤     | 기존·요청 가격·대안 총액·회사 정책 → 목표 조건별 비용            | 정책 없는 인상률 생성 금지        |
 | validate_counter_offer    | ⑤     | 목표 조건 → 가격 범위·정책 검증 결과                            | 위와 같음                         |
-| create_rfq_draft          | ②     | 대상 업체·RFQ 템플릿 → 업체별 초안 ID                            | 내부 저장만, 발송은 백엔드        |
+| create_rfq_draft          | ②     | 고른 등록 품목·대상 업체·선택 질문 → 업체별 초안 ID              | 내부 저장만, 발송은 백엔드        |
 | create_clarification_draft| ③     | 업체·질문 묶음·근거 → 보완 요청 초안 ID                          | 내부 저장만, 발송은 백엔드        |
 | create_counter_offer_draft| ⑤     | 검증된 목표 조건(validation_ref)·문안 → 역제안 초안 ID           | 내부 저장만, 발송은 백엔드        |
 """
@@ -61,7 +62,8 @@ _READ = ('get_case_context', 'read_mail_evidence')     # ①②는 최종 응답
 
 ROLE_TOOLS = {
     AgentRole.INFO_EXTRACTOR: _READ + ('store_structured_mail',),
-    AgentRole.CANDIDATE: _READ + ('search_supplier_evidence', 'crawl_supplier_candidates', 'create_rfq_draft'),
+    AgentRole.CANDIDATE: _READ + ('search_supplier_items', 'search_supplier_evidence', 'crawl_supplier_candidates',
+                                  'create_rfq_draft'),
     AgentRole.INFO_PRIORITY: _COMMON + ('check_comparability', 'calculate_break_even',
                                         'create_clarification_draft'),
     AgentRole.RESPONSE_PLAN: _COMMON + ('check_comparability', 'build_plan_candidates', 'validate_purchase_plan'),
@@ -972,20 +974,24 @@ _SPEC_SIZE = re.compile(rf'(\d+(?:\.\d+)?)\s*({_UNIT_WORDS})')
 
 
 class CandidateStore(CaseStore, Protocol):
-    """search_supplier_evidence·create_rfq_draft의 후보 조회 저장소 (06). 소유 범위는 구현이 검사한다."""
+    """search_supplier_items·search_supplier_evidence·create_rfq_draft의 후보 조회 저장소 (06).
+    소유 범위는 구현이 검사한다."""
 
     def get_candidate_conditions(self, case_id: str) -> dict | None:
-        """work_cases의 {input_revision, item_name, standardized_item_key, specification,
+        """work_cases의 {input_revision, item_name, specification,
         mandatory_conditions(mandatory_conditions_jsonb: 인증 이름 목록 또는 [{condition}]), quantity, unit, due_date,
         policy(policy_jsonb)}. 업무가 없거나 범위 밖이면 None."""
 
     def incumbent_supplier_ids(self, case_id: str) -> set[str]:
         """이 업무의 quote_versions.supplier_id, 즉 인상을 요청한 업체."""
 
-    def list_supplier_items(self, case_id: str, item_key: str) -> list[dict]:
-        """standardized_item_key가 같은 supplier_items 행 (06 컬럼 그대로: id, supplier_id, standardized_item_key,
-        item_name, specification, unit, certifications_jsonb(모르면 None), origin, notes, latest_reference_quote_id,
-        last_purchase_id)."""
+    def search_supplier_items(self, case_id: str, keywords: list[str], limit: int) -> list[dict]:
+        """item_name에 keywords 중 하나라도 들어간 이 사용자의 supplier_items 행, 최대 limit개
+        (06 컬럼 그대로: id, supplier_id, item_name, specification, unit, certifications_jsonb(모르면 None), origin,
+        notes, last_purchase_id)."""
+
+    def get_supplier_items(self, case_id: str, ids: list[str]) -> list[dict]:
+        """id가 ids에 있는 이 사용자의 supplier_items 행 (컬럼은 search_supplier_items와 같다). 범위 밖 id는 빠진다."""
 
     def get_supplier(self, case_id: str, supplier_id: str) -> dict | None:
         """suppliers 행 (06 컬럼 그대로: id, name, contact_email, evidence_jsonb, source_type)."""
@@ -1124,21 +1130,58 @@ def candidate_summary(checklist: list[dict]) -> str:
     return text + (f'{", ".join(unknown)}은(는) 견적 회신으로 확인합니다.' if unknown else '필수 조건을 모두 확인했습니다.')
 
 
-def evaluate_candidates(store: CandidateStore, context: RunContext) -> dict:
+SEARCH_ITEMS_LIMIT = 30              # 품목 검색 결과 상한. 넘으면 truncated로 알리고 검색어를 좁히게 한다
+MAX_KEYWORDS = 5
+
+
+def find_supplier_items(store: CandidateStore, context: RunContext, keywords: list[str]) -> dict:
+    """search_supplier_items의 본체. 품목명에 검색어가 들어간 등록 품목을 업체 이름과 함께 돌려준다(가격 없음)."""
+    words = list(dict.fromkeys(word.strip() for word in keywords if word.strip()))[:MAX_KEYWORDS]
+    if not words:
+        return {'status': 'REJECTED', 'code': 'NO_KEYWORDS', 'hint': '업무 품목명에서 검색어를 하나 이상 정해 보낸다.'}
+    rows = _read(lambda: store.search_supplier_items(context.case_id, words, SEARCH_ITEMS_LIMIT + 1))
+    names = {sid: (_read(lambda sid=sid: store.get_supplier(context.case_id, sid)) or {}).get('name')
+             for sid in dict.fromkeys(row['supplier_id'] for row in rows)}
+    items = [{'supplier_item_id': row['id'], 'supplier_name': names[row['supplier_id']], 'item_name': row['item_name'],
+              'specification': row.get('specification'), 'origin': row.get('origin')} for row in rows[:SEARCH_ITEMS_LIMIT]]
+    return {'status': 'OK', 'keywords': words, 'items': items, 'truncated': len(rows) > SEARCH_ITEMS_LIMIT}
+
+
+@register
+@tool
+def search_supplier_items(keywords: list[str], runtime: ToolRuntime[RunContext]) -> dict:
+    '''등록 업체의 취급 품목 중 품목명에 검색어가 들어간 것을 찾는다. 업무 품목과 같은 품목을 고르기 위한 검색이다.
+    keywords: 업무 품목명에서 정한 검색어 (예: "IQF 딸기 (냉동)" → ["딸기"]). 최대 5개.
+
+    반환 status:
+    - OK: items(supplier_item_id·supplier_name·item_name·specification·origin), truncated(결과가 많아 잘렸다.
+      검색어를 좁혀 다시 찾는다)
+    - REJECTED: code NO_KEYWORDS
+    '''
+    return find_supplier_items(_candidate_store, _run_context(_candidate_store, runtime), keywords)
+
+
+def evaluate_candidates(store: CandidateStore, context: RunContext, supplier_item_ids: list[str]) -> dict:
     """search_supplier_evidence의 본체. create_rfq_draft도 같은 판정으로 대상 업체를 다시 확인한다.
-    가: 품목 취급 근거 없음 → 조회 범위 밖 / 나: 인상 요청 업체 → INCUMBENT / 다: 필수 FAIL → REQUIRED_FAIL /
+    supplier_item_ids는 LLM이 search_supplier_items 결과에서 업무 품목과 같다고 고른 등록 품목이다.
+    가: 고른 품목 없음 → 조회 범위 밖 / 나: 인상 요청 업체 → INCUMBENT / 다: 필수 FAIL → REQUIRED_FAIL /
     라: 필수 UNKNOWN → 후보(RFQ로 확인) / 마: 필수 모두 PASS → 후보"""
     case = _read(lambda: store.get_candidate_conditions(context.case_id))
     if case is None:
         return {'status': 'CASE_NOT_FOUND'}
     if case.get('input_revision') != context.input_revision:
         return {'status': 'REVISION_CHANGED'}
-    item_key = case.get('standardized_item_key')
-    if not item_key:
-        return {'status': 'CONDITIONS_MISSING', 'missing': ['standardized_item_key'],
+    item_name = case.get('item_name')
+    if not item_name:
+        return {'status': 'CONDITIONS_MISSING', 'missing': ['item_name'],
                 'summary': '요청 품목이 아직 확정되지 않아 견적을 요청할 후보 업체를 찾을 수 없습니다.',
                 'next': '다시 검색해도 결과가 같다. 다른 도구를 부르지 말고 바로 HOLD로 최종 응답한다. reason에는 summary를 쓴다.'}
-    items = _read(lambda: store.list_supplier_items(context.case_id, item_key))
+    ids = list(dict.fromkeys(supplier_item_ids))
+    items = _read(lambda: store.get_supplier_items(context.case_id, ids)) if ids else []
+    unknown = sorted(set(ids) - {item['id'] for item in items})
+    if unknown:
+        return {'status': 'REJECTED', 'code': 'UNKNOWN_ITEMS', 'supplier_item_ids': unknown,
+                'hint': 'search_supplier_items 결과의 supplier_item_id만 보낸다.'}
     incumbents = _read(lambda: store.incumbent_supplier_ids(context.case_id))
     suppliers = {sid: _read(lambda sid=sid: store.get_supplier(context.case_id, sid)) or {}
                  for sid in dict.fromkeys(item['supplier_id'] for item in items)}
@@ -1189,9 +1232,9 @@ def evaluate_candidates(store: CandidateStore, context: RunContext) -> dict:
     candidates = candidates[:MAX_CANDIDATES]
     excluded += [{'supplier_id': c['supplier_id'], 'code': 'OVER_LIMIT'} for c in over]
     result = {'status': 'OK',
-              'scope': {'item_key': item_key, 'searched': len({item['supplier_id'] for item in items}),
+              'scope': {'searched': len({item['supplier_id'] for item in items}),
                         'candidates': len(candidates), 'excluded': len(excluded)},
-              'rfq_facts': {'품목': case.get('item_name') or item_key, '규격': case.get('specification'),
+              'rfq_facts': {'품목': item_name, '규격': case.get('specification'),
                             '수량': f"{case['quantity']}{case.get('unit') or ''}" if case.get('quantity') else None,
                             '납기일': case.get('due_date')},
               'candidates': candidates, 'excluded': excluded,
@@ -1201,7 +1244,7 @@ def evaluate_candidates(store: CandidateStore, context: RunContext) -> dict:
               'question_options': dict(RFQ_OPTIONAL_QUESTIONS), 'default_question_options': list(RFQ_DEFAULT_OPTIONS)}
     for entry in excluded:
         entry['label'] = EXCLUDE_LABELS[entry['code']]
-    result['summary'] = search_summary(result, case.get('item_name') or item_key)
+    result['summary'] = search_summary(result, item_name)
     if not candidates:      # 초안을 만들 업체가 없다. LLM이 빈 목록으로 초안을 시도하지 않게 다음 행동을 알려준다
         result['next'] = '후보가 없다. create_rfq_draft를 부르지 말고 바로 HOLD로 최종 응답한다. reason에는 summary를 쓴다.'
     return result
@@ -1209,8 +1252,10 @@ def evaluate_candidates(store: CandidateStore, context: RunContext) -> dict:
 
 @register
 @tool
-def search_supplier_evidence(runtime: ToolRuntime[RunContext]) -> dict:
-    '''이 업무 품목을 취급하는 등록 업체 중 문의(RFQ) 대상 후보를 찾는다. 인자는 없다(업무 조건은 도구가 읽는다).
+def search_supplier_evidence(supplier_item_ids: list[str], runtime: ToolRuntime[RunContext]) -> dict:
+    '''업무 품목과 같다고 고른 등록 품목의 업체 중 문의(RFQ) 대상 후보를 판정한다.
+    supplier_item_ids: search_supplier_items 결과에서 업무 품목과 같은 품목만 고른 supplier_item_id. 같은 품목이
+      없으면 빈 목록으로 보낸다(후보 없음). 업무 조건은 도구가 읽는다.
     인상을 요청한 업체(INCUMBENT)와 필수 조건이 맞지 않는 업체(REQUIRED_FAIL)는 제외하고,
     필수 조건을 모르는 업체는 후보에 넣어 RFQ로 확인한다. 가격은 돌려주지 않는다.
 
@@ -1222,10 +1267,11 @@ def search_supplier_evidence(runtime: ToolRuntime[RunContext]) -> dict:
       increase_reasons(인상을 요청한 업체가 밝힌 인상 사유 text·ref),
       question_options(업체마다 고를 수 있는 선택 질문 {ID: 질문}), default_question_options(고르지 않을 때 묻는 ID),
       summary(구매담당자가 읽는 조회 결과 문장. HOLD면 reason에 이 문장을 쓴다)
+    - REJECTED: code UNKNOWN_ITEMS(search_supplier_items에 없던 ID)
     - CONDITIONS_MISSING: 업무 품목이 정해지지 않았다 / REVISION_CHANGED / CASE_NOT_FOUND
     메일에 들어갈 품목·수량·납기 값은 돌려주지 않는다. 메일 문안은 create_rfq_draft가 쓴다.
     '''
-    result = evaluate_candidates(_candidate_store, _run_context(_candidate_store, runtime))
+    result = evaluate_candidates(_candidate_store, _run_context(_candidate_store, runtime), supplier_item_ids)
     result.pop('rfq_facts', None)       # 메일 문안용 값. LLM이 쓸 일이 없다
     return result
 
@@ -1316,8 +1362,8 @@ def _draft_rejected(code: str) -> dict:
     return {'status': 'REJECTED', 'code': code, 'hints': {code: _DRAFT_HINTS[code]}}
 
 
-def save_mail_drafts(store: MailDraftStore, context: RunContext, purpose: str, supplier_ids: list[str],
-                     questions: list[SupplierQuestions] | None = None) -> dict:
+def save_mail_drafts(store: MailDraftStore, context: RunContext, purpose: str, supplier_item_ids: list[str],
+                     supplier_ids: list[str], questions: list[SupplierQuestions] | None = None) -> dict:
     """create_rfq_draft의 본체. 코드 템플릿으로 업체별 초안 행을 만든다.
     questions는 업체별로 고른 선택 질문이다. 없는 업체는 기본 선택 질문을 쓰고, 모르는 ID가 있으면 그 업체는 기본으로 둔다."""
     if purpose != 'RFQ':
@@ -1325,9 +1371,9 @@ def save_mail_drafts(store: MailDraftStore, context: RunContext, purpose: str, s
     supplier_ids = list(dict.fromkeys(supplier_ids))
     if not supplier_ids:
         return _draft_rejected('NO_SUPPLIERS')
-    found = evaluate_candidates(store, context)
+    found = evaluate_candidates(store, context, supplier_item_ids)
     if found['status'] != 'OK':
-        return {'status': found['status']}
+        return {key: found[key] for key in ('status', 'code', 'hint') if key in found}
     candidates = {c['supplier_id']: c for c in found['candidates']}
     excluded = {e['supplier_id']: e['code'] for e in found['excluded']}
 
@@ -1384,9 +1430,10 @@ def save_mail_drafts(store: MailDraftStore, context: RunContext, purpose: str, s
 
 @register
 @tool
-def create_rfq_draft(supplier_ids: list[str], runtime: ToolRuntime[RunContext],
+def create_rfq_draft(supplier_item_ids: list[str], supplier_ids: list[str], runtime: ToolRuntime[RunContext],
                      questions: list[SupplierQuestions] | None = None) -> dict:
     '''업체에 보낼 견적 요청(RFQ) 메일 초안을 저장한다(발송하지 않는다). 메일 문안·받는 주소는 도구가 정한다.
+    supplier_item_ids: search_supplier_evidence에 보낸 목록 그대로. 도구가 후보 판정을 다시 확인한다.
     supplier_ids: search_supplier_evidence의 candidates 중 RFQ를 보낼 업체 전부. 한 번에 보낸다.
     questions: 업체마다 고른 선택 질문 [{supplier_id, question_ids}]. question_ids는 question_options의 ID다.
       고정 질문과 미확인 필수 조건 질문은 도구가 늘 넣는다. 빠진 업체는 default_question_options로 묻는다.
@@ -1397,4 +1444,5 @@ def create_rfq_draft(supplier_ids: list[str], runtime: ToolRuntime[RunContext],
       adjusted(UNKNOWN_QUESTION: 기본 선택 질문으로 저장한 업체. 다시 보내지 않는다), hints
     - REJECTED: code(NO_SUPPLIERS) 또는 모든 업체가 rejected / REVISION_CHANGED / CASE_NOT_FOUND
     '''
-    return save_mail_drafts(_draft_store, _run_context(_draft_store, runtime), 'RFQ', supplier_ids, questions)
+    return save_mail_drafts(_draft_store, _run_context(_draft_store, runtime), 'RFQ', supplier_item_ids, supplier_ids,
+                            questions)
