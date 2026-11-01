@@ -664,7 +664,8 @@ def _carry(previous: tuple[str, QuoteVersionRecord], values: dict, tiers: list, 
             continue
         values[name] = {**entry, 'carried_from': entry.get('carried_from', previous_id)}
         carried.append(name)
-    if not tiers and previous_record.pricing_terms_jsonb.get('price_tiers') and not basis_changed:
+    # 이번 메일이 단일 단가를 줬으면 이전 단가 구간도 이어받지 않는다 (새 단가가 구간을 대신한다)
+    if not price_given and previous_record.pricing_terms_jsonb.get('price_tiers') and not basis_changed:
         tiers = previous_record.pricing_terms_jsonb['price_tiers']
         carried.append('price_tiers')
     if not costs and previous_record.cost_terms_jsonb:
