@@ -122,6 +122,12 @@ class ConditionCheck(StrictModel):
     evidence_refs: list[str] = []
 
 
+class CandidateCaution(StrictModel):
+    """② 후보 업체의 등록 비고를 읽고 담당자 확인이 필요하다고 본 이유. 후보에서 빼지 않는다(BR-15)."""
+    reason: str = Field(min_length=1, max_length=300)
+    evidence_refs: list[str] = Field(min_length=1)
+
+
 class Candidate(StrictModel):
     """② 문의 대상 후보."""
     supplier_id: str
@@ -130,6 +136,7 @@ class Candidate(StrictModel):
     preference_score: DecimalStr | None = None  # 선호 조건 가중 합 (정렬용)
     provisional: StrictBool = False             # 웹 탐색 등 잠정 근거
     evidence_refs: list[str] = []
+    caution: CandidateCaution | None = None     # 있으면 승인 OFF에서도 자동 발송하지 않고 담당자가 확인한다
 
 
 class QuestionPriority(StrEnum):
