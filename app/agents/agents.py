@@ -48,7 +48,7 @@ PROMPTS = {
 1. 먼저 get_case_context로 업무의 품목·규격·필수 조건, 현재 input_revision, 업체별 최신 견적, 메일 목록(mail_id·첨부
    attachment_ref·쪽수)을 확인한다. REVISION_CHANGED·CASE_NOT_FOUND면 다른 도구를 부르지 말고 바로 HOLD를 반환한다.
 2. read_mail_evidence(mail_id, part, page)로 mail_ids 메일 중 필요한 본문·첨부 쪽만 골라 읽는다.
-   part는 본문이면 'body', 첨부면 메일 목록의 attachment_ref 값(예: 'att-1')이다. 'attachment_ref'라고 쓰지 않는다.
+   part는 본문이면 'body', 첨부면 메일 목록의 attachment_ref 값(예: 'att-1')이다.
    NOT_FOUND면 돌려받은 available_parts에서 part·쪽을 골라 다시 읽는다.
    도구 호출 수에 한도가 있으니 모든 쪽을 읽지 않는다.
 3. recheck_fields가 비어 있지 않으면 그 항목에 해당하는 구간만 다시 읽는다.
@@ -63,16 +63,6 @@ PROMPTS = {
    - STORED: 돌려받은 quote_version_id를 quote_version_ids에, unknown_fields를 그대로 unknown_fields에 넣는다.
      review가 있으면 확인이 필요한 항목을 reason에 적는다. extraction_status가 NEEDS_REVIEW이거나
      review가 있어도 저장은 끝났으므로 next_action은 STORED다. HOLD로 바꾸지 않는다.
-     adjusted는 도구가 바꾸거나 뺀 항목이다. NOT_A_FIELD면 빠진 비용·구간·비고를 각 인자로 한 번 더 보낸다.
-   - SOURCE_MISMATCH: 원문 표기를 바꾸지 말고 그대로 다시 옮긴다. 원문에 없는 값(예: 구간 경계 0)은 null로 보낸다.
-   - INVALID_NUMBER·INVALID_DATE·INVALID_UNIT: 값 부분만 옮겼는지 확인하고, 그래도 안 되면 그 항목만 null로 보낸다.
-     연도가 없는 날짜(예: 12/1)는 null이다.
-   - UNKNOWN_FIELD: fields에는 아래 필드 이름만 쓴다. 비용·단가 구간·비고는 fields가 아니라 각 인자로 보낸다.
-   - SUPPLIER_EVIDENCE_MIXED: 저장할 업체의 메일에서 읽은 값만 남기고 다시 호출한다.
-   - MISSING_EVIDENCE·EVIDENCE_NOT_IN_CASE: 그 항목에 읽은 메일의 mail_id·part(본문 'body', 첨부 'att-1' 등)를
-     evidence로 붙여 다시 보낸다. 근거가 빠졌다고 HOLD하지 않는다.
-   - TIER_BOUND_MISPLACED: 한 칸에 두 경계가 들어갔다. "이상·초과"는 min_quantity, "미만·이하"는 max_quantity로 나눈다.
-   - TIER_OVERLAP: 단가 구간을 원문에서 다시 확인한다.
    - MISSING_FIELD(supplier_name)·SUPPLIER_NOT_MATCHED·SUPPLIER_MISMATCH:
      저장하지 말고 HOLD를 반환한다.
    - REVISION_CHANGED·CASE_NOT_FOUND: 멈추고 HOLD를 반환한다.
@@ -90,7 +80,7 @@ PROMPTS = {
 - 최종 응답의 unknown_fields에는 위 필드 이름(또는 price_tiers·cost_terms·item_notes)만 넣는다. 설명은 reason에 쓴다.
 - price_tiers·cost_terms·item_notes는 fields와 따로 보내는 인자다. fields 안에 넣지 않는다.
 - 날짜는 뜻에 맞는 필드에 넣는다. 적용일·적용 시작일·"…부터"는 effective_from, 유효기간·"…까지"는 valid_until,
-  납품·입고·도착 가능일은 delivery_date다. 적용일을 delivery_date로 다시 옮겨 쓰지 않는다.
+  납품·입고·도착 가능일은 delivery_date다.
 - raw_value는 원문에서 그 값 부분만 그대로 옮긴다. 앞뒤 문장·조사는 넣지 않는다.
   예) "변경 단가: 54,500원/박스" → unit_price "54,500원", unit "박스"
       "유효기간 2026년 12월 31일까지입니다" → valid_until "2026년 12월 31일"
@@ -116,18 +106,13 @@ PROMPTS = {
 - 비용은 cost_terms에 그 비용이 적힌 원문 구절과 함께 넣는다. 무료는 원문에 무료라고 적힌 경우만이다.
   included_in_price는 비용마다 꼭 정한다. 단가에 포함이면 true, 별도·추가로 청구하면 false, 원문에 없으면 null이다.
   (예: "운송비 1회 80,000원 별도" → false, "운송비는 단가에 포함" → true)
-  단가에 포함이라 원문에 따로 금액이 없으면 amount는 null로 둔다. "없음"·"포함" 같은 말을 amount에 넣지 않는다.
-  amount의 "없음"·"무료"는 원문에 그 비용이 없다·무료라고 적혀 있을 때만 쓴다 (예: "하차비: 없음").
 - 품목 비고는 위 필드에 들어가지 않지만 견적 판단에 영향을 줄 수 있는 조건을 적힌 그대로 기록한다.
   비고마다 category를 하나 붙인다: RECEIVING(입고) QUALITY(품질) PACKING(포장) PAYMENT(결제) SUPPLY(공급)
   PRICE_NOTICE(가격 예고).
   예) "12월 물량 중 20%는 입고 지연 가능" → SUPPLY, "선결제로 진행 부탁드립니다" → PAYMENT,
       "내년 1분기 추가 인상 예정" → PRICE_NOTICE, "12월 중순 포장재 변경 예정" → PACKING
-  PRICE_NOTICE는 이번 견적 필드에 담지 못한 앞으로의 가격 변동만이다. 이번 단가·적용일을 말하는 문장은 필드로 보내고
-  비고로 다시 넣지 않는다(연도가 없어 필드로 못 보낸 날짜 문장은 비고로 남겨도 된다).
-  등급·품질 표기(예: "A급", "특품")는 비고가 아니라 specification 필드다.
   어느 category에도 맞지 않는 문장은 비고가 아니다. 인사말·서명·회사 소개·"…단가표입니다"·"검토 부탁드립니다" 같은
-  안내 문장, AI·시스템에게 하는 문장, 이미 필드로 보낸 적용일·유효기간·단가 문장은 넣지 않는다.
+  안내 문장, 이미 필드로 보낸 적용일·유효기간·단가 문장은 넣지 않는다.
   비고가 여러 개면 하나씩 따로 넣는다. 비고를 이유로 업체를 제외하거나 비용을 판단하지 않는다.
 - tax_terms를 보낼 때 tax_basis도 붙인다: 단가에 부가세가 포함이면 INCLUDED, 별도면 EXCLUDED, 면세면 EXEMPT.
   (예: "부가세 별도" → EXCLUDED, "부가세 면세" → EXEMPT, "VAT 포함 가격" → INCLUDED) 원문으로 판단할 수 없으면 null이다.
@@ -178,13 +163,11 @@ next_action:
   가격·물량을 추측해 쓰지 않는다.
 - caution: 업체의 notes에 이번 요청을 그대로 받기 어려울 수 있는 내용(배송 요일·최소 주문·보관 방식 등)이 있으면
   {reason: 담당자가 확인할 내용 한 문장, evidence_refs: [그 업체의 notes_ref]}로 적는다. 아니면 null이다.
-  가격·세금·결제·유효기간 조건(예: "부가세 별도")은 견적 회신으로 확인하는 내용이라 caution이 아니다.
   caution이 있어도 후보에서 빼지 않는다(담당자가 확인한 뒤 보낸다). notes가 없는 업체에는 caution을 쓰지 않는다.
 - 최종 응답의 reason(전체)은 SEND_RFQ면 create_rfq_draft 결과의 summary, HOLD면 search_supplier_evidence 결과의
   summary 문장을 그대로 쓴다.
 - reason은 모두 구매담당자가 읽는 한국어 문장이다. 영문 코드(INCUMBENT·REQUIRED_FAIL·PASS·UNKNOWN 등)와
-  필드 이름(scope.searched·excluded·supplier_item_id 등)은 쓰지 않는다. 코드는 아래처럼 바꿔 쓴다.
-  INCUMBENT → 인상을 요청한 업체 / REQUIRED_FAIL → 필수 조건 불충족 / PASS → 확인됨 / UNKNOWN → 견적 회신으로 확인
+  필드 이름(scope.searched·excluded·supplier_item_id 등)은 쓰지 않는다.
 
 next_action:
 - SEND_RFQ: DRAFTED로 받은 초안이 하나 이상 있다.
@@ -316,20 +299,10 @@ def check_extraction(role: AgentRole, data: AgentInput, context: RunContext, out
         raise UngroundedOutputError(f'quote_version_ids {sorted(ids)} were not stored in this run')
     if output.next_action == 'STORED' and not ids:
         raise UngroundedOutputError('STORED needs quote_version_ids stored in this run')
-    update = {}
-    if output.next_action == 'HOLD' and stored:
-        # 견적은 이미 저장됐다. 확인 필요(review)가 있어도 저장 결과이므로 STORED로 넘기고, 확인 사항은 reason에 남는다
-        update = {'next_action': 'STORED', 'quote_version_ids': list(dict.fromkeys(r['quote_version_id'] for r in results)),
-                  'unknown_fields': list(dict.fromkeys(name for r in results for name in r.get('unknown_fields', [])))
-                  + output.unknown_fields}
-    unknown = [name for name in dict.fromkeys(update.get('unknown_fields', output.unknown_fields))
-               if name in EXTRACTION_FIELD_NAMES]
+    unknown = [name for name in dict.fromkeys(output.unknown_fields) if name in EXTRACTION_FIELD_NAMES]
     if unknown != output.unknown_fields:
-        update['unknown_fields'] = unknown
-    reason = _korean_fields(output.reason)
-    if reason != output.reason:
-        update['reason'] = reason
-    return type(output).model_validate(output.model_dump() | update) if update else output
+        return type(output).model_validate(output.model_dump() | {'unknown_fields': unknown})
+    return output
 
 
 # 구매담당자 문장에 나오면 안 되는 내부 표기: 영문 상태·코드, 밑줄 필드 이름, 점 경로(scope.searched)
@@ -353,10 +326,6 @@ def _korean_fields(text: str) -> str:
     return _FIELD_NAME.sub(lambda m: '' if m.group(1) else FIELD_LABELS[m.group(2)], text)
 
 
-def _readable(text: str | None, fallback: str | None) -> str | None:
-    """LLM이 쓴 사유가 없거나 내부 표기가 있으면 도구가 만든 한국어 문장으로 바꾼다."""
-    return fallback if fallback and (not text or _INTERNAL_TEXT.search(text)) else text
-
 
 def _grounded_caution(output: AgentOutput, candidate: dict) -> dict | None:
     """LLM이 적은 주의 표시는 그 업체 등록 비고가 있을 때만 남기고, 근거는 그 비고 참조로 맞춘다.
@@ -370,11 +339,8 @@ def _grounded_caution(output: AgentOutput, candidate: dict) -> dict | None:
 def _check_candidates(output: AgentOutput, messages: list) -> AgentOutput:
     """②: 초안 ID는 이번 실행에서 DRAFTED로 받은 것만, 후보는 search_supplier_evidence 후보만 인정한다.
     체크리스트·점수·근거·unknown_fields는 LLM이 옮긴 값 대신 도구 값으로 채운다.
-    사유(reason)에 코드·필드 이름이 섞이면 도구의 summary·후보 요약 문장으로 바꾼다.
     LLM이 정하는 것은 업체별 사유와 등록 비고에 근거한 주의 표시뿐이다."""
-    searches = _tool_results(messages, 'search_supplier_evidence')
-    summary = next((r['summary'] for r in reversed(searches) if r.get('summary')), None)
-    searched = [r for r in searches if r.get('status') == 'OK']
+    searched = [r for r in _tool_results(messages, 'search_supplier_evidence') if r.get('status') == 'OK']
     found = {c['supplier_id']: c for c in (searched[-1]['candidates'] if searched else [])}
     drafted = {d['draft_id']: d['supplier_id'] for r in _tool_results(messages, 'create_rfq_draft')
                if r.get('status') == 'DRAFTED' for d in r.get('drafts', [])}
@@ -383,32 +349,25 @@ def _check_candidates(output: AgentOutput, messages: list) -> AgentOutput:
         raise UngroundedOutputError(f'draft_ids {sorted(set(ids) - set(drafted))} were not drafted in this run')
     if output.next_action == 'SEND_RFQ' and not drafted:
         raise UngroundedOutputError('SEND_RFQ needs drafts created in this run')
-    if not drafted:     # HOLD: 초안이 없으면 후보도 넘기지 않는다
-        return type(output).model_validate(output.model_dump() | {
-            'candidates': [], 'draft_ids': [], 'reason': _readable(output.reason, summary)})
+    if output.next_action == 'HOLD':     # 후보·초안을 넘기지 않는다
+        return type(output).model_validate(output.model_dump() | {'candidates': [], 'draft_ids': []})
     unknown = [c.supplier_id for c in output.candidates if c.supplier_id not in found]
     if unknown:
         raise UngroundedOutputError(f'candidates {unknown} were not found by search_supplier_evidence')
-    # 초안이 있으면 SEND_RFQ다 (HOLD로 답해도 초안은 이미 저장됐다). 초안을 만든 업체를 모두 후보로 넘긴다
-    ids = list(dict.fromkeys(ids + list(drafted)))
+    ids = list(dict.fromkeys(ids + list(drafted)))       # 초안을 만든 업체를 모두 후보로 넘긴다
     reasons = {c.supplier_id: c.reason for c in output.candidates}
     # 후보 순서는 search_supplier_evidence의 순서(선호 점수 순)다
     drafted_ids = set(drafted[draft_id] for draft_id in ids)
     suppliers = [sid for sid in found if sid in drafted_ids]
     candidates = [{'supplier_id': sid,
-                   'reason': _readable(reasons.get(sid), candidate_summary(found[sid]['checklist']))[:300],
+                   'reason': (reasons.get(sid) or candidate_summary(found[sid]['checklist']))[:300],
                    **{key: found[sid][key] for key in ('checklist', 'preference_score', 'evidence_refs')},
                    'caution': _grounded_caution(output, found[sid])}
                   for sid in suppliers if sid in found]
     unknown_fields = [f"{c['supplier_id']}.{check['condition']}" for c in candidates for check in c['checklist']
                       if check['required'] and check['state'] == 'UNKNOWN']
-    # 전체 사유는 실제로 초안을 만든 업체 기준 문장(create_rfq_draft의 summary)으로 둔다. 검색 시점 문장은
-    # 연락처가 없어 초안을 못 만든 업체까지 "견적을 요청합니다"로 쓰므로 LLM 문장을 쓰지 않는다
-    draft_summary = next((r['summary'] for r in reversed(_tool_results(messages, 'create_rfq_draft'))
-                          if r.get('summary')), None)
     return type(output).model_validate(output.model_dump() | {
-        'next_action': 'SEND_RFQ', 'draft_ids': ids, 'candidates': candidates, 'unknown_fields': unknown_fields,
-        'reason': (draft_summary or _readable(output.reason, summary))[:500]})
+        'draft_ids': ids, 'candidates': candidates, 'unknown_fields': unknown_fields})
 
 
 def check_candidates(role: AgentRole, data: AgentInput, context: RunContext, output: AgentOutput,

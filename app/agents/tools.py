@@ -247,9 +247,6 @@ PRICE_BASIS = ('unit', 'currency', 'order_unit', 'quantity_per_order_unit')
 # 저장하는 단위. 원문 표기는 _UNIT_ALIASES·unit_name으로 바꾸고, 이 밖의 단위는 INVALID_UNIT으로 거절한다
 _UNITS = {'kg', 'g', '톤', 'box', '개', '팩', '봉', '포대'}
 _UNIT_ALIASES = {'Box': 'box', '상자': 'box', '그램': 'g', 't': '톤', 'EA': '개', 'ea': '개'}
-# 단가 줄에 적힌 단가 단위 표기 ('kg당 9,500원', '9,650원/kg', '1kg 당 단가 : 9,850 원'). '10kg/박스' 같은 규격은 아니다
-_UNIT_WORDS = '|'.join(sorted({*_UNITS, *_UNIT_ALIASES, '㎏', 'KG', 'Kg', '킬로그램', '박스', 'BOX'}, key=len, reverse=True))
-_PRICE_UNIT_MARK = re.compile(rf'원\s*/\s*({_UNIT_WORDS})|(?<![A-Za-z가-힣])({_UNIT_WORDS})\s*당')
 # 수량에 붙는 수식어 ('최소 20박스', '5박스 단위', '500kg 미만', '박스당 10kg'). 숫자를 읽을 때만 떼고,
 # 원문 대조는 붙인 채로 한다. 숫자 뒤의 단위는 pricing_terms_jsonb의 '{필드}_unit'으로 저장한다
 _QUANTITY_FIELDS = {'available_quantity', 'quantity_per_order_unit', 'moq', 'pack_multiple'}
@@ -283,12 +280,8 @@ _HINTS = {
     'SUPPLIER_NOT_MATCHED': '등록된 업체가 아니다. 저장하지 말고 HOLD한다.',
     'SUPPLIER_MISMATCH': '메일에 연결된 업체와 업체명이 다르다. 저장하지 말고 HOLD한다.',
     'SUPPLIER_EVIDENCE_MIXED': '한 업체의 메일 근거만 남기고 다시 보낸다.',
-    'TIER_BOUND_SWAPPED': '경계 표현에 맞게 min·max를 바꿔 저장했다. 다시 보내지 않는다.',
     'TAX_BASIS_NOT_TAX_TERMS': 'tax_basis는 field_name이 tax_terms인 항목에만 붙인다.',
-    'NOT_A_FIELD': '비용·단가 구간·비고는 fields가 아니라 각 인자로 보낸다. 빠진 비용이 있으면 cost_terms로 다시 보낸다.',
     'INSTRUCTION_NOT_NOTE': 'AI·시스템에게 하는 문장이라 비고에서 뺐다. 다시 보내지 않는다.',
-    'UNIT_FROM_PRICE_LINE': '단가 표기·단가가 적힌 줄의 단위로 저장했다. 다시 보내지 않는다.',
-    'PRICE_IN_TIERS': '단가 구간의 단가라 단일 단가(unit_price)로는 저장하지 않았다. 다시 보내지 않는다.',
 }
 
 
@@ -526,13 +519,9 @@ def _tiers(check, tiers: list[PriceTier], rejected: list, adjusted: list) -> lis
     for index, tier in enumerate(tiers):
         tier_values, issue = {}, None
         if _misplaced(tier.min_quantity, tier.max_quantity):
-            if _misplaced(tier.max_quantity, tier.min_quantity):
-                # 한 칸에 두 경계가 다 있으면('500kg 이상 ~ 1,000kg 미만') 서버가 나눌 수 없다
-                rejected.append({'field': f'price_tiers[{index}]', 'code': 'TIER_BOUND_MISPLACED'})
-                continue
-            # 경계 표현이 뜻을 정하므로 서로 바꾸면 맞다. 원문 표기는 그대로 남는다
-            tier = tier.model_copy(update={'min_quantity': tier.max_quantity, 'max_quantity': tier.min_quantity})
-            adjusted.append({'field': f'price_tiers[{index}]', 'code': 'TIER_BOUND_SWAPPED'})
+            # 경계 표현이 칸의 뜻과 반대다('500kg 미만'이 최솟값). 원문 표기대로 다시 나눠 보내게 한다
+            rejected.append({'field': f'price_tiers[{index}]', 'code': 'TIER_BOUND_MISPLACED'})
+            continue
         for name in ('unit_price', 'min_quantity', 'max_quantity'):
             tier_values[name], issue = _number(check, getattr(tier, name), name, tier.evidence,
                                                quantity=name != 'unit_price')
@@ -644,9 +633,6 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
     check, rejected, review, adjusted = _SourceCheck(store, case_id), [], [], []
     values, sent_null, seen, refs = {}, [], set(), {}
     for field in fields:
-        if field.field_name in ARGUMENT_FIELDS and (field.raw_value is None or not field.raw_value.strip()):
-            adjusted.append({'field': field.field_name, 'code': 'NOT_A_FIELD'})   # null이면 무시하고 나머지를 저장
-            continue
         if field.field_name not in QUOTE_FIELDS:
             rejected.append({'field': field.field_name, 'code': 'UNKNOWN_FIELD'})
             continue
@@ -679,10 +665,6 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         if field.tax_basis:             # 근거 원문과 함께 저장되고, 다음 버전으로도 이어받는다
             entry['tax_basis'] = field.tax_basis
     tiers = _tiers(check, price_tiers, rejected, adjusted)
-    if tiers and 'unit_price' in values and values['unit_price']['value'] in {tier['unit_price'] for tier in tiers}:
-        # 구간 단가 하나를 단일 단가로도 보냈다. 물량별 견적이므로 단일 단가로 저장하지 않는다
-        del values['unit_price']
-        adjusted.append({'field': 'unit_price', 'code': 'PRICE_IN_TIERS'})
     costs = _costs(check, cost_terms, rejected, review)
     notes = []
     for index, note in enumerate(item_notes):
@@ -695,14 +677,6 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         else:
             notes.append({'text': note.text, 'category': note.category, **source})
 
-    # 단위를 보내지 않았으면 단가 표기나 단가가 적힌 줄의 단가 단위('9,650원/kg', 'kg당 9,500원')를 읽는다
-    if 'unit_price' in values and 'unit' not in values:
-        if found := _price_unit(check, refs['unit_price'], values['unit_price']['raw_value']):
-            price = values['unit_price']
-            values['unit'] = {'raw_value': found[1], 'value': found[0], 'mail_id': price['mail_id'],
-                              'location': price['location']}
-            sent_null = [name for name in sent_null if name != 'unit']
-            adjusted.append({'field': 'unit', 'code': 'UNIT_FROM_PRICE_LINE'})
     # 단가에 외화가 적혀 있으면 그 통화가 견적 통화다 ('3.20 USD')
     price_currency = values.get('unit_price', {}).get('currency')
     if price_currency and 'currency' in values and values['currency']['value'] != price_currency:
@@ -790,21 +764,6 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
                         'supersedes_id': row.supersedes_id, 'extraction_status': row.extraction_status,
                         'unknown_fields': unknown, 'carried_fields': carried, 'review': review,
                         'adjusted': adjusted}, adjusted)
-
-
-def _price_unit(check, evidence: EvidenceRef, raw: str) -> tuple[str, str] | None:
-    """단가 표기, 없으면 단가가 적힌 줄에서 단가 단위를 하나만 찾으면 (단위, 원문 표기). 둘 이상이거나 없으면 None."""
-    for texts in ([raw], check.lines(evidence, raw, numeric=True)):
-        marks = [match[1] or match[2] for text in texts for match in _PRICE_UNIT_MARK.finditer(text)]
-        try:
-            units = {_unit(mark, 'unit') for mark in marks}
-        except ReviewRequired:
-            return None
-        if len(units) == 1:
-            return units.pop(), marks[0]
-        if units:
-            return None                      # 단위 표기가 여럿이면 어느 것인지 정하지 않는다
-    return None
 
 
 # 저장 값 비교에서 빼는 항목. 근거 위치·이어받은 표시·메일 정규화 값이 달라도 견적 내용은 같다
