@@ -369,7 +369,7 @@ class CostTerm(StrictModel):
     amount: str | None = None          # 원문 그대로. 무료 근거가 있으면 '무료'
     basis: str | None = None           # 산정 기준 원문 (예: 회당, 박스당)
     payer: str | None = None           # 부담 주체 원문
-    included_in_price: StrictBool | None = None  # 원문에 단가 포함·별도가 적혀 있을 때만
+    included_in_price: StrictBool | None  # 비용마다 정한다: 포함 true, 별도 청구 false, 원문에 없으면 null
     evidence: EvidenceRef
 
 
@@ -881,7 +881,8 @@ def store_structured_mail(fields: list[QuoteField], runtime: ToolRuntime[RunCont
       "이상·초과"는 min_quantity, "미만·이하"는 max_quantity다 (예: "500kg 이상 ~ 1,000kg 미만" → min "500kg 이상",
       max "1,000kg 미만"). 한 칸에 둘 다 넣으면 TIER_BOUND_MISPLACED로 거절한다.
     cost_terms: 비용 cost_type(SHIPPING/HANDLING/OTHER)·source_text(그 비용이 적힌 원문 구절)·amount·basis·payer·
-      included_in_price(원문에 단가 포함·별도가 적혀 있을 때만 true/false). "없음"·"무료"는 amount에 그대로 적는다.
+      included_in_price(비용마다 꼭 보낸다: 단가에 포함 true, 별도 청구 false, 원문에 없으면 null).
+      "없음"·"무료"는 amount에 그대로 적는다.
     item_notes: 견적 판단에 영향을 줄 수 있는 조건 원문과 분류 category(RECEIVING 입고·QUALITY 품질·PACKING 포장·
       PAYMENT 결제·SUPPLY 공급·PRICE_NOTICE 가격 예고). 어느 분류에도 맞지 않는 인사·안내 문장과 필드로 보낸
       날짜·단가 문장은 비고가 아니다.
