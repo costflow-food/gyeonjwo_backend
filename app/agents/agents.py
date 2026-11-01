@@ -203,13 +203,17 @@ next_action:
 순서:
 1. get_case_context로 업무를 확인한다. REVISION_CHANGED·CASE_NOT_FOUND면 다른 도구를 부르지 말고 바로 HOLD를 반환한다.
 2. check_comparability를 부른다(인자 없음). CONDITIONS_MISSING이면 HOLD를 반환한다.
+   결과의 next_steps에 적힌 일은 모두 한다(역전 기준 계산, 원문 확인). 도구를 부르지 않고 결과를 짐작하지 않는다.
    input의 pending_questions(다른 역할이 넘긴 미확인)도 아래 판단에 더한다.
 3. 업체마다 requirements에서 state가 CHECK인 항목은 stated(견적 값)가 required(업무 조건)를 충족하는지 판단한다.
    (예: 업무 "HACCP" · 견적 "식품안전관리인증(HACCP)" → 충족, 업무 "10kg 박스" · 견적 "5kg 박스" → 미충족)
    충족이 아니거나 판단할 수 없으면 그 field를 MUST_CONFIRM으로 묻는다.
 4. missing_required가 있으면 read_mail_evidence로 그 업체의 메일 원문을 다시 읽는다.
-   - 원문에 답이 있는데 견적에 빠졌으면 업체에 묻지 않는다. 그 field들을 unknown_fields에 넣고 RECHECK_SOURCE를 반환한다.
+   - 원문에 답이 있는데 견적에 빠졌으면 업체에 묻지 않는다. recheck에 {supplier_id, field, mail_id, source_text}를
+     넣고 RECHECK_SOURCE를 반환한다. source_text는 그 답이 적힌 원문 구절을 그대로 옮긴다(예: "월 1,000kg 공급 가능").
+     원문 구절을 옮길 수 없으면 원문에 답이 없는 것이다.
    - 원문에도 답이 없으면 그 field를 MUST_CONFIRM으로 묻는다.
+   - 재추출할 항목이 있으면 질문·초안보다 먼저 RECHECK_SOURCE로 끝낸다. 다시 추출된 뒤 이 역할이 다시 실행되어 질문을 보낸다.
 5. unknown_costs가 있는 업체는 calculate_break_even(supplier_id)을 부른다.
    - can_change_choice가 true면 그 비용 field를 CAN_CHANGE_CHOICE로 묻는다.
    - proven_low_value가 true면 묻지 않는다. 그 비용 field를 LOW_VALUE로 questions에 남긴다(묻지 않은 근거 기록).
@@ -223,7 +227,7 @@ next_action:
   reason은 담당자가 읽을 한 문장이다(무엇이 빠졌고 왜 확인이 필요한지). 금액은 쓰지 않는다(도구 결과로 채워진다).
   break_even_amount·formula는 적지 않는다(도구 결과로 채워진다).
 - draft_ids: create_clarification_draft의 drafts에 있는 draft_id.
-- unknown_fields: RECHECK_SOURCE면 다시 추출할 견적 field 이름(예: available_quantity, tax_terms).
+- recheck: RECHECK_SOURCE의 근거 [{supplier_id, field, mail_id, source_text}]. unknown_fields는 도구 결과로 채워진다.
 - reason: 담당자가 읽는 한국어 문장. 영문 코드·필드 이름은 쓰지 않는다.
 
 next_action:
@@ -418,6 +422,12 @@ def check_priority(role: AgentRole, data: AgentInput, context: RunContext, outpu
                    if r.get('status') == 'OK'}
     drafted = {d['draft_id']: d for r in _tool_results(messages, 'create_clarification_draft')
                if r.get('status') == 'DRAFTED' for d in r.get('drafts', [])}
+    if output.recheck or output.next_action == 'RECHECK_SOURCE':
+        # 재추출이 먼저다. 질문·초안은 다시 추출된 뒤 다음 실행에서 다시 정하므로 여기서는 남기지 않는다
+        unknown, recheck = _grounded_recheck(output, suppliers, messages)
+        return type(output).model_validate(output.model_dump() | {
+            'next_action': 'RECHECK_SOURCE', 'questions': [], 'draft_ids': [], 'unknown_fields': unknown,
+            'recheck': recheck, 'reason': _korean_fields(output.reason)})
     questions = []
     for question in output.questions:
         supplier = suppliers.get(question.supplier_id)
@@ -447,17 +457,39 @@ def check_priority(role: AgentRole, data: AgentInput, context: RunContext, outpu
         next_action, ids = 'REQUEST_CLARIFICATION', list(dict.fromkeys(ids + list(drafted)))
     elif next_action == 'REQUEST_CLARIFICATION':
         raise UngroundedOutputError('REQUEST_CLARIFICATION needs drafts created in this run')
-    if next_action == 'RECHECK_SOURCE':
-        unknown = [name for name in dict.fromkeys(unknown) if name in EXTRACTION_FIELD_NAMES]
-        if not unknown:
-            raise UngroundedOutputError('RECHECK_SOURCE needs extraction field names in unknown_fields')
-    else:            # 묻지 않고 남은 필수 누락은 미확인으로 기록한다
-        asked = {(q['supplier_id'], q['field']) for q in questions}
-        unknown = list(dict.fromkeys(unknown + [f"{sid}.{name}" for sid, s in suppliers.items()
-                                               for name in s['missing_required'] if (sid, name) not in asked]))
+    asked = {(q['supplier_id'], q['field']) for q in questions}     # 묻지 않고 남은 필수 누락은 미확인으로 기록한다
+    unknown = list(dict.fromkeys(unknown + [f"{sid}.{name}" for sid, s in suppliers.items()
+                                           for name in s['missing_required'] if (sid, name) not in asked]))
     return type(output).model_validate(output.model_dump() | {
         'questions': questions, 'draft_ids': ids, 'next_action': next_action, 'unknown_fields': unknown,
         'reason': _korean_fields(output.reason)})
+
+
+def _grounded_recheck(output: AgentOutput, suppliers: dict, messages: list) -> tuple[list[str], list[dict]]:
+    """재추출 근거를 확인한다: 항목이 그 업체의 누락이고, 인용한 구절이 이번 실행에서 읽은 그 업체 메일에 그대로 있어야 한다.
+    반환: (①에 넘길 추출 필드 이름, 확인된 근거). 비용 누락('cost:…')은 cost_terms로 다시 추출한다."""
+    if not output.recheck:
+        raise UngroundedOutputError('RECHECK_SOURCE needs recheck evidence quoted from the mail')
+    read = {}
+    for result in _tool_results(messages, 'read_mail_evidence'):
+        if result.get('status') == 'OK':
+            read[result['mail_id']] = read.get(result['mail_id'], '') + '\n' + result.get('text', '')
+    mail_supplier = {mail['mail_id']: mail.get('supplier_id') for result in _tool_results(messages, 'get_case_context')
+                     for mail in result.get('mails', [])}
+    fields = []
+    for item in output.recheck:
+        supplier = suppliers.get(item.supplier_id)
+        open_fields = set((supplier or {}).get('missing_required', [])) | {
+            c['field'] for c in (supplier or {}).get('unknown_costs', [])}
+        if item.field not in open_fields:
+            raise UngroundedOutputError(f'{item.supplier_id}.{item.field} is not missing in the comparison')
+        if mail_supplier.get(item.mail_id, item.supplier_id) != item.supplier_id:
+            raise UngroundedOutputError(f'{item.mail_id} is not a mail of {item.supplier_id}')
+        if re.sub(r'\s+', '', item.source_text) not in re.sub(r'\s+', '', read.get(item.mail_id, '')):
+            raise UngroundedOutputError(f'quoted text for {item.supplier_id}.{item.field} is not in the mail read')
+        fields.append('cost_terms' if item.field.startswith('cost:') else item.field)
+    return [name for name in dict.fromkeys(fields) if name in EXTRACTION_FIELD_NAMES], \
+        [item.model_dump() for item in output.recheck]
 
 
 # 역할별 최종 결과 검사: (role, data, context, output, messages) → 검사·보정한 output.

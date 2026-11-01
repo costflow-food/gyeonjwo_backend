@@ -156,6 +156,14 @@ class Question(StrictModel):
     formula: str | None = None                 # 역전 기준 산식 (화면 표시용, 최종 검사가 채운다)
 
 
+class RecheckEvidence(StrictModel):
+    """③이 ①에 재추출을 넘길 근거: 견적에 빠진 항목의 답이 적힌 원문 문장. 최종 검사가 읽은 원문과 대조한다."""
+    supplier_id: str
+    field: str = Field(min_length=1)           # check_comparability의 missing_required·unknown_costs field
+    mail_id: str
+    source_text: str = Field(min_length=1)     # 답이 적힌 원문 구절 그대로 (예: "월 1,000kg 공급 가능")
+
+
 class PlanType(StrEnum):
     KEEP = 'KEEP'      # 기존 업체 유지
     SWITCH = 'SWITCH'  # 전량 전환
@@ -288,6 +296,7 @@ class PriorityOut(AgentOutput):
     next_action: Literal[N.REQUEST_CLARIFICATION, N.BUILD_PLANS, N.RECHECK_SOURCE, N.HOLD]
     questions: list[Question] = []
     draft_ids: list[str] = []
+    recheck: list[RecheckEvidence] = []    # RECHECK_SOURCE의 근거 (원문에 답이 있는데 견적에 빠진 항목)
 
 
 class PlanOut(AgentOutput):

@@ -253,7 +253,8 @@ _PRICE_UNIT_MARK = re.compile(rf'원\s*/\s*({_UNIT_WORDS})|(?<![A-Za-z가-힣])(
 # 수량에 붙는 수식어 ('최소 20박스', '5박스 단위', '500kg 미만', '박스당 10kg'). 숫자를 읽을 때만 떼고,
 # 원문 대조는 붙인 채로 한다. 숫자 뒤의 단위는 pricing_terms_jsonb의 '{필드}_unit'으로 저장한다
 _QUANTITY_FIELDS = {'available_quantity', 'quantity_per_order_unit', 'moq', 'pack_multiple'}
-_QUANTITY_WORDS = re.compile(r'^\s*(?:최소\s*주문\s*량|최소\s*발주\s*량|MOQ|최소|최대|(?:1\s*)?[가-힣A-Za-z]+\s*당)\s*:?\s*'
+# 앞말은 여러 개가 겹칠 수 있다 ('월 최대 1,000kg'). 월·주·일은 공급 가능량의 기간 표현이다
+_QUANTITY_WORDS = re.compile(r'^\s*(?:(?:최소\s*주문\s*량|최소\s*발주\s*량|MOQ|최소|최대|(?:매\s*)?(?:월|주|일)(?:간)?|(?:1\s*)?[가-힣A-Za-z]+\s*당)\s*:?\s*)+'
                              r'|\s*(?:이상|이하|미만|초과|단위|까지|부터)\s*$')
 # 단가 구간 경계의 뜻. 최솟값에는 아래 경계 표현만, 최댓값에는 위 경계 표현만 올 수 있다
 _LOWER_BOUND_WORDS = ('이상', '초과', '부터')
@@ -1807,9 +1808,19 @@ def compare_quotes(store: ComparisonStore, context: RunContext) -> dict:
                   if mail.get('message_role') == 'INITIAL' and mail.get('supplier_id')}
     quotes = _read(lambda: store.get_quote_versions(context.case_id, case.get('latest_quote_version_ids') or []))
     suppliers = [_supplier_comparison(case, quote_id, record, incumbents) for quote_id, record in quotes]
+    # 다음 할 일: 미확인 비용은 역전 기준으로, 필수 누락·판단할 규격·인증은 원문으로 확인한다(07 ③-2·③-3)
+    break_even_needed = [s['supplier_id'] for s in suppliers if s['unknown_costs']]
+    read_source_needed = [s['supplier_id'] for s in suppliers
+                          if s['missing_required'] or any(r['state'] == 'CHECK' for r in s['requirements'])]
+    next_steps = [f'calculate_break_even을 부른다: {", ".join(break_even_needed)} (미확인 비용)'] if break_even_needed else []
+    next_steps += [f'read_mail_evidence로 원문을 확인한다: {", ".join(read_source_needed)} (필수 누락·판단할 조건)']         if read_source_needed else []
+    next_steps += ['원문에 답이 있는 누락은 recheck에 원문 구절을 인용해 RECHECK_SOURCE로 넘긴다(업체에 묻지 않는다)',
+                   '업체에 물을 질문이 있으면 create_clarification_draft를 한 번 부르고 REQUEST_CLARIFICATION으로 끝낸다'] \
+        if break_even_needed or read_source_needed else []
     return {'status': 'OK', 'quantity': str(case['quantity']), 'unit': case['unit'], 'suppliers': suppliers,
             'comparable_count': sum(1 for s in suppliers if s['known_total'] is not None and s['tax_basis']),
-            'tax_bases': sorted({s['tax_basis'] for s in suppliers if s['tax_basis']})}
+            'tax_bases': sorted({s['tax_basis'] for s in suppliers if s['tax_basis']}),
+            'break_even_needed': break_even_needed, 'read_source_needed': read_source_needed, 'next_steps': next_steps}
 
 
 @register
@@ -1821,7 +1832,8 @@ def check_comparability(runtime: ToolRuntime[RunContext]) -> dict:
     - OK: suppliers(업체별 supplier_id·quote_version_id·is_incumbent(인상을 요청한 업체)·known_total(확인된 금액만 더한
       총액, 계산 불가면 null)·blocked(총액을 막는 사유)·unknown_costs(금액을 모르는 비용 field·cost_type·code)·
       missing_required(견적에 없는 필수 항목 field)·requirements(견적에 적힌 규격·인증과 업무 조건. state MET이면 충족,
-      CHECK이면 원문을 보고 충족 여부를 판단한다)·tax_basis·warnings), comparable_count, tax_bases
+      CHECK이면 원문을 보고 충족 여부를 판단한다)·tax_basis·warnings), comparable_count, tax_bases,
+      break_even_needed·read_source_needed·next_steps(이어서 할 일: 미확인 비용은 역전 기준, 필수 누락은 원문 확인)
     - CONDITIONS_MISSING(업무 수량·단위 없음) / REVISION_CHANGED / CASE_NOT_FOUND
     '''
     return compare_quotes(_priority_store, _run_context(_priority_store, runtime))
