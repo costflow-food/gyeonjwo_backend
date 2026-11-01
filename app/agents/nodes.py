@@ -1,11 +1,15 @@
 """에이전트가 아닌 그래프 노드 (07 2·4절). 결정 가능한 검증은 Python·룰로 하고 LLM 검증 에이전트로 부르지 않는다.
 
 각 노드는 CaseState를 받아 바꿀 필드만 dict로 돌려준다. graph.build_graph(nodes=Nodes(...))로 교체·주입한다.
-계산은 app.features.review.domain.calculations, 숫자·단위·원문 검증은 app.features.review.domain.validation,
+구매안·가격 검증은 app.agents.tools의 공통 계산(plan_total 등)을 에이전트 도구와 함께 쓴다(같은 숫자가 나온다).
 문서 읽기는 app.features.review.infrastructure.documents를 재사용한다.
 """
+import json
 from dataclasses import dataclass
 from typing import Callable
+
+from app.agents import tools
+from app.agents.schemas import PlanCheck
 
 
 def preprocess(state) -> dict:
@@ -14,10 +18,17 @@ def preprocess(state) -> dict:
 
 
 def plan_validation(state) -> dict:
-    """④ 구매안의 총액·공급량·규격·납기·MOQ·분산 정책 검증.
-    반환: {'plan_check': PlanCheck, 'plan_check_reason': str | None, 'plans': 검증된 안 (PASS일 때),
+    """④ 구매안을 최신 견적으로 다시 계산해 총액·공급량·MOQ·발주 배수·분산 정책·세금 기준을 검증한다.
+    반환: {'plan_check': PlanCheck, 'plan_check_reason': 위반 목록 JSON (FIX·NEED_INFO일 때),
            'pending_questions': ③에 넘길 미확인 (NEED_INFO일 때)}"""
-    raise NotImplementedError
+    plans = [plan.model_dump(mode='json') if hasattr(plan, 'model_dump') else plan for plan in state.get('plans', [])]
+    result = tools.revalidate_plans(tools._priority_store, state['case_id'], plans)
+    check = PlanCheck(result['check'])
+    reason = json.dumps(result['violations'], ensure_ascii=False) if result['violations'] else None
+    update = {'plan_check': check, 'plan_check_reason': reason}
+    if check == PlanCheck.NEED_INFO:
+        update['pending_questions'] = ['구매안의 견적이 최신이 아니다. 최신 견적으로 다시 확인한다.']
+    return update
 
 
 def price_validation(state) -> dict:

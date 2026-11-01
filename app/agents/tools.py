@@ -1919,3 +1919,217 @@ def create_clarification_draft(requests: list[ClarificationRequest], runtime: To
     - REJECTED: 모든 업체가 rejected / CONDITIONS_MISSING / REVISION_CHANGED / CASE_NOT_FOUND
     '''
     return save_clarification_drafts(_priority_store, _run_context(_priority_store, runtime), requests)
+
+
+
+# ─────────────────────────────────────────────
+# ④ RESPONSE_PLAN: build_plan_candidates, validate_purchase_plan (+ 구매안 검증 노드의 revalidate_plans)
+#   설계: docs/AGENT4_PLAN_DESIGN.md. 확인된 업체로 유지(KEEP)·전환(SWITCH)·최대 2곳 분산(SPLIT) 안을 코드가 만들고 검증한다.
+#   필수 조건 미충족·불명확, 미확인 비용, 필수 누락이 남은 업체는 뺀다. 기존 업체만 예외로 유지안을 남기고 그 사유를
+#   성립 조건으로 단다(CONDITIONAL). 규격·인증 중 판단이 필요한 항목(CHECK)은 LLM이 충족이라고 넘긴 것만 충족이다.
+# ─────────────────────────────────────────────
+
+MAX_PLAN_OPTIONS = 3                 # build_plan_candidates가 돌려주는 전환·분산안 수 (각각 총액이 낮은 순)
+
+
+class MetRequirement(StrictModel):
+    supplier_id: str
+    requirement: str                   # check_comparability requirements의 requirement (예: '규격', 'HACCP')
+
+
+class PlanAllocationInput(StrictModel):
+    supplier_id: str
+    quantity: str | None = None        # 업무 단위 배정량. KEEP·SWITCH와 mode=cheapest면 비워도 된다
+
+
+def _won(amount: Decimal | None) -> str | None:
+    return _amount_text(amount) if amount is not None else None
+
+
+def _plan_suppliers(store: ComparisonStore, context: RunContext, met: list[MetRequirement]) -> tuple[dict | None, dict]:
+    """업체별 구매안 자격. 반환: (업무, {supplier_id: {quote_id, record, is_incumbent, eligible, reasons, conditions}})
+    또는 (None, 멈출 결과)."""
+    compared = compare_quotes(store, context)
+    if compared['status'] != 'OK':
+        return None, compared
+    case = _read(lambda: store.get_work_case(context.case_id))
+    records = dict(_read(lambda: store.get_quote_versions(context.case_id, case.get('latest_quote_version_ids') or [])))
+    accepted = {(m.supplier_id, m.requirement) for m in met}
+    suppliers = {}
+    for item in compared['suppliers']:
+        sid = item['supplier_id']
+        unclear = [r['requirement'] for r in item['requirements']
+                   if r['state'] == 'CHECK' and (sid, r['requirement']) not in accepted]
+        reasons = ([f"총액 계산 불가({', '.join(item['blocked'])})"] if item['blocked'] else []) + \
+            (['세금 기준 미확인'] if item['tax_basis'] is None else []) + \
+            ([f"필수 항목 누락({', '.join(item['missing_required'])})"] if item['missing_required'] else []) + \
+            ([f"필수 조건 미충족·불명확({', '.join(unclear)})"] if unclear else []) + \
+            ([f"미확인 비용({', '.join(COST_LABELS.get(c['cost_type'], c['cost_type']) for c in item['unknown_costs'])})"]
+             if item['unknown_costs'] else [])
+        # 기존 업체는 총액을 낼 수 있으면 유지안을 남기고 사유를 성립 조건으로 단다(비교 기준·⑤에 필요)
+        incumbent_kept = item['is_incumbent'] and not item['blocked']
+        suppliers[sid] = {'quote_id': item['quote_version_id'], 'record': records[item['quote_version_id']],
+                          'is_incumbent': item['is_incumbent'], 'eligible': not reasons or incumbent_kept,
+                          'reasons': reasons, 'conditions': reasons if incumbent_kept else []}
+    return case, suppliers
+
+
+def _evaluate_plan(case: dict, suppliers: dict, plan_type: str, parts: list[tuple[str, Decimal]]) -> dict:
+    """업체별 배정량 parts로 안 하나를 계산·검증한다. status: VALID / CONDITIONAL / INVALID."""
+    total = plan_total([(suppliers[sid]['quote_id'], suppliers[sid]['record'], quantity) for sid, quantity in parts],
+                       case['quantity'], case['unit'], case.get('policy') or {})
+    # 업체 하나가 전량을 맡는 안은 안 안에서 세금 기준을 맞출 상대가 없다
+    violations = [v for v in total['violations'] if not (len(parts) == 1 and v['code'] == 'TAX_BASIS_UNKNOWN')]
+    violations += [{'code': 'NOT_ELIGIBLE', 'supplier_id': sid, 'reasons': suppliers[sid]['reasons']}
+                   for sid, _ in parts if not suppliers[sid]['eligible']]
+    conditions = [f"{sid}: {reason}" for sid, _ in parts for reason in suppliers[sid]['conditions']]
+    status = 'INVALID' if violations or total['known_total'] is None else 'CONDITIONAL' if conditions else 'VALID'
+    return {'status': status, 'plan_type': plan_type, 'total_amount': _won(total['known_total']),
+            'allocations': [{'supplier_id': sid, 'quote_version_id': suppliers[sid]['quote_id'],
+                             'quantity': _amount_text(quantity)} for sid, quantity in parts],
+            'conditions': conditions, 'violations': violations,
+            'tax_basis': sorted({sheet.tax_basis or '미확인' for sheet in total['sheets']})}
+
+
+def plan_candidates(store: ComparisonStore, context: RunContext, met: list[MetRequirement]) -> dict:
+    """build_plan_candidates의 본체. 유지안, 전환안·분산안(각각 총액이 낮은 MAX_PLAN_OPTIONS개)과 만들지 못한 이유."""
+    case, suppliers = _plan_suppliers(store, context, met)
+    if case is None:
+        return suppliers
+    quantity, policy = _amount(case['quantity']), case.get('policy') or {}
+    eligible = [sid for sid, s in suppliers.items() if s['eligible']]
+    incumbents = [sid for sid in eligible if suppliers[sid]['is_incumbent']]
+    keep = [_evaluate_plan(case, suppliers, 'KEEP', [(sid, quantity)]) for sid in incumbents]
+    switches = [_evaluate_plan(case, suppliers, 'SWITCH', [(sid, quantity)])
+                for sid in eligible if not suppliers[sid]['is_incumbent']]
+    splits, pairs, not_split = [], 0, []
+    if policy.get('allow_split') is not False and int(policy.get('max_suppliers') or 2) >= 2:
+        for index, first in enumerate(eligible):
+            for second in eligible[index + 1:]:
+                pairs += 1
+                found = cheapest_split((suppliers[first]['quote_id'], suppliers[first]['record']),
+                                       (suppliers[second]['quote_id'], suppliers[second]['record']), quantity, case['unit'])
+                if found['status'] != 'FOUND':
+                    not_split.append({'supplier_ids': [first, second], 'code': found['status']})
+                    continue
+                splits.append(_evaluate_plan(case, suppliers, 'SPLIT', [(first, found['quantities'][0]),
+                                                                        (second, found['quantities'][1])]))
+    by_total = lambda plan: (plan['status'] == 'INVALID', Decimal(plan['total_amount'] or 'Infinity'))
+    infeasible = [{'plan_type': p['plan_type'], 'supplier_ids': [a['supplier_id'] for a in p['allocations']],
+                   'violations': [v['code'] for v in p['violations']]} for p in switches + splits if p['status'] == 'INVALID']
+    return {'status': 'OK', 'quantity': _amount_text(quantity), 'unit': case['unit'],
+            'eligible': [{'supplier_id': sid, 'is_incumbent': suppliers[sid]['is_incumbent'],
+                          'order_limits': {k: _won(v) for k, v in order_limits(suppliers[sid]['record'], case['unit']).items()},
+                          'conditions': suppliers[sid]['conditions']} for sid in eligible],
+            'excluded': [{'supplier_id': sid, 'reasons': s['reasons']} for sid, s in suppliers.items() if not s['eligible']],
+            'plans': keep + [p for p in sorted(switches, key=by_total) if p['status'] != 'INVALID'][:MAX_PLAN_OPTIONS]
+            + [p for p in sorted(splits, key=by_total) if p['status'] != 'INVALID'][:MAX_PLAN_OPTIONS],
+            'infeasible': infeasible + not_split,
+            'search_scope': {'suppliers': len(eligible), 'split_pairs': pairs,
+                             'split_allowed': policy.get('allow_split') is not False}}
+
+
+@register
+@tool
+def build_plan_candidates(runtime: ToolRuntime[RunContext], met_requirements: list[MetRequirement] | None = None) -> dict:
+    '''업무의 최신 견적으로 구매안 후보를 만든다: 기존 업체 유지(KEEP), 전량 전환(SWITCH), 2곳 분산(SPLIT, 조건 안에서 가장 싼 배분).
+    met_requirements: check_comparability의 requirements 중 state가 CHECK인 항목에서, 원문을 보고 충족이라고 판단한 것
+      [{supplier_id, requirement}]. 넣지 않은 CHECK 항목은 불명확으로 보고 그 업체를 뺀다.
+    필수 조건 미충족·불명확, 필수 누락, 미확인 비용이 남은 업체는 뺀다(excluded). 기존 업체는 예외로 유지안을 남기고
+    그 사유를 conditions에 단다.
+
+    반환 status:
+    - OK: plans(plan_type·allocations(supplier_id·quote_version_id·quantity)·total_amount·status(VALID·CONDITIONAL)·
+      conditions·tax_basis), eligible(order_limits: moq·multiple·max), excluded(reasons), infeasible(만들지 못한 안과 이유),
+      search_scope(살펴본 업체·분산 조합 수)
+    - CONDITIONS_MISSING / REVISION_CHANGED / CASE_NOT_FOUND
+    '''
+    return plan_candidates(_priority_store, _run_context(_priority_store, runtime), met_requirements or [])
+
+
+def validate_plan(store: ComparisonStore, context: RunContext, plan_type: str, allocations: list[PlanAllocationInput],
+                  mode: str, met: list[MetRequirement]) -> dict:
+    """validate_purchase_plan의 본체. 분산안은 mode=quantities면 가장 가까운 가능한 배분으로 맞추고(조정 내역을 남긴다),
+    mode=cheapest면 조건 안에서 가장 싼 배분을 찾는다."""
+    case, suppliers = _plan_suppliers(store, context, met)
+    if case is None:
+        return suppliers
+    ids = [a.supplier_id for a in allocations]
+    unknown = [sid for sid in ids if sid not in suppliers]
+    if unknown:
+        return {'status': 'REJECTED', 'code': 'NOT_IN_COMPARISON', 'supplier_ids': unknown}
+    shape = {'KEEP': len(ids) == 1 and suppliers[ids[0]]['is_incumbent'],
+             'SWITCH': len(ids) == 1 and not suppliers[ids[0]]['is_incumbent'],
+             'SPLIT': len(set(ids)) == 2 and len(ids) == 2}
+    if not shape.get(plan_type):
+        return {'status': 'REJECTED', 'code': 'PLAN_SHAPE',
+                'hint': 'KEEP은 기존 업체 하나, SWITCH는 다른 업체 하나, SPLIT은 서로 다른 업체 둘이다.'}
+    quantity, adjustments = _amount(case['quantity']), []
+    if plan_type != 'SPLIT':
+        parts = [(ids[0], quantity)]
+    else:
+        first, second = ((suppliers[sid]['quote_id'], suppliers[sid]['record']) for sid in ids)
+        if mode == 'cheapest':
+            found = cheapest_split(first, second, quantity, case['unit'])
+            split = found['quantities'] if found['status'] == 'FOUND' else None
+        else:
+            wanted = _amount(allocations[0].quantity)
+            if wanted is None:
+                return {'status': 'REJECTED', 'code': 'QUANTITY_MISSING', 'hint': 'mode=quantities면 첫 업체 배정량을 넣는다.'}
+            found = adjust_split(first, second, wanted, quantity, case['unit'])
+            split = found['quantities']
+            if found['status'] == 'ADJUSTED':
+                adjustments.append(f"제안 {ids[0]} {_amount_text(wanted)}·{ids[1]} {_amount_text(quantity - wanted)} → "
+                                   f"조정 {ids[0]} {_amount_text(split[0])}·{ids[1]} {_amount_text(split[1])} "
+                                   f"(MOQ·발주 배수·공급량)")
+        if split is None:
+            return {'status': 'INVALID', 'plan_type': plan_type, 'violations': [{'code': found['status'], 'supplier_id': None}],
+                    'hint': '이 두 업체로는 조건(MOQ·발주 배수·공급량)을 만족하는 배분이 없다. 다른 조합을 고르거나 이 안을 뺀다.'}
+        parts = [(ids[0], split[0]), (ids[1], split[1])]
+    result = _evaluate_plan(case, suppliers, plan_type, parts)
+    return result | {'adjustments': adjustments}
+
+
+@register
+@tool
+def validate_purchase_plan(plan_type: Literal['KEEP', 'SWITCH', 'SPLIT'], allocations: list[PlanAllocationInput],
+                           runtime: ToolRuntime[RunContext], mode: Literal['quantities', 'cheapest'] = 'cheapest',
+                           met_requirements: list[MetRequirement] | None = None) -> dict:
+    '''구매안 하나를 계산·검증한다. 담당자에게 보일 안은 모두 이 도구로 확인한다.
+    plan_type: KEEP(기존 업체 전량) / SWITCH(다른 업체 하나 전량) / SPLIT(서로 다른 업체 둘)
+    allocations: [{supplier_id, quantity}]. KEEP·SWITCH는 quantity를 비운다(업무 수량 전부).
+    mode(SPLIT만): cheapest면 조건 안에서 가장 싼 배분을 찾는다. quantities면 첫 업체 quantity를 비용 외 이유로 정한 값으로
+      넣는다(예: 처음 거래하는 업체 비중 제한). 도구가 MOQ·발주 배수·공급량에 맞는 가장 가까운 배분으로 맞추고 adjustments에 남긴다.
+    met_requirements: build_plan_candidates에 넣은 것과 같은 목록.
+
+    반환: status VALID·CONDITIONAL(기존 업체의 미확인이 남음, conditions)·INVALID(violations), plan_type, allocations
+      (supplier_id·quote_version_id·quantity), total_amount, conditions, adjustments / REJECTED(code·hint)
+    '''
+    return validate_plan(_priority_store, _run_context(_priority_store, runtime), plan_type, allocations, mode,
+                         met_requirements or [])
+
+
+def revalidate_plans(store: ComparisonStore, case_id: str, plans: list[dict]) -> dict:
+    """구매안 검증 노드: 안마다 최신 견적으로 총액·위반을 다시 계산한다(07 "코드 계산·조건 검증").
+    반환: {check: PASS·FIX·NEED_INFO, violations: [{plan, code, supplier_id, expected, actual}]}
+    견적이 최신이 아니면 NEED_INFO(③부터 다시), 위반·총액 차이가 있으면 FIX(④가 고친다)."""
+    case = _read(lambda: store.get_work_case(case_id))
+    latest = set(case.get('latest_quote_version_ids') or [])
+    records = dict(_read(lambda: store.get_quote_versions(case_id, sorted(latest))))
+    violations, need_info = [], False
+    for index, plan in enumerate(plans):
+        allocations = plan['allocations']
+        if any(a['quote_version_id'] not in latest for a in allocations):
+            need_info = True
+            violations.append({'plan': index, 'code': 'QUOTE_NOT_LATEST', 'supplier_id': None})
+            continue
+        total = plan_total([(a['quote_version_id'], records[a['quote_version_id']], _amount(a['quantity']))
+                            for a in allocations], case['quantity'], case['unit'], case.get('policy') or {})
+        single = len(allocations) == 1
+        violations += [{'plan': index, **v} for v in total['violations']
+                       if not (single and v['code'] == 'TAX_BASIS_UNKNOWN')]
+        expected = _won(total['known_total'])
+        if expected != (_amount_text(_amount(plan.get('total_amount'))) if plan.get('total_amount') else None):
+            violations.append({'plan': index, 'code': 'TOTAL_MISMATCH', 'supplier_id': None,
+                               'expected': expected, 'actual': plan.get('total_amount')})
+    return {'check': 'NEED_INFO' if need_info else 'FIX' if violations else 'PASS', 'violations': violations}

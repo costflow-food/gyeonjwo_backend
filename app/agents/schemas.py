@@ -177,12 +177,14 @@ class Allocation(StrictModel):
 
 
 class Plan(StrictModel):
-    """④ 구매안. 총액·검증은 도구 결과를 옮겨 적는다."""
+    """④ 구매안. 배정량·총액·검증 결과는 최종 검사가 validate_purchase_plan 결과로 채운다."""
     plan_type: PlanType
     allocations: list[Allocation] = Field(min_length=1, max_length=2)
     total_amount: DecimalStr | None = None     # validate_purchase_plan 결과
-    calculation_ref: str | None = None         # 도구 결과 ID
-    conditions: list[str] = []                 # 성립 조건 (예: B 공급량 600개 확인 시)
+    validation_status: Literal['VALID', 'CONDITIONAL'] = 'VALID'   # CONDITIONAL: 기존 업체의 미확인이 남은 유지안 등
+    conditions: list[str] = []                 # 성립 조건 (예: 기존 업체 운송비 미확인)
+    adjustments: list[str] = []                # 배정량 조정 내역 (예: 제안 A 610·B 390 → A 600·B 400, B 발주 배수 50)
+    reason: str | None = Field(default=None, max_length=300)   # 이 안을 보여 주는 이유 (담당자가 읽는 한 문장)
 
     @model_validator(mode='after')
     def allocation_count(self):
@@ -301,7 +303,8 @@ class PriorityOut(AgentOutput):
 
 class PlanOut(AgentOutput):
     next_action: Literal[N.PLANS_PROPOSED, N.NEEDS_EVIDENCE, N.RECHECK_SOURCE, N.HOLD]
-    plans: list[Plan] = []
+    plans: list[Plan] = Field(default=[], max_length=5)
+    recheck: list[RecheckEvidence] = []    # RECHECK_SOURCE의 근거 (③과 같은 규칙)
 
 
 class CounterOfferOut(AgentOutput):
