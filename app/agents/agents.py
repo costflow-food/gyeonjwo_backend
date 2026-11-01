@@ -366,8 +366,13 @@ def _check_candidates(output: AgentOutput, messages: list) -> AgentOutput:
                   for sid in suppliers if sid in found]
     unknown_fields = [f"{c['supplier_id']}.{check['condition']}" for c in candidates for check in c['checklist']
                       if check['required'] and check['state'] == 'UNKNOWN']
+    # 전체 사유는 코드가 실제로 초안을 만든 업체 기준으로 쓴 문장(create_rfq_draft의 summary)이다.
+    # LLM이 옮겨 쓰면 업체 수를 틀린다(2026-11-02 실험: 2곳을 확인하고 "1곳을 확인했습니다")
+    draft_summary = next((r['summary'] for r in reversed(_tool_results(messages, 'create_rfq_draft'))
+                          if r.get('summary')), None)
     return type(output).model_validate(output.model_dump() | {
-        'draft_ids': ids, 'candidates': candidates, 'unknown_fields': unknown_fields})
+        'draft_ids': ids, 'candidates': candidates, 'unknown_fields': unknown_fields,
+        'reason': (draft_summary or output.reason)[:500]})
 
 
 def check_candidates(role: AgentRole, data: AgentInput, context: RunContext, output: AgentOutput,
