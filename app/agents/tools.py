@@ -338,6 +338,7 @@ _HINTS = {
     'SUPPLIER_EVIDENCE_MIXED': '한 업체의 메일 근거만 남기고 다시 보낸다.',
     'TIER_BOUND_SWAPPED': '경계 표현에 맞게 min·max를 바꿔 저장했다. 다시 보내지 않는다.',
     'NOT_A_FIELD': '비용·단가 구간·비고는 fields가 아니라 각 인자로 보낸다. 빠진 비용이 있으면 cost_terms로 다시 보낸다.',
+    'INSTRUCTION_NOT_NOTE': 'AI·시스템에게 하는 문장이라 비고에서 뺐다. 다시 보내지 않는다.',
     'UNIT_FROM_PRICE_LINE': '단가 표기·단가가 적힌 줄의 단위로 저장했다. 다시 보내지 않는다.',
     'PRICE_IN_TIERS': '단가 구간의 단가라 단일 단가(unit_price)로는 저장하지 않았다. 다시 보내지 않는다.',
 }
@@ -733,6 +734,9 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         issue, source = check(note.evidence, note.text)
         if issue:
             rejected.append({'field': f'item_notes[{index}]', 'code': issue})
+        elif note.evidence.mail_id in check.instruction_mails and _INSTRUCTION.search(note.text):
+            # 보안 예외: 지시문이 있는 메일에서 지시문 문장 자체는 비고로 저장하지 않는다(③④⑤에 전달되지 않게)
+            adjusted.append({'field': f'item_notes[{index}]', 'code': 'INSTRUCTION_NOT_NOTE'})
         else:
             notes.append({'text': note.text, 'category': note.category, **source})
 
