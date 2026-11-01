@@ -116,7 +116,8 @@ class CaseStore(Protocol):
 
     def list_case_mails(self, case_id: str) -> list[dict]:
         """업무에 연결된 mail_messages의 {mail_id, message_role, direction, supplier_id, received_at, subject,
-        attachments: [{attachment_ref, filename, pages}]}. 본문은 넣지 않는다."""
+        attachments: [{attachment_ref, filename, pages, status}]}. 본문은 넣지 않는다.
+        status는 전처리 노드가 읽은 결과(READ·NO_TEXT·UNSUPPORTED 등, nodes.read_document)다."""
 
     def read_mail_part(self, case_id: str, mail_id: str, part: str, page: int | None) -> dict | None:
         """업무에 속한 메일의 본문(part='body') 또는 첨부(part=attachment_ref) 한 쪽의 {text, location}.

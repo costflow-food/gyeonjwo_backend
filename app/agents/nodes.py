@@ -2,13 +2,16 @@
 
 각 노드는 CaseState를 받아 바꿀 필드만 dict로 돌려준다. graph.build_graph(nodes=Nodes(...))로 교체·주입한다.
 구매안·가격 검증은 app.agents.tools의 공통 계산(plan_total 등)을 에이전트 도구와 함께 쓴다(같은 숫자가 나온다).
-문서 읽기는 app.features.review.infrastructure.documents를 재사용한다.
+문서 읽기는 app.features.review.infrastructure.documents를 재사용한다(텍스트 PDF·텍스트·HTML·xlsx, OCR은 하지 않는다).
 """
+import io
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Protocol
 
 from app.agents import tools
+from app.features.review.infrastructure import documents
 from app.agents.schemas import CounterOfferSummary, PlanCheck, PriceCheck, ReviewCard
 
 
@@ -28,9 +31,108 @@ def use_card_store(store: ReviewCardStore | None) -> None:
     _card_store = store
 
 
+class DocumentStore(Protocol):
+    """전처리 노드의 저장소. 첨부 본체는 메일 제공자(Gmail)에서 받고, 읽은 결과는 mail_messages.normalized_jsonb에 둔다."""
+
+    def list_unread_attachments(self, case_id: str, mail_ids: list[str]) -> list[dict]:
+        """업무에 속한 메일 중 아직 읽은 결과가 없는 첨부 {mail_id, attachment_ref, filename, content_type, size_bytes}."""
+
+    def download_attachment(self, case_id: str, mail_id: str, attachment_ref: str) -> bytes | None:
+        """첨부 본체. 소유·업무 범위를 확인하고 받지 못하면 None."""
+
+    def save_document(self, case_id: str, mail_id: str, attachment_ref: str, document: dict) -> None:
+        """첨부를 읽은 결과 {status, pages}를 normalized_jsonb.documents[attachment_ref]에 저장한다.
+        read_mail_part가 이 pages를 쪽 단위로 돌려준다."""
+
+
+_document_store: DocumentStore | None = None
+
+
+def use_document_store(store: DocumentStore | None) -> None:
+    global _document_store
+    _document_store = store
+
+
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+MAX_SHEET_ROWS, MAX_SHEET_COLUMNS = 2000, 50
+XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+_EXTENSION_TYPES = {'.pdf': 'application/pdf', '.txt': 'text/plain', '.csv': 'text/csv', '.html': 'text/html',
+                    '.htm': 'text/html', '.xlsx': XLSX}
+# 읽지 못한 첨부를 담당자에게 알리는 문장 (status → 사유)
+DOCUMENT_ISSUES = {'NO_TEXT': '글자가 없는 PDF(스캔본)라 읽지 못했습니다', 'UNSUPPORTED': '지원하지 않는 첨부 형식입니다',
+                   'TOO_LARGE': '첨부가 너무 커서 읽지 않았습니다', 'FAILED': '첨부를 읽는 중 오류가 났습니다',
+                   'DOWNLOAD_FAILED': '첨부를 받아오지 못했습니다'}
+
+
+def _decode(content: bytes) -> str:
+    """텍스트 첨부를 UTF-8(BOM 포함), 안 되면 CP949로 읽는다."""
+    try:
+        return content.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        return content.decode('cp949')
+
+
+def _sheet_pages(content: bytes) -> list[str]:
+    """xlsx를 시트마다 한 쪽으로 읽는다. 값이 있는 셀만 'B3: 5500'처럼 셀 위치와 함께 행 단위로 적는다."""
+    from openpyxl import load_workbook
+    book = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    pages = []
+    for sheet in book.worksheets:
+        lines = [f'[{sheet.title}]']
+        for row in sheet.iter_rows(max_row=MAX_SHEET_ROWS, max_col=MAX_SHEET_COLUMNS):
+            cells = [f'{cell.coordinate}: {cell.value.isoformat() if hasattr(cell.value, "isoformat") else cell.value}'
+                     for cell in row if cell.value is not None and str(cell.value).strip() != ''
+                     and hasattr(cell, 'coordinate')]
+            if cells:
+                lines.append(' | '.join(cells))
+        pages.append('\n'.join(lines))
+    book.close()
+    return pages
+
+
+def read_document(filename: str, content_type: str | None, content: bytes) -> dict:
+    """첨부 하나를 쪽 단위 텍스트로 읽는다. 반환: {status: READ·NO_TEXT·UNSUPPORTED·TOO_LARGE·FAILED, pages}.
+    PDF는 쪽마다, xlsx는 시트마다 한 쪽이다. 글자가 없는 PDF(스캔본)는 OCR하지 않고 NO_TEXT로 둔다."""
+    kind = (content_type or '').split(';')[0].strip().lower()
+    if kind not in _EXTENSION_TYPES.values():
+        kind = _EXTENSION_TYPES.get(Path(filename or '').suffix.lower(), kind)
+    if len(content) > MAX_ATTACHMENT_BYTES:
+        return {'status': 'TOO_LARGE', 'pages': []}
+    try:
+        if kind == 'application/pdf':
+            pages = documents.read_pdf_pages(content)
+            return {'status': 'READ', 'pages': pages} if pages else {'status': 'NO_TEXT', 'pages': []}
+        if kind in ('text/plain', 'text/csv'):
+            return {'status': 'READ', 'pages': [_decode(content)]}
+        if kind == 'text/html':
+            parser = documents.HtmlText()
+            parser.feed(_decode(content))
+            return {'status': 'READ', 'pages': [''.join(parser.parts)]}
+        if kind == XLSX:
+            return {'status': 'READ', 'pages': _sheet_pages(content)}
+    except Exception:
+        return {'status': 'FAILED', 'pages': []}
+    return {'status': 'UNSUPPORTED', 'pages': []}
+
+
 def preprocess(state) -> dict:
-    """본문·PDF·스캔 OCR·표·Excel → 텍스트·페이지/셀 위치. 청킹은 내부 처리. 반환 예: {} (결과는 DB에 저장)."""
-    raise NotImplementedError
+    """이번 실행의 메일(state['mail_ids']) 첨부 중 아직 읽지 않은 것을 쪽 단위 텍스트로 읽어 저장한다.
+    ①은 read_mail_evidence로 그 쪽을 읽는다. 첨부 하나를 읽지 못해도 실행은 계속하고 사유를 unresolved에 남긴다.
+    받아오지 못한 첨부는 저장하지 않아 다음 실행에서 다시 시도한다.
+    반환: {'unresolved': ['<mail_id> <파일명>: 사유', ...]} (모두 읽었으면 {})"""
+    if _document_store is None:
+        raise RuntimeError('document store is not configured')
+    issues = []
+    for item in _document_store.list_unread_attachments(state['case_id'], state.get('mail_ids', [])):
+        content = _document_store.download_attachment(state['case_id'], item['mail_id'], item['attachment_ref'])
+        if content is None:
+            issues.append(f"{item['mail_id']} {item['filename']}: {DOCUMENT_ISSUES['DOWNLOAD_FAILED']}")
+            continue
+        document = read_document(item['filename'], item.get('content_type'), content)
+        _document_store.save_document(state['case_id'], item['mail_id'], item['attachment_ref'], document)
+        if document['status'] != 'READ':
+            issues.append(f"{item['mail_id']} {item['filename']}: {DOCUMENT_ISSUES[document['status']]}")
+    return {'unresolved': issues} if issues else {}
 
 
 def plan_validation(state) -> dict:
