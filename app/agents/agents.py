@@ -12,10 +12,11 @@ PROMPTS에는 역할 목표, 어떤 도구를 언제 쓰는지, 어떤 경우 �
 
     from uuid import uuid4
     from app.core.config import get_settings
-    from app.agents.agents import AgentRunner, chat_model
+    from app.agents.agents import AgentRunner, chat_model, role_models
     from app.agents.schemas import AgentRole, ExtractionIn
 
-    runner = AgentRunner(chat_model(get_settings()))
+    settings = get_settings()
+    runner = AgentRunner(chat_model(settings), role_models=role_models(settings))
     print(runner(AgentRole.INFO_EXTRACTOR, ExtractionIn(case_id=uuid4(), input_revision=0, mail_ids=['m1'])))
 """
 import hashlib
@@ -203,10 +204,18 @@ next_action:
 }
 
 
-def chat_model(settings) -> BaseChatModel:
+def chat_model(settings, role: AgentRole | None = None) -> BaseChatModel:
+    """설정의 LLM 클라이언트. role을 주면 그 역할의 모델(LLM_MODEL_<ROLE>, 없으면 LLM_MODEL)을 쓴다."""
     settings.require_llm()
-    return ChatOpenAI(model=settings.llm_model, base_url=str(settings.llm_base_url),
-                      api_key=settings.llm_api_key.get_secret_value(), timeout=settings.llm_timeout_seconds)
+    return ChatOpenAI(model=settings.llm_model_for(role) if role else settings.llm_model,
+                      base_url=str(settings.llm_base_url), api_key=settings.llm_api_key.get_secret_value(),
+                      timeout=settings.llm_timeout_seconds)
+
+
+def role_models(settings) -> dict[AgentRole, BaseChatModel]:
+    """역할별 모델을 따로 설정한 역할만 그 모델로 만든다. AgentRunner(role_models=...)로 넘긴다."""
+    return {role: chat_model(settings, role) for role in AgentRole
+            if settings.llm_model_for(role) != settings.llm_model}
 
 
 def system_prompt(role: AgentRole) -> str:
@@ -400,22 +409,30 @@ class AgentRunStore(Protocol):
 
 class AgentRunner:
     """graph.build_graph에 넘기는 run_agent(role, input) 구현. 역할별 에이전트는 처음 호출할 때 만든다.
-    runs가 있으면 역할 호출마다 06 agent_runs 행을 시작·종료하고, 그 ID를 RunContext로 도구에 넘긴다."""
+    runs가 있으면 역할 호출마다 06 agent_runs 행을 시작·종료하고, 그 ID를 RunContext로 도구에 넘긴다.
+    role_models에 있는 역할은 그 모델을, 나머지 역할은 model을 쓴다."""
 
-    def __init__(self, model: BaseChatModel, runs: AgentRunStore | None = None):
+    def __init__(self, model: BaseChatModel, runs: AgentRunStore | None = None,
+                 role_models: dict[AgentRole, BaseChatModel] | None = None):
         self.model, self.runs, self.agents = model, runs, {}
+        self.role_models = role_models or {}
+
+    def model_for(self, role: AgentRole) -> BaseChatModel:
+        """이 역할에 쓰는 모델."""
+        return self.role_models.get(role, self.model)
 
     def __call__(self, role: AgentRole, data: AgentInput) -> AgentOutput:
         expected_in, _ = AGENT_IO[role]
         if not isinstance(data, expected_in):
             raise TypeError(f'{role} expects {expected_in.__name__}')
         if role not in self.agents:
-            self.agents[role] = build_agent(role, self.model)
+            self.agents[role] = build_agent(role, self.model_for(role))
         context = RunContext(str(data.case_id), data.input_revision)
         if self.runs is not None:
+            model = self.model_for(role)
             started = self.runs.start_agent_run(
                 context.case_id, role, context.input_revision, data.model_dump(mode='json'),
-                getattr(self.model, 'model_name', None) or type(self.model).__name__,
+                getattr(model, 'model_name', None) or type(model).__name__,
                 hashlib.sha256(system_prompt(role).encode()).hexdigest()[:12])
             context = RunContext(context.case_id, context.input_revision, started['agent_run_id'],
                                  started['review_batch_id'])

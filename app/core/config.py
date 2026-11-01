@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr | None = None
     llm_model: str = ''
     llm_classification_model: str = ''
+    # 에이전트 역할별 모델. 비워 두면 llm_model을 쓴다
+    llm_model_info_extractor: str = ''
+    llm_model_candidate: str = ''
+    llm_model_info_priority: str = ''
+    llm_model_response_plan: str = ''
+    llm_model_counter_offer: str = ''
     llm_timeout_seconds: int = Field(default=60, ge=5, le=180)
     analysis_timeout_seconds: int = Field(default=600, ge=30, le=1800)
     calculation_rounds: int = Field(default=3, ge=2, le=5)
@@ -47,6 +53,10 @@ class Settings(BaseSettings):
     def require_llm(self):
         if not self.llm_base_url or not self.llm_api_key or not self.llm_api_key.get_secret_value() or not self.llm_model:
             raise RuntimeError('LLM endpoint, key and model must be configured')
+
+    def llm_model_for(self, role: str) -> str:
+        """에이전트 역할(INFO_EXTRACTOR 등)에 쓸 모델. 역할별 설정이 비어 있으면 llm_model."""
+        return getattr(self, f'llm_model_{role.lower()}', '') or self.llm_model
 
     def require_classification(self):
         if not self.llm_base_url or not self.llm_api_key or not (self.llm_classification_model or self.llm_model):
