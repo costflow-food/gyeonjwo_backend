@@ -8,7 +8,7 @@
                          ⑤ ─ COUNTER_OFFER_PROPOSED ─┬ price_validation ─ PASS ─ review_card (COMPLETE)
                            └ COUNTER_OFFER_SKIPPED ──┘                 FIX → ⑤ · NEED_INFO → ③
     COUNTER_OFFER_SKIPPED: 정책상 역제안 불필요. 가격 검증이 생략 허용을 확인하고, 카드에 생략 사유를 남긴다.
-    ③④⑤ RECHECK_SOURCE → ① · ④⑤ NEEDS_EVIDENCE → ③ · ①~④ HOLD → hold (ON_HOLD)
+    ③④⑤ RECHECK_SOURCE → ①(근거를 인용한 메일을 다시 읽는다) · ④⑤ NEEDS_EVIDENCE → ③ · ①~④ HOLD → hold (ON_HOLD)
     ⑤ HOLD(정책 없음 등) → review_card: 구매안은 검증을 통과했으므로 카드에 구매안·역제안 보류 사유·참고 계산을 보인다
 
 회신·승인 대기에서는 그래프를 끝낸다(WAITING_REPLY). 백엔드가 발송하고, 회신이 오면 start_from=REPLY로 다시 실행한다.
@@ -52,6 +52,7 @@ class CaseState(TypedDict, total=False):
     questions: list[Question]                         # ③
     pending_questions: list[str]                      # ④⑤가 ③에 넘긴 미확인
     recheck_fields: list[str]                         # ③④⑤가 ①에 넘긴 재확인 항목
+    recheck_mail_ids: list[str]                       # 재확인 근거가 적힌 메일 (①이 이 메일을 다시 읽는다)
     plans: list[Plan]                                 # ④
     counter_offer: CounterOfferTarget | None          # ⑤
     counter_offer_skip_reason: str | None             # ⑤ COUNTER_OFFER_SKIPPED 사유
@@ -85,8 +86,8 @@ def _ids(state):
 
 
 INPUTS = {
-    AgentRole.INFO_EXTRACTOR: lambda s: ExtractionIn(**_ids(s), mail_ids=s.get('mail_ids', []),
-                                                     recheck_fields=s.get('recheck_fields', [])),
+    AgentRole.INFO_EXTRACTOR: lambda s: ExtractionIn(**_ids(s), recheck_fields=s.get('recheck_fields', []),
+                                                     mail_ids=s.get('recheck_mail_ids') or s.get('mail_ids', [])),
     AgentRole.CANDIDATE: lambda s: CandidateIn(**_ids(s), quote_version_ids=s.get('quote_version_ids', [])),
     AgentRole.INFO_PRIORITY: lambda s: PriorityIn(**_ids(s), quote_version_ids=s.get('quote_version_ids', []),
                                                   pending_questions=s.get('pending_questions', [])),
@@ -99,7 +100,8 @@ INPUTS = {
 }
 
 OUTPUTS = {
-    AgentRole.INFO_EXTRACTOR: lambda o: {'quote_version_ids': o.quote_version_ids, 'recheck_fields': []},
+    AgentRole.INFO_EXTRACTOR: lambda o: {'quote_version_ids': o.quote_version_ids, 'recheck_fields': [],
+                                         'recheck_mail_ids': []},
     AgentRole.CANDIDATE: lambda o: {'candidates': o.candidates, 'draft_ids': o.draft_ids},
     AgentRole.INFO_PRIORITY: lambda o: {'questions': o.questions, 'draft_ids': o.draft_ids, 'pending_questions': []},
     AgentRole.RESPONSE_PLAN: lambda o: {'plans': o.plans},
@@ -165,6 +167,8 @@ def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: N
                 update['pending_questions'] = output.unknown_fields
             elif output.next_action == N.RECHECK_SOURCE:
                 update['recheck_fields'] = output.unknown_fields
+                # 이번 실행의 새 메일이 아니라 근거를 인용한 메일을 다시 읽어야 한다(예: 기존 업체의 인상 통보 메일)
+                update['recheck_mail_ids'] = list(dict.fromkeys(item.mail_id for item in getattr(output, 'recheck', [])))
             return update
         return node
 
