@@ -254,17 +254,20 @@ next_action:
 
 
 def chat_model(settings, role: AgentRole | None = None) -> BaseChatModel:
-    """설정의 LLM 클라이언트. role을 주면 그 역할의 모델(LLM_MODEL_<ROLE>, 없으면 LLM_MODEL)을 쓴다."""
+    """설정의 LLM 클라이언트. role을 주면 그 역할의 모델(LLM_MODEL_<ROLE>, 없으면 LLM_MODEL)과
+    추론 수준(LLM_REASONING_EFFORT_<ROLE>, 없으면 LLM_REASONING_EFFORT)을 쓴다. 추론 수준이 없으면 보내지 않는다."""
     settings.require_llm()
+    effort = settings.llm_reasoning_effort_for(role)
     return ChatOpenAI(model=settings.llm_model_for(role) if role else settings.llm_model,
                       base_url=str(settings.llm_base_url), api_key=settings.llm_api_key.get_secret_value(),
-                      timeout=settings.llm_timeout_seconds)
+                      timeout=settings.llm_timeout_seconds, **({'reasoning_effort': effort} if effort else {}))
 
 
 def role_models(settings) -> dict[AgentRole, BaseChatModel]:
-    """역할별 모델을 따로 설정한 역할만 그 모델로 만든다. AgentRunner(role_models=...)로 넘긴다."""
+    """역할별 모델이나 추론 수준을 따로 설정한 역할만 그 설정으로 만든다. AgentRunner(role_models=...)로 넘긴다."""
     return {role: chat_model(settings, role) for role in AgentRole
-            if settings.llm_model_for(role) != settings.llm_model}
+            if settings.llm_model_for(role) != settings.llm_model
+            or settings.llm_reasoning_effort_for(role) != settings.llm_reasoning_effort}
 
 
 def system_prompt(role: AgentRole) -> str:
