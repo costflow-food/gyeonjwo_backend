@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from app.agents import tools
-from app.agents.schemas import PlanCheck
+from app.agents.schemas import PlanCheck, PriceCheck
 
 
 def preprocess(state) -> dict:
@@ -38,7 +38,16 @@ def price_validation(state) -> dict:
     PASS → 검토 카드, FIX(정책 범위 밖 목표 조건·허용되지 않는 생략) → ⑤, NEED_INFO(근거·정책 없음) → ③.
     반환: {'price_check': PriceCheck, 'price_check_reason': ⑤에 넘길 사유 (FIX일 때),
            'pending_questions': ③에 넘길 미확인 (NEED_INFO일 때)}"""
-    raise NotImplementedError
+    target = state.get('counter_offer')
+    target = target.model_dump(mode='json') if hasattr(target, 'model_dump') else target
+    plans = [plan.model_dump(mode='json') if hasattr(plan, 'model_dump') else plan for plan in state.get('plans', [])]
+    result = tools.revalidate_counter_offer(tools._priority_store, state['case_id'], state['input_revision'], target,
+                                            state.get('last_action') == 'COUNTER_OFFER_SKIPPED', plans)
+    check = PriceCheck(result['check'])
+    update = {'price_check': check, 'price_check_reason': result['reason'] if check == PriceCheck.FIX else None}
+    if check == PriceCheck.NEED_INFO:
+        update['pending_questions'] = [f"역제안 근거를 다시 확인한다({result['reason']})."]
+    return update
 
 
 def review_card(state) -> dict:

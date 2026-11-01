@@ -25,8 +25,9 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.nodes import Nodes
 from app.agents.schemas import (AGENT_IO, MAX_ROLE_CALLS_PER_RUN, AgentInput, AgentNextAction as N, AgentOutput,
-                                AgentRole, AgentStep, Candidate, CandidateIn, CounterOfferIn, CounterOfferTarget,
-                                ExtractionIn, Plan, PlanCheck, PlanIn, PriceCheck, PriorityIn, ProcessingStep,
+                                AgentRole, AgentStep, Candidate, CandidateIn, CounterOfferIn, CounterOfferReference,
+                                CounterOfferTarget, ExtractionIn, Plan, PlanCheck, PlanIn, PriceCheck, PriorityIn,
+                                ProcessingStep,
                                 Question, RunCaseInput, RunCaseOutput, RunStatus, StartFrom)
 
 logger = logging.getLogger('gyeonjwo')
@@ -53,6 +54,7 @@ class CaseState(TypedDict, total=False):
     plans: list[Plan]                                 # ④
     counter_offer: CounterOfferTarget | None          # ⑤
     counter_offer_skip_reason: str | None             # ⑤ COUNTER_OFFER_SKIPPED 사유
+    counter_offer_reference: CounterOfferReference | None  # ⑤ 참고 계산 (검토 카드에 보인다)
     # 분기 기준
     last_action: N
     plan_check: PlanCheck
@@ -101,7 +103,7 @@ OUTPUTS = {
     AgentRole.INFO_PRIORITY: lambda o: {'questions': o.questions, 'draft_ids': o.draft_ids, 'pending_questions': []},
     AgentRole.RESPONSE_PLAN: lambda o: {'plans': o.plans},
     AgentRole.COUNTER_OFFER: lambda o: {
-        'counter_offer': o.target, 'draft_ids': o.draft_ids,
+        'counter_offer': o.target, 'draft_ids': o.draft_ids, 'counter_offer_reference': o.reference,
         'counter_offer_skip_reason': o.reason if o.next_action == N.COUNTER_OFFER_SKIPPED else None},
 }
 

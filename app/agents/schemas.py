@@ -195,15 +195,24 @@ class Plan(StrictModel):
         return self
 
 
+class CounterOfferReference(StrictModel):
+    """⑤ 참고 계산. 정책이 없어 목표를 만들지 않을 때도 검토 카드에 보인다. 값은 최종 검사가 도구 결과로 채운다."""
+    status: str                                # PROPOSABLE·NO_POLICY·NOT_NEEDED·NOT_COMPETITIVE·NOT_COMPUTABLE 등
+    unit: str | None = None
+    requested_unit_price: DecimalStr | None = None   # 기존 업체가 요청한 단가
+    previous_unit_price: DecimalStr | None = None    # 인상 전 단가 (인상 통보 메일 근거)
+    ceiling_unit_price: DecimalStr | None = None     # 이 단가 이하면 비교한 대안보다 싸거나 같다
+    alternative_total: DecimalStr | None = None      # 비교한 대안의 총액
+    allowed_range: list[DecimalStr] = []             # 정책·상한을 만족하는 목표 단가 [최소, 최대]
+
+
 class CounterOfferTarget(StrictModel):
-    """⑤ 기존 업체 역제안 조건."""
+    """⑤ 기존 업체 역제안 조건. 근거·대안·상한은 최종 검사가 도구 결과로 채운다."""
     supplier_id: str
     target_unit_price: DecimalStr
     conditions: list[str] = []
-    basis_quote_version_ids: list[str] = Field(min_length=1)  # 인상 전·요청 가격 근거
-    alternative_plan_ref: str | None = None    # ④ 대안 비용 참조
-    policy_ref: str | None = None              # 회사 가격 정책
-    validation_ref: str | None = None          # validate_counter_offer 결과 ID
+    basis_quote_version_ids: list[str] = []          # 요청 단가 견적 (최종 검사가 채운다)
+    alternative: list[Allocation] = []               # 비교한 대안의 배분
 
 
 # ─────────────────────────────────────────────
@@ -312,6 +321,8 @@ class CounterOfferOut(AgentOutput):
                          N.HOLD]
     target: CounterOfferTarget | None = None  # PROPOSED가 아니면 None
     draft_ids: list[str] = []
+    reference: CounterOfferReference | None = None   # 참고 계산 (정책 없음·생략·보류에도 남긴다)
+    recheck: list[RecheckEvidence] = []           # RECHECK_SOURCE의 근거 (③과 같은 규칙)
 
     @model_validator(mode='after')
     def skipped_has_no_offer(self):

@@ -39,10 +39,11 @@
 | validate_counter_offer    | ⑤     | 목표 조건 → 가격 범위·정책 검증 결과                            | 위와 같음                         |
 | create_rfq_draft          | ②     | 고른 등록 품목·대상 업체·선택 질문 → 업체별 초안 ID              | 내부 저장만, 발송은 백엔드        |
 | create_clarification_draft| ③     | 업체·질문 묶음·근거 → 보완 요청 초안 ID                          | 내부 저장만, 발송은 백엔드        |
-| create_counter_offer_draft| ⑤     | 검증된 목표 조건(validation_ref)·문안 → 역제안 초안 ID           | 내부 저장만, 발송은 백엔드        |
+| create_counter_offer_draft| ⑤     | 목표 단가·조건·비교한 대안 → 다시 검증 후 역제안 초안 ID          | 내부 저장만, 발송은 백엔드        |
 """
 import dataclasses
 import hashlib
+import json
 import re
 from datetime import date, timedelta
 from decimal import Decimal
@@ -2153,3 +2154,226 @@ def revalidate_plans(store: ComparisonStore, case_id: str, plans: list[dict]) ->
             violations.append({'plan': index, 'code': 'TOTAL_MISMATCH', 'supplier_id': None,
                                'expected': expected, 'actual': plan.get('total_amount')})
     return {'check': 'NEED_INFO' if need_info else 'FIX' if violations else 'PASS', 'violations': violations}
+
+
+
+# ─────────────────────────────────────────────
+# ⑤ COUNTER_OFFER: calculate_counter_offer, validate_counter_offer, create_counter_offer_draft (+ 가격 검증 노드)
+#   설계: docs/AGENT5_COUNTER_OFFER_DESIGN.md. 기존 업체가 검증된 대안보다 싸지는 상한(유지 상한 단가)과 회사 정책
+#   (policy_jsonb.counter_offer) 범위를 코드가 계산하고, LLM은 그 안에서 목표 단가와 조건을 정한다.
+#   정책이 없으면 목표를 만들지 않는다(07 ⑤ "정책 없는 합리적 인상률 생성 금지"). 메일에는 다른 공급처 이야기를 넣지 않는다.
+# ─────────────────────────────────────────────
+
+COUNTER_TARGET_RANGES = ('BETWEEN_PREVIOUS_AND_REQUESTED',)     # 정책 target_range 값 (C4, 팀 합의 전 초안)
+COUNTER_STATUSES = ('PROPOSABLE', 'NO_POLICY', 'NOT_NEEDED', 'NOT_COMPETITIVE', 'NOT_COMPUTABLE', 'COSTS_UNKNOWN',
+                    'PREVIOUS_UNKNOWN')
+
+
+class CounterOfferStore(PriorityStore, Protocol):
+    """⑤ 도구의 저장소. 인상 전 단가·사유는 ①이 인상 통보 메일의 normalized_jsonb에 저장한다."""
+
+    def get_increase_terms(self, case_id: str, supplier_id: str) -> dict | None:
+        """이 업무에서 그 업체가 보낸 메일의 normalized_jsonb.fields 중 previous_unit_price·increase_reason
+        {previous_unit_price, increase_reason, mail_id}. 없으면 None."""
+
+
+class AlternativeAllocation(StrictModel):
+    supplier_id: str
+    quote_version_id: str
+    quantity: str                      # 구매안 검증을 통과한 ④ 안의 배정량 그대로
+
+
+def _counter_policy(case: dict) -> dict | None:
+    """정책(policy_jsonb.counter_offer). enabled가 true이고 target_range가 정해진 값일 때만 쓴다."""
+    policy = (case.get('policy') or {}).get('counter_offer') or {}
+    return policy if policy.get('enabled') and policy.get('target_range') in COUNTER_TARGET_RANGES else None
+
+
+def counter_offer_numbers(store: CounterOfferStore, context: RunContext, alternative: list[AlternativeAllocation]) -> dict:
+    """calculate_counter_offer의 본체. 기존 업체 요청·인상 전 단가, 대안 총액, 유지 상한 단가, 정책 범위, 허용 목표 범위.
+    status: PROPOSABLE(허용 범위 있음) / NO_POLICY / NOT_NEEDED(요청 단가로도 대안보다 싸거나 같음) /
+    NOT_COMPETITIVE(허용 하한으로도 대안보다 비쌈) / NOT_COMPUTABLE(총액·세금 기준 비교 불가) /
+    COSTS_UNKNOWN(기존 업체의 단가 외 비용 미확인) / PREVIOUS_UNKNOWN"""
+    case, stop = _priority_case(store, context)
+    if stop:
+        return stop
+    incumbents = {mail['supplier_id'] for mail in _read(lambda: store.list_case_mails(context.case_id))
+                  if mail.get('message_role') == 'INITIAL' and mail.get('supplier_id')}
+    latest = dict(_read(lambda: store.get_quote_versions(context.case_id, case.get('latest_quote_version_ids') or [])))
+    own = [(qid, record) for qid, record in latest.items() if record.supplier_id in incumbents]
+    if not own:
+        return {'status': 'REJECTED', 'code': 'NO_INCUMBENT_QUOTE', 'hint': '인상을 요청한 업체의 최신 견적이 없다. HOLD한다.'}
+    quote_id, record = own[0]
+    if not alternative or {a.supplier_id for a in alternative} <= incumbents \
+            or any(a.quote_version_id not in latest for a in alternative):
+        return {'status': 'REJECTED', 'code': 'ALTERNATIVE_INVALID',
+                'hint': '대안은 구매안 검증을 통과한 비유지 안(SWITCH·SPLIT)의 배정량을 최신 견적 그대로 보낸다.'}
+    plan = plan_total([(a.quote_version_id, latest[a.quote_version_id], _amount(a.quantity)) for a in alternative],
+                      case['quantity'], case['unit'], case.get('policy') or {})
+    sheet = cost_sheet(quote_id, record, case['quantity'], case['unit'])
+    terms = _read(lambda: store.get_increase_terms(context.case_id, record.supplier_id)) or {}
+    previous = _amount(terms.get('previous_unit_price'))
+    result = {'supplier_id': record.supplier_id, 'quote_version_id': quote_id, 'unit': _unit_key(record.unit),
+              'requested_unit_price': _won(sheet.unit_price), 'previous_unit_price': _won(previous),
+              'previous_source': terms.get('mail_id'), 'increase_reason': terms.get('increase_reason'),
+              'alternative': [a.model_dump() for a in alternative],
+              'alternative_total': _won(plan['known_total']), 'alternative_violations': plan['violations'],
+              'allowed_range': []}
+    bases = {s.tax_basis for s in plan['sheets']}
+    other_unknown = [c for c in plan['unknown_costs'] if c['supplier_id'] not in incumbents]
+    if plan['known_total'] is None or plan['violations'] or other_unknown or len(bases) != 1:
+        return {'status': 'OK', 'counter_status': 'NOT_COMPUTABLE', 'skip_allowed': False} | result
+    ceiling = keep_price_ceiling(sheet, record, plan['known_total'], bases.pop())
+    if ceiling['status'] not in ('COMPUTED', 'CONDITIONAL'):
+        return {'status': 'OK', 'counter_status': 'NOT_COMPUTABLE', 'skip_allowed': False, 'ceiling': ceiling} | result
+    if ceiling['status'] == 'CONDITIONAL':
+        return {'status': 'OK', 'counter_status': 'COSTS_UNKNOWN', 'skip_allowed': False,
+                'incumbent_unknown_costs': ceiling['unknown_costs']} | result
+    top = Decimal(ceiling['ceiling_unit_price'])
+    result |= {'ceiling_unit_price': ceiling['ceiling_unit_price'], 'ceiling_formula': ceiling['formula'],
+               'incumbent_unknown_costs': ceiling['unknown_costs']}
+    policy = _counter_policy(case)
+    if sheet.unit_price is not None and sheet.unit_price <= top:
+        status = 'NOT_NEEDED'
+    elif policy is None:
+        status = 'NO_POLICY'
+    elif previous is None:
+        status = 'PREVIOUS_UNKNOWN'
+    else:
+        low, high = previous, sheet.unit_price
+        if policy.get('max_increase_rate') is not None:
+            high = min(high, previous * (1 + Decimal(str(policy['max_increase_rate']))))
+        high = min(high, top)
+        status = 'PROPOSABLE' if low <= high else 'NOT_COMPETITIVE'
+        if status == 'PROPOSABLE':
+            result['allowed_range'] = [_amount_text(low), _amount_text(high)]
+    skip_when = (policy or {}).get('skip_when') or []
+    return {'status': 'OK', 'counter_status': status, 'skip_allowed': status in skip_when} | result
+
+
+@register
+@tool
+def calculate_counter_offer(alternative: list[AlternativeAllocation], runtime: ToolRuntime[RunContext]) -> dict:
+    '''기존 업체(인상 요청 업체)에 역제안할 수 있는 단가 범위를 계산한다.
+    alternative: 비교할 대안의 배정량 [{supplier_id, quote_version_id, quantity}]. input의 validated_plans 중
+      가장 싼 비유지 안(VALID)을 그대로 보낸다.
+
+    반환 status OK: counter_status(PROPOSABLE: allowed_range 안에서 목표를 정한다 / NO_POLICY: 회사 정책이 없어 목표를
+      만들지 않는다 / NOT_NEEDED: 요청 단가로도 대안보다 싸다 / NOT_COMPETITIVE: 허용 하한으로도 대안보다 비싸다 /
+      NOT_COMPUTABLE / COSTS_UNKNOWN: 기존 업체의 단가 외 비용(incumbent_unknown_costs)을 모른다 /
+      PREVIOUS_UNKNOWN: 인상 전 단가 근거가 없다), skip_allowed(정책이 역제안 생략을 허용),
+      requested_unit_price, previous_unit_price(previous_source 메일), ceiling_unit_price(이 단가 이하면 대안보다 싸다),
+      alternative_total, allowed_range([최소, 최대]), unit, increase_reason
+    / REJECTED(code·hint) / CONDITIONS_MISSING / REVISION_CHANGED / CASE_NOT_FOUND
+    '''
+    return counter_offer_numbers(_priority_store, _run_context(_priority_store, runtime), alternative)
+
+
+def check_counter_target(store: CounterOfferStore, context: RunContext, target_unit_price: str,
+                         alternative: list[AlternativeAllocation]) -> dict:
+    """validate_counter_offer의 본체. 목표 단가가 허용 범위(정책·유지 상한) 안인지 확인한다."""
+    numbers = counter_offer_numbers(store, context, alternative)
+    if numbers.get('status') != 'OK':
+        return numbers
+    target = _amount(target_unit_price)
+    violations = []
+    if numbers['counter_status'] != 'PROPOSABLE':
+        violations.append({'code': numbers['counter_status']})
+    elif target is None or not Decimal(numbers['allowed_range'][0]) <= target <= Decimal(numbers['allowed_range'][1]):
+        violations.append({'code': 'OUT_OF_RANGE', 'allowed_range': numbers['allowed_range']})
+    return {'status': 'INVALID' if violations else 'VALID', 'target_unit_price': _won(target),
+            'violations': violations, 'numbers': numbers}
+
+
+@register
+@tool
+def validate_counter_offer(target_unit_price: str, alternative: list[AlternativeAllocation],
+                           runtime: ToolRuntime[RunContext]) -> dict:
+    '''목표 단가가 회사 정책과 유지 상한을 만족하는지 검증한다. alternative는 calculate_counter_offer에 보낸 것과 같다.
+    반환: status VALID / INVALID(violations: OUT_OF_RANGE(allowed_range)·NO_POLICY 등), target_unit_price, numbers
+    '''
+    return check_counter_target(_priority_store, _run_context(_priority_store, runtime), target_unit_price, alternative)
+
+
+COUNTER_SUBJECT = '{보내는회사}{품목} 단가 관련 회신드립니다'
+COUNTER_BODY = ('안녕하세요. {업체명} 담당자님\n'
+                '{회사소개}\n\n'
+                '보내 주신 {품목} 단가 조정 안내 잘 받았습니다. 검토 결과 아래 조건으로 거래를 이어가기를 요청드립니다.\n\n'
+                '<요청 조건>\n'
+                '- 품목: {품목}\n'
+                '- 단가: {목표단가}원/{단위}\n'
+                '{조건목록}\n\n'
+                '{회신기한}까지 회신 부탁드립니다.\n'
+                '감사합니다.\n'
+                '{서명}')
+
+
+def save_counter_offer_draft(store: CounterOfferStore, context: RunContext, target_unit_price: str, conditions: list[str],
+                             alternative: list[AlternativeAllocation]) -> dict:
+    """create_counter_offer_draft의 본체. 목표를 다시 검증하고, 통과할 때만 기존 업체에 보낼 초안을 저장한다."""
+    checked = check_counter_target(store, context, target_unit_price, alternative)
+    if checked.get('status') != 'VALID':
+        return {'status': 'REJECTED', 'code': 'NOT_VALIDATED', 'validation': checked}
+    numbers = checked['numbers']
+    contact = _read(lambda: store.get_supplier(context.case_id, numbers['supplier_id'])) or {}
+    recipient = (contact.get('contact_email') or '').strip()
+    if not recipient:
+        return {'status': 'REJECTED', 'code': 'NO_CONTACT'}
+    case = _read(lambda: store.get_work_case(context.case_id))
+    style = _read(lambda: store.current_send_settings(context.case_id)) or {}
+    lines = '\n'.join(f'- {text.strip()}' for text in conditions if text.strip())
+    subject, body = _mail_text(COUNTER_SUBJECT, COUNTER_BODY, {
+        '회신기한': (date.today() + timedelta(days=RFQ_REPLY_DAYS)).isoformat(), '품목': case.get('item_name') or '요청 품목',
+        '업체명': contact.get('name') or '담당자', '목표단가': f"{Decimal(checked['target_unit_price']):,}",
+        '단위': numbers['unit'] or '', '조건목록': lines, **_style_values(style)})
+    key = hashlib.sha256(f"{context.case_id}|{context.input_revision}|COUNTER_OFFER|{numbers['supplier_id']}|"
+                         f"{checked['target_unit_price']}".encode()).hexdigest()
+    record = MailDraftRecord(
+        work_case_id=context.case_id, supplier_id=numbers['supplier_id'], purpose='COUNTER_OFFER', recipient=recipient,
+        subject=subject, body_text=body,
+        evidence_refs_jsonb=[f"quote_versions:{numbers['quote_version_id']}"] + (
+            [f"mail_messages:{numbers['previous_source']}.previous_unit_price"] if numbers.get('previous_source') else []) + (
+            [f'agent_runs:{context.agent_run_id}'] if context.agent_run_id else []),
+        input_revision=context.input_revision, style_snapshot_jsonb=style, idempotency_key=key)
+    saved = store.insert_mail_draft(record, context.input_revision)
+    if saved is None:
+        return {'status': 'REVISION_CHANGED'}
+    return {'status': 'DRAFTED', 'draft_id': saved[0], 'target_unit_price': checked['target_unit_price'],
+            'supplier_id': numbers['supplier_id'], 'quote_version_id': numbers['quote_version_id'],
+            'conditions': [text.strip() for text in conditions if text.strip()], 'alternative': numbers['alternative']}
+
+
+@register
+@tool
+def create_counter_offer_draft(target_unit_price: str, alternative: list[AlternativeAllocation],
+                               runtime: ToolRuntime[RunContext], conditions: list[str] | None = None) -> dict:
+    '''기존 업체에 보낼 역제안 메일 초안을 저장한다(발송하지 않는다). 목표 단가를 다시 검증하고 통과할 때만 만든다.
+    메일에는 목표 단가와 conditions(예: "12월 물량 전량 발주 시")만 들어가고, 다른 공급처 이야기는 넣지 않는다.
+    반환: DRAFTED(draft_id·target_unit_price·supplier_id) / REJECTED(code: NOT_VALIDATED·NO_CONTACT) / REVISION_CHANGED
+    '''
+    return save_counter_offer_draft(_priority_store, _run_context(_priority_store, runtime), target_unit_price,
+                                    conditions or [], alternative)
+
+
+def revalidate_counter_offer(store: CounterOfferStore, case_id: str, input_revision: int, target: dict | None,
+                             skipped: bool, plans: list[dict]) -> dict:
+    """가격 검증 노드: 역제안 목표(또는 생략)를 최신 견적·정책으로 다시 확인한다.
+    반환: {check: PASS·FIX·NEED_INFO, reason}. 목표가 범위 밖이거나 허용되지 않는 생략이면 FIX(⑤가 고친다),
+    대안 견적이 최신이 아니면 NEED_INFO."""
+    context = RunContext(case_id, input_revision)
+    if target is not None:
+        alternative = [AlternativeAllocation(**a) for a in target.get('alternative', [])]
+    else:
+        cheapest = min((p for p in plans if p['plan_type'] != 'KEEP' and p.get('validation_status') == 'VALID'),
+                       key=lambda p: Decimal(p['total_amount']), default=None)
+        alternative = [AlternativeAllocation(supplier_id=a['supplier_id'], quote_version_id=a['quote_version_id'],
+                                             quantity=a['quantity']) for a in (cheapest or {}).get('allocations', [])]
+    numbers = counter_offer_numbers(store, context, alternative)
+    if numbers.get('status') != 'OK':
+        return {'check': 'NEED_INFO', 'reason': numbers.get('code') or numbers.get('status')}
+    if skipped:
+        return {'check': 'PASS' if numbers['skip_allowed'] else 'FIX',
+                'reason': None if numbers['skip_allowed'] else f"생략이 허용되지 않는다({numbers['counter_status']})"}
+    checked = check_counter_target(store, context, target['target_unit_price'], alternative)
+    return {'check': 'PASS' if checked['status'] == 'VALID' else 'FIX',
+            'reason': None if checked['status'] == 'VALID' else json.dumps(checked['violations'], ensure_ascii=False)}
