@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     llm_model_info_priority: str = ''
     llm_model_response_plan: str = ''
     llm_model_counter_offer: str = ''
+    # 에이전트 역할별 temperature. 비워 두면 보내지 않는다(모델 기본값). 일부 추론 모델은 temperature를 받지 않는다
+    llm_temperature: float | None = Field(default=None, ge=0, le=2)
+    llm_temperature_info_extractor: float | None = Field(default=None, ge=0, le=2)
+    llm_temperature_candidate: float | None = Field(default=None, ge=0, le=2)
+    llm_temperature_info_priority: float | None = Field(default=None, ge=0, le=2)
+    llm_temperature_response_plan: float | None = Field(default=None, ge=0, le=2)
+    llm_temperature_counter_offer: float | None = Field(default=None, ge=0, le=2)
     llm_timeout_seconds: int = Field(default=60, ge=5, le=180)
     analysis_timeout_seconds: int = Field(default=600, ge=30, le=1800)
     calculation_rounds: int = Field(default=3, ge=2, le=5)
@@ -45,7 +52,10 @@ class Settings(BaseSettings):
     app_build_revision: str = 'development'
 
     @field_validator('supabase_url', 'llm_base_url', 'supabase_secret_key', 'supabase_publishable_key',
-                     'llm_api_key', 'gmail_client_secret', 'gmail_refresh_token', 'google_token_encryption_key', mode='before')
+                     'llm_api_key', 'gmail_client_secret', 'gmail_refresh_token', 'google_token_encryption_key',
+                     'llm_temperature', 'llm_temperature_info_extractor', 'llm_temperature_candidate',
+                     'llm_temperature_info_priority', 'llm_temperature_response_plan', 'llm_temperature_counter_offer',
+                     mode='before')
     @classmethod
     def empty_optional_values(cls, value):
         return None if isinstance(value, str) and not value.strip() else value
@@ -57,6 +67,11 @@ class Settings(BaseSettings):
     def llm_model_for(self, role: str) -> str:
         """에이전트 역할(INFO_EXTRACTOR 등)에 쓸 모델. 역할별 설정이 비어 있으면 llm_model."""
         return getattr(self, f'llm_model_{role.lower()}', '') or self.llm_model
+
+    def llm_temperature_for(self, role: str | None) -> float | None:
+        """에이전트 역할에 쓸 temperature. 역할별 설정이 없으면 llm_temperature, 둘 다 없으면 None(보내지 않음)."""
+        value = getattr(self, f'llm_temperature_{role.lower()}', None) if role else None
+        return value if value is not None else self.llm_temperature
 
     def require_classification(self):
         if not self.llm_base_url or not self.llm_api_key or not (self.llm_classification_model or self.llm_model):
