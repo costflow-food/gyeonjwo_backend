@@ -64,8 +64,7 @@ ROLE_TOOLS = {
     AgentRole.INFO_EXTRACTOR: _READ + ('store_structured_mail',),
     AgentRole.CANDIDATE: _READ + ('search_supplier_items', 'search_supplier_evidence', 'crawl_supplier_candidates',
                                   'create_rfq_draft'),
-    AgentRole.INFO_PRIORITY: _READ + ('check_comparability', 'calculate_break_even',
-                                        'create_clarification_draft'),
+    AgentRole.INFO_PRIORITY: _READ + ('check_comparability', 'calculate_break_even', 'create_clarification_draft'),
     AgentRole.RESPONSE_PLAN: _READ + ('check_comparability', 'build_plan_candidates', 'validate_purchase_plan'),
     AgentRole.COUNTER_OFFER: _READ + ('check_comparability', 'calculate_counter_offer', 'validate_counter_offer',
                                         'create_counter_offer_draft'),
@@ -1201,10 +1200,21 @@ RFQ_BODY = ('안녕하세요. {업체명} 담당자님\n'
             '{서명}')
 
 
+def _mail_text(subject: str, body: str, values: dict) -> tuple[str, str]:
+    """코드 템플릿 메일의 제목·본문. 비어 있는 회사 문구 줄은 지우고 문단 사이 빈 줄은 한 줄로 맞춘다."""
+    return subject.format(**values), re.sub(r'\n{3,}', '\n\n', body.format(**values)).strip()
+
+
 def _rfq_text(values: dict) -> tuple[str, str]:
-    """업체 한 곳의 RFQ 제목·본문. 비어 있는 회사 문구 줄은 지우고 문단 사이 빈 줄은 한 줄로 맞춘다."""
-    body = RFQ_BODY.format(**values)
-    return RFQ_SUBJECT.format(**values), re.sub(r'\n{3,}', '\n\n', body).strip()
+    """업체 한 곳의 RFQ 제목·본문."""
+    return _mail_text(RFQ_SUBJECT, RFQ_BODY, values)
+
+
+def _style_values(style: dict) -> dict:
+    """메일 스타일 설정(style_jsonb)의 보내는 회사 문구. 없으면 그 부분을 비운다."""
+    company = str(style.get('company_name') or '').strip()
+    return {'보내는회사': f'[{company}] ' if company else '', '회사소개': str(style.get('introduction') or '').strip(),
+            '서명': str(style.get('signature') or '').strip()}
 
 
 def _request_lines(facts: dict) -> str:
@@ -1281,10 +1291,8 @@ def save_mail_drafts(store: MailDraftStore, context: RunContext, purpose: str, s
 
     facts = found['rfq_facts']
     style = _read(lambda: store.current_send_settings(context.case_id)) or {}
-    company = str(style.get('company_name') or '').strip()
     common = {'회신기한': (date.today() + timedelta(days=RFQ_REPLY_DAYS)).isoformat(), '품목': facts['품목'],
-              '요청내용': _request_lines(facts), '보내는회사': f'[{company}] ' if company else '',
-              '회사소개': str(style.get('introduction') or '').strip(), '서명': str(style.get('signature') or '').strip()}
+              '요청내용': _request_lines(facts), **_style_values(style)}
     drafts, rejected = [], []
     for supplier_id in supplier_ids:
         candidate = candidates.get(supplier_id)
@@ -1686,3 +1694,257 @@ def keep_price_ceiling(incumbent: CostSheet, record: QuoteVersionRecord, alterna
             'current_unit_price': _amount_text(incumbent.unit_price), 'unknown_costs': incumbent.unknown_costs,
             'formula': f'({_amount_text(_amount(alternative_total))} - {_amount_text(other_costs)}) / '
                        f'{_amount_text(quote_quantity)} = {_amount_text(ceiling)}'}
+
+
+
+# ─────────────────────────────────────────────
+# ③ INFO_PRIORITY: check_comparability(③④⑤ 공통), calculate_break_even, create_clarification_draft
+#   설계: docs/AGENT3_PRIORITY_DESIGN.md. 업무의 최신 견적을 업무 수량 기준으로 비교해 필수 누락·미확인 비용을 찾고,
+#   미확인 비용은 역전 기준으로 선택이 바뀔 수 있는지 계산한다. 질문 문장·메일 문안은 코드가 정한다.
+# ─────────────────────────────────────────────
+
+class ComparisonStore(CaseStore, Protocol):
+    """check_comparability·calculate_break_even의 저장소 (06 quote_versions)."""
+
+    def get_quote_versions(self, case_id: str, ids: list[str]) -> list[tuple[str, QuoteVersionRecord]]:
+        """이 업무의 quote_versions 중 id가 ids에 있는 (id, 행). 범위 밖 id는 빠진다."""
+
+
+class PriorityStore(ComparisonStore, MailDraftStore, Protocol):
+    """③ 도구 전체의 저장소. 보완 요청 초안은 mail_drafts에 저장한다."""
+
+
+_priority_store: PriorityStore | None = None
+
+
+def use_priority_store(store: PriorityStore | None) -> None:
+    global _priority_store
+    _priority_store = store
+
+
+# 총액을 막는 사유 → 업체에 물을 견적 항목 (①이 다시 추출할 때도 같은 이름을 쓴다)
+_PRICE_BLOCK_FIELDS = {'NO_PRICE': 'unit_price', 'UNIT_MISSING': 'unit', 'UNIT_MISMATCH': 'unit',
+                       'TIER_NOT_COVERED': 'price_tiers', 'TIER_UNCLEAR': 'price_tiers', 'FOREIGN_CURRENCY': 'currency'}
+COST_LABELS = {'SHIPPING': '운송비', 'HANDLING': '하차비', 'OTHER': '기타 비용'}
+# 보완 요청 질문 문장. 비용은 'cost:<cost_type>' 필드로 묻는다
+CLARIFY_QUESTIONS = {'specification': '규격(등급·중량·포장 단위)', 'certifications': '인증 보유 여부와 증빙',
+                     'available_quantity': '요청 수량 공급 가능 여부와 최대 공급량',
+                     'delivery_date': '요청 납기일 납품 가능 여부(또는 발주 후 납품까지 걸리는 기간)',
+                     'unit_price': '단가', 'unit': '단가 기준 단위(예: kg당, 박스당)와 박스당 중량',
+                     'price_tiers': '요청 수량에 적용되는 단가', 'currency': '원화 기준 단가',
+                     'tax_terms': '단가의 부가세 포함·별도·면세 여부'}
+
+
+def _cost_field(cost_type: str) -> str:
+    return f'cost:{cost_type}'
+
+
+def clarify_question(field: str) -> str | None:
+    """보완 요청 질문 한 줄. 모르는 필드면 None."""
+    if field.startswith('cost:'):
+        label = COST_LABELS.get(field.removeprefix('cost:'))
+        return f'{label} 금액, 산정 기준(회당·박스당 등), 단가 포함 여부' if label else None
+    return CLARIFY_QUESTIONS.get(field)
+
+
+def _requirement(name: str, field: str, required: str, stated: str, met: bool) -> dict:
+    """필수 조건 한 줄. 문자열로 충족이 확인되면 MET, 아니면 LLM이 원문을 읽고 판단할 CHECK."""
+    return {'requirement': name, 'field': field, 'required': required, 'stated': stated, 'state': 'MET' if met else 'CHECK'}
+
+
+def _supplier_comparison(case: dict, quote_id: str, record: QuoteVersionRecord, incumbents: set[str]) -> dict:
+    """업체 한 곳의 비교 상태: 업무 수량 기준 계산, 필수 항목 누락(07 ③-1), 충족 판단이 필요한 필수 조건."""
+    sheet = cost_sheet(quote_id, record, case['quantity'], case['unit'])
+    checks = record.checks_jsonb or {}
+    stated = lambda name: ((checks.get(name) or {}).get('value') or '').strip() or None
+    missing, requirements = [], []
+    if case.get('specification'):
+        if stated('specification') is None:
+            missing.append('specification')
+        else:
+            requirements.append(_requirement('규격', 'specification', case['specification'], stated('specification'),
+                                             _key(case['specification']) == _key(stated('specification'))))
+    certifications = _required_names(case.get('mandatory_conditions'))
+    if certifications and stated('certifications') is None:
+        missing.append('certifications')
+    owned = {_key(name) for name in re.split(r'[,/·\s]+', stated('certifications') or '') if name}
+    requirements += [_requirement(name, 'certifications', name, stated('certifications'), _key(name) in owned)
+                     for name in certifications if stated('certifications') is not None]
+    if record.available_quantity is None:
+        missing.append('available_quantity')
+    if case.get('due_date') and stated('delivery_date') is None and stated('lead_time') is None:
+        missing.append('delivery_date')
+    missing += list(dict.fromkeys(_PRICE_BLOCK_FIELDS[code] for code in sheet.blocked if code in _PRICE_BLOCK_FIELDS))
+    if sheet.tax_basis is None:
+        missing.append('tax_terms')
+    return {'supplier_id': record.supplier_id, 'quote_version_id': quote_id,
+            'is_incumbent': record.supplier_id in incumbents,
+            'known_total': _amount_text(sheet.known_total) if sheet.known_total is not None else None,
+            'blocked': sheet.blocked, 'warnings': sheet.warnings, 'tax_basis': sheet.tax_basis,
+            'unknown_costs': [{'field': _cost_field(cost['cost_type']), **cost} for cost in sheet.unknown_costs],
+            'missing_required': missing, 'requirements': requirements}
+
+
+def _priority_case(store: ComparisonStore, context: RunContext) -> tuple[dict | None, dict | None]:
+    """업무 조건과 최신 견적 (case, None) 또는 멈출 결과 (None, {status})."""
+    case = _read(lambda: store.get_work_case(context.case_id))
+    if case is None:
+        return None, {'status': 'CASE_NOT_FOUND'}
+    if case.get('input_revision') != context.input_revision:
+        return None, {'status': 'REVISION_CHANGED'}
+    missing = [name for name in ('quantity', 'unit') if not case.get(name)]
+    if missing:
+        return None, {'status': 'CONDITIONS_MISSING', 'missing': missing}
+    return case, None
+
+
+def compare_quotes(store: ComparisonStore, context: RunContext) -> dict:
+    """check_comparability의 본체. 업무의 최신 견적 전부를 업무 수량 기준으로 비교한다."""
+    case, stop = _priority_case(store, context)
+    if stop:
+        return stop
+    incumbents = {mail['supplier_id'] for mail in _read(lambda: store.list_case_mails(context.case_id))
+                  if mail.get('message_role') == 'INITIAL' and mail.get('supplier_id')}
+    quotes = _read(lambda: store.get_quote_versions(context.case_id, case.get('latest_quote_version_ids') or []))
+    suppliers = [_supplier_comparison(case, quote_id, record, incumbents) for quote_id, record in quotes]
+    return {'status': 'OK', 'quantity': str(case['quantity']), 'unit': case['unit'], 'suppliers': suppliers,
+            'comparable_count': sum(1 for s in suppliers if s['known_total'] is not None and s['tax_basis']),
+            'tax_bases': sorted({s['tax_basis'] for s in suppliers if s['tax_basis']})}
+
+
+@register
+@tool
+def check_comparability(runtime: ToolRuntime[RunContext]) -> dict:
+    '''업무의 최신 견적을 업무 수량 기준으로 비교할 수 있는지 업체별로 확인한다. 인자는 없다.
+
+    반환 status:
+    - OK: suppliers(업체별 supplier_id·quote_version_id·is_incumbent(인상을 요청한 업체)·known_total(확인된 금액만 더한
+      총액, 계산 불가면 null)·blocked(총액을 막는 사유)·unknown_costs(금액을 모르는 비용 field·cost_type·code)·
+      missing_required(견적에 없는 필수 항목 field)·requirements(견적에 적힌 규격·인증과 업무 조건. state MET이면 충족,
+      CHECK이면 원문을 보고 충족 여부를 판단한다)·tax_basis·warnings), comparable_count, tax_bases
+    - CONDITIONS_MISSING(업무 수량·단위 없음) / REVISION_CHANGED / CASE_NOT_FOUND
+    '''
+    return compare_quotes(_priority_store, _run_context(_priority_store, runtime))
+
+
+def break_even_for(store: ComparisonStore, context: RunContext, supplier_id: str) -> dict:
+    """calculate_break_even의 본체. supplier_id의 미확인 비용을 다른 업체 각각과 비교한다.
+    deciding: 확인 총액이 가장 낮은 다른 업체와의 결과 (질문의 역전 기준 금액·산식으로 쓴다)."""
+    case, stop = _priority_case(store, context)
+    if stop:
+        return stop
+    quotes = _read(lambda: store.get_quote_versions(context.case_id, case.get('latest_quote_version_ids') or []))
+    sheets = {record.supplier_id: cost_sheet(quote_id, record, case['quantity'], case['unit']) for quote_id, record in quotes}
+    if supplier_id not in sheets:
+        return {'status': 'REJECTED', 'code': 'NOT_IN_COMPARISON', 'hint': 'check_comparability의 supplier_id만 보낸다.'}
+    target = sheets[supplier_id]
+    rivals = sorted((sheet for sid, sheet in sheets.items() if sid != supplier_id),
+                    key=lambda sheet: (sheet.known_total is None, sheet.known_total or 0))
+    results = [break_even(target, rival) for rival in rivals]
+    computed = [r for r in results if r['status'] in ('COMPUTED', 'NO_UNKNOWN', 'CONDITIONAL')]
+    return {'status': 'OK', 'target_supplier_id': supplier_id, 'results': results,
+            'deciding': computed[0] if computed else None,
+            'can_change_choice': any(r['can_change_choice'] is True for r in results),
+            # 추가 조사 실익 낮음의 입증: 비교 가능한 업체가 있고, 모든 비교에서 답과 관계없이 선택이 바뀌지 않는다(07 ③-5)
+            'proven_low_value': bool(computed) and len(computed) == len(results)
+            and all(r['can_change_choice'] is False for r in results)}
+
+
+@register
+@tool
+def calculate_break_even(supplier_id: str, runtime: ToolRuntime[RunContext]) -> dict:
+    '''업체(supplier_id)의 미확인 비용이 얼마 미만이면 다른 업체보다 싸지는지(역전 기준)를 다른 업체 각각과 계산한다.
+    업체 하나가 업무 수량 전부를 맡는 경우끼리 비교한다.
+
+    반환 status:
+    - OK: results(다른 업체별 status·break_even_amount·can_change_choice·formula), deciding(가장 싼 다른 업체와의 결과),
+      can_change_choice(답에 따라 더 싼 쪽이 바뀔 수 있으면 true), proven_low_value(모든 비교에서 바뀌지 않음이
+      계산으로 확인되면 true: 묻지 않아도 된다)
+      결과의 status: COMPUTED / CONDITIONAL(상대에도 미확인 비용) / NO_UNKNOWN / NOT_COMPUTABLE /
+      TAX_BASIS_DIFFERENT(세금 기준이 다르거나 몰라 비교하지 않음)
+    - REJECTED(NOT_IN_COMPARISON) / CONDITIONS_MISSING / REVISION_CHANGED / CASE_NOT_FOUND
+    '''
+    return break_even_for(_priority_store, _run_context(_priority_store, runtime), supplier_id)
+
+
+class ClarificationRequest(StrictModel):
+    supplier_id: str
+    fields: list[str] = Field(min_length=1)    # check_comparability의 missing_required·unknown_costs·requirements의 field
+
+
+CLARIFY_SUBJECT = '{보내는회사}{품목} 견적 확인 요청드립니다'
+CLARIFY_BODY = ('안녕하세요. {업체명} 담당자님\n'
+                '{회사소개}\n\n'
+                '보내 주신 {품목} 견적 잘 받았습니다. 검토를 위해 아래 내용을 {회신기한}까지 확인 부탁드립니다.\n\n'
+                '<확인 요청 사항>\n'
+                '{질문목록}\n\n'
+                '감사합니다.\n'
+                '{서명}')
+_CLARIFY_HINTS = {
+    'NOT_IN_COMPARISON': 'check_comparability의 supplier_id에만 보완 요청을 만든다.',
+    'FIELD_NOT_OPEN': 'fields는 그 업체의 missing_required·unknown_costs·requirements의 field만 쓴다.',
+    'NO_CONTACT': '연락처가 없는 업체다. 이 업체는 건너뛴다.',
+}
+
+
+def save_clarification_drafts(store: PriorityStore, context: RunContext, requests: list[ClarificationRequest]) -> dict:
+    """create_clarification_draft의 본체. 업체별 질문을 코드 템플릿 메일 초안으로 저장한다."""
+    compared = compare_quotes(store, context)
+    if compared['status'] != 'OK':
+        return {'status': compared['status']}
+    suppliers = {s['supplier_id']: s for s in compared['suppliers']}
+    case = _read(lambda: store.get_work_case(context.case_id))
+    style = _read(lambda: store.current_send_settings(context.case_id)) or {}
+    common = {'회신기한': (date.today() + timedelta(days=RFQ_REPLY_DAYS)).isoformat(),
+              '품목': case.get('item_name') or '요청 품목', **_style_values(style)}
+    drafts, rejected = [], []
+    for request in requests:
+        supplier = suppliers.get(request.supplier_id)
+        if supplier is None:
+            rejected.append({'supplier_id': request.supplier_id, 'code': 'NOT_IN_COMPARISON'})
+            continue
+        open_fields = set(supplier['missing_required']) | {c['field'] for c in supplier['unknown_costs']} | {
+            r['field'] for r in supplier['requirements'] if r['state'] == 'CHECK'}
+        fields = list(dict.fromkeys(request.fields))
+        if not set(fields) <= open_fields:
+            rejected.append({'supplier_id': request.supplier_id, 'code': 'FIELD_NOT_OPEN',
+                             'fields': sorted(set(fields) - open_fields)})
+            continue
+        contact = _read(lambda: store.get_supplier(context.case_id, request.supplier_id)) or {}
+        recipient = (contact.get('contact_email') or '').strip()
+        if not recipient:
+            rejected.append({'supplier_id': request.supplier_id, 'code': 'NO_CONTACT'})
+            continue
+        lines = '\n'.join(f'{n}. {clarify_question(field)}' for n, field in enumerate(fields, 1))
+        subject, body = _mail_text(CLARIFY_SUBJECT, CLARIFY_BODY,
+                                   {**common, '업체명': contact.get('name') or '담당자', '질문목록': lines})
+        key = hashlib.sha256(
+            f'{context.case_id}|{context.input_revision}|CLARIFICATION|{request.supplier_id}'.encode()).hexdigest()
+        record = MailDraftRecord(
+            work_case_id=context.case_id, supplier_id=request.supplier_id, purpose='CLARIFICATION', recipient=recipient,
+            subject=subject, body_text=body,
+            evidence_refs_jsonb=[f"quote_versions:{supplier['quote_version_id']}"] + (
+                [f'agent_runs:{context.agent_run_id}'] if context.agent_run_id else []),
+            input_revision=context.input_revision, style_snapshot_jsonb=style, idempotency_key=key)
+        saved = store.insert_mail_draft(record, context.input_revision)
+        if saved is None:
+            return {'status': 'REVISION_CHANGED'}
+        drafts.append({'supplier_id': request.supplier_id, 'draft_id': saved[0], 'fields': fields})
+    result = {'status': 'DRAFTED' if drafts else 'REJECTED', 'drafts': drafts, 'rejected': rejected}
+    hints = {item['code']: _CLARIFY_HINTS[item['code']] for item in rejected}
+    return result | {'hints': hints} if hints else result
+
+
+@register
+@tool
+def create_clarification_draft(requests: list[ClarificationRequest], runtime: ToolRuntime[RunContext]) -> dict:
+    '''업체에 보낼 보완 요청 메일 초안을 저장한다(발송하지 않는다). 메일 문안·질문 문장·받는 주소는 도구가 정한다.
+    requests: 업체마다 물을 항목 [{supplier_id, fields}]. 한 번에 모든 업체를 보낸다.
+      fields는 check_comparability 결과의 그 업체 missing_required·unknown_costs·requirements의 field다
+      (예: 'available_quantity', 'tax_terms', 'cost:SHIPPING').
+
+    반환 status:
+    - DRAFTED: drafts(supplier_id·draft_id·fields), rejected(supplier_id·code), hints
+    - REJECTED: 모든 업체가 rejected / CONDITIONS_MISSING / REVISION_CHANGED / CASE_NOT_FOUND
+    '''
+    return save_clarification_drafts(_priority_store, _run_context(_priority_store, runtime), requests)

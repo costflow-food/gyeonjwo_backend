@@ -152,8 +152,8 @@ class Question(StrictModel):
     priority: QuestionPriority
     reason: str = Field(min_length=1, max_length=300)
     evidence_refs: list[str] = []
-    calculation_ref: str | None = None         # calculate_break_even 결과 ID
-    break_even_amount: DecimalStr | None = None
+    break_even_amount: DecimalStr | None = None  # 최종 검사가 calculate_break_even 결과로 채운다
+    formula: str | None = None                 # 역전 기준 산식 (화면 표시용, 최종 검사가 채운다)
 
 
 class PlanType(StrEnum):
