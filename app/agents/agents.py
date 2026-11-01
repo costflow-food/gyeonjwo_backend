@@ -28,6 +28,7 @@ from typing import Protocol
 from langchain.agents import create_agent
 from langchain.agents.middleware import ToolCallLimitMiddleware
 from langchain.agents.structured_output import ToolStrategy
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import ToolMessage
 from langchain_openai import ChatOpenAI
@@ -401,7 +402,34 @@ class AgentRunStore(Protocol):
 
     def finish_agent_run(self, agent_run_id: str, status: str, output: dict | None, error: dict | None) -> None:
         """status=COMPLETED면 최종 응답을 output_jsonb 최상위에 합치고, FAILED면 error_jsonb를 남긴다.
-        최종 결과(next_action·reason·unknown_fields 등)는 여기서만 쓴다. save_agent_result는 interim·참조 ID만 쓴다."""
+        최종 결과(next_action·reason·unknown_fields 등)는 여기서만 쓴다."""
+
+
+class ToolCallLog(BaseCallbackHandler):
+    """에이전트 실행 중 부른 도구와 결과를 순서대로 모은다. 실행이 실패하면 AgentRunner가 부분 결과로 남긴다."""
+
+    def __init__(self):
+        self.calls, self._open = [], {}
+
+    def on_tool_start(self, serialized, input_str, *, run_id, inputs=None, **kwargs):
+        """도구 호출 시작: 이름과 인자를 남긴다."""
+        self._open[run_id] = {'tool': (serialized or {}).get('name'), 'args': inputs if inputs is not None else input_str}
+        self.calls.append(self._open[run_id])
+
+    def on_tool_end(self, output, *, run_id, **kwargs):
+        """도구 결과를 그 호출에 붙인다. JSON이면 객체로 남긴다."""
+        content = getattr(output, 'content', output)
+        try:
+            content = json.loads(content)
+        except (TypeError, ValueError):
+            pass
+        if run_id in self._open:
+            self._open.pop(run_id)['result'] = content
+
+    def on_tool_error(self, error, *, run_id, **kwargs):
+        """도구가 예외를 올리면 그 종류를 남긴다."""
+        if run_id in self._open:
+            self._open.pop(run_id)['error'] = type(error).__name__
 
 
 class AgentRunner:
@@ -433,12 +461,16 @@ class AgentRunner:
                 hashlib.sha256(system_prompt(role).encode()).hexdigest()[:12])
             context = RunContext(context.case_id, context.input_revision, started['agent_run_id'],
                                  started['review_batch_id'])
+        log = ToolCallLog()
         try:
-            result = self.agents[role].invoke({'messages': [('user', data.model_dump_json())]}, context=context)
+            result = self.agents[role].invoke({'messages': [('user', data.model_dump_json())]}, context=context,
+                                              config={'callbacks': [log]})
             output = check_final_output(role, data, context, result['structured_response'], result['messages'])
         except Exception as error:
-            if self.runs is not None:
-                self.runs.finish_agent_run(context.agent_run_id, 'FAILED', None, {'type': type(error).__name__})
+            if self.runs is not None:      # 부분 결과: 실패하기 전까지 부른 도구와 그 결과 (07 5.2)
+                self.runs.finish_agent_run(context.agent_run_id, 'FAILED',
+                                           {'partial_tool_calls': log.calls} if log.calls else None,
+                                           {'type': type(error).__name__})
             raise
         if self.runs is not None:
             self.runs.finish_agent_run(context.agent_run_id, 'COMPLETED', output.model_dump(mode='json'), None)

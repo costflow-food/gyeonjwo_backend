@@ -27,7 +27,6 @@
 | 도구                      | 역할  | 입력 → 출력                                                     | 경계                              |
 | get_case_context          | 공통  | case_id → 요청 조건·회사 정책·revision                          | 소유·업무 범위 제한               |
 | read_mail_evidence        | 공통  | 메일 ID·본문/첨부·쪽 → 원문 구간·위치(페이지/셀)                | 소유·업무 범위 제한               |
-| save_agent_result         | 공통  | 역할 결과·근거·revision → 결과 ID·최신 여부                     | 입력 revision 확인                |
 | store_structured_mail     | ①     | 필드·단가 구간·비용·품목 비고·근거 → 견적 버전 ID               | 서버 검증 후 저장, 임의 SQL 불가  |
 | search_supplier_items     | ②     | 검색어 → 품목명에 검색어가 든 등록 품목(업체·품목·규격)          | 가격 없음, 결과 상한              |
 | search_supplier_evidence  | ②     | 같은 품목으로 고른 등록 품목 → 취급 근거·후보                   | 과거 단가를 현재 가격으로 안 줌   |
@@ -47,28 +46,28 @@ import hashlib
 import re
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Literal, Protocol, get_args
+from typing import Literal, Protocol
 
 from langchain.tools import ToolRuntime
 from langchain_core.tools import BaseTool, tool
 from pydantic import Field, StrictBool
 
-from app.agents.schemas import AGENT_IO, READ_RETRY_LIMIT, AgentRole, DecimalStr, RunContext
+from app.agents.schemas import READ_RETRY_LIMIT, AgentRole, DecimalStr, RunContext
 from app.core.errors import ReviewRequired
 from app.features.review.domain.validation import decimal_value, explicit_date, unit_name
 from app.shared.domain.schemas import StrictModel
 
-_COMMON = ('get_case_context', 'read_mail_evidence', 'save_agent_result')
-_READ = ('get_case_context', 'read_mail_evidence')     # ①②는 최종 응답만 저장하므로 save_agent_result가 없다
+# 역할 결과는 AgentRunner가 최종 응답으로 agent_runs에 저장한다(실패하면 그때까지의 도구 호출도). 저장 도구는 없다
+_READ = ('get_case_context', 'read_mail_evidence')
 
 ROLE_TOOLS = {
     AgentRole.INFO_EXTRACTOR: _READ + ('store_structured_mail',),
     AgentRole.CANDIDATE: _READ + ('search_supplier_items', 'search_supplier_evidence', 'crawl_supplier_candidates',
                                   'create_rfq_draft'),
-    AgentRole.INFO_PRIORITY: _COMMON + ('check_comparability', 'calculate_break_even',
+    AgentRole.INFO_PRIORITY: _READ + ('check_comparability', 'calculate_break_even',
                                         'create_clarification_draft'),
-    AgentRole.RESPONSE_PLAN: _COMMON + ('check_comparability', 'build_plan_candidates', 'validate_purchase_plan'),
-    AgentRole.COUNTER_OFFER: _COMMON + ('check_comparability', 'calculate_counter_offer', 'validate_counter_offer',
+    AgentRole.RESPONSE_PLAN: _READ + ('check_comparability', 'build_plan_candidates', 'validate_purchase_plan'),
+    AgentRole.COUNTER_OFFER: _READ + ('check_comparability', 'calculate_counter_offer', 'validate_counter_offer',
                                         'create_counter_offer_draft'),
 }
 KNOWN_TOOLS = frozenset(name for names in ROLE_TOOLS.values() for name in names)
@@ -94,7 +93,7 @@ def tools_for(role: AgentRole) -> list[BaseTool]:
 # 도구 구현 — 역할별 구역에만 추가한다 (구역을 나눠 병합 충돌을 줄인다)
 # ─────────────────────────────────────────────
 
-# 공통: get_case_context, read_mail_evidence, save_agent_result
+# 공통: get_case_context, read_mail_evidence
 #   06 work_cases·mail_messages·agent_runs 기준. 업무·revision·실행 ID는 runtime.context(RunContext),
 #   역할은 build_agent가 정한 에이전트 이름에서 읽는다 (LLM 인자 아님).
 
@@ -123,13 +122,6 @@ class CaseStore(Protocol):
         """업무에 속한 메일의 본문(part='body') 또는 첨부(part=attachment_ref) 한 쪽의 {text, location}.
         body_text와 normalized_jsonb의 문서 읽기·OCR 결과에서 읽는다. 업무 밖이면 None."""
 
-    def save_agent_output(self, case_id: str, agent_run_id: str, role: str, expected_input_revision: int,
-                          output: dict) -> Literal['SAVED', 'REVISION_CHANGED', 'RUN_MISMATCH']:
-        """agent_runs.output_jsonb에 save_agent_result의 {interim, source_quote_ids, source_run_ids}를 합친다.
-        같은 트랜잭션에서 검사해 저장하지 않으면 그 이유를 돌려준다.
-        REVISION_CHANGED: input_revision이 다름 / RUN_MISMATCH: 실행 기록이 없거나 업무·역할이 다름.
-        최종 결과 키는 AgentRunStore.finish_agent_run만 쓴다."""
-
 
 _case_store: CaseStore | None = None
 
@@ -143,11 +135,6 @@ def _run_context(store, runtime: ToolRuntime) -> RunContext:
     if store is None or runtime.context is None:
         raise RuntimeError('store or run context is not configured')
     return runtime.context
-
-
-def _agent_role(runtime: ToolRuntime) -> AgentRole:
-    """build_agent가 create_agent(name=role.lower())로 정한 이름. LLM이 바꿀 수 없다."""
-    return AgentRole(str((runtime.config or {}).get('metadata', {}).get('lc_agent_name', '')).upper())
 
 
 def _read(load):
@@ -188,30 +175,6 @@ def load_evidence(store: CaseStore, context: RunContext, mail_id: str, part: str
             'location': item.get('location'), 'truncated': len(text) > MAX_EVIDENCE_CHARS, 'empty': not text.strip()}
 
 
-def save_result(store: CaseStore, context: RunContext, role: AgentRole, next_action: str, reason: str,
-                unknown_fields: list[str], source_quote_ids: list[str], source_run_ids: list[str]) -> dict:
-    if context.agent_run_id is None:
-        raise RuntimeError('agent run is not recorded')
-    if next_action not in get_args(AGENT_IO[role][1].model_fields['next_action'].annotation):
-        return {'status': 'REJECTED', 'code': 'INVALID_NEXT_ACTION'}
-    if not 1 <= len(reason.strip()) <= 500:
-        return {'status': 'REJECTED', 'code': 'INVALID_REASON'}
-    current = store.current_input_revision(context.case_id)
-    if current is None:
-        return {'status': 'CASE_NOT_FOUND'}
-    # 최종 결과(next_action·reason·unknown_fields 최상위 키)는 AgentRunner가 검증된 최종 응답으로 저장한다.
-    # 이 도구는 중간 결과를 interim에, 참조 ID를 최상위에 둬서 최종 결과와 겹쳐 쓰지 않는다
-    output = {'interim': {'next_action': next_action, 'reason': reason.strip(), 'unknown_fields': unknown_fields},
-              'source_quote_ids': source_quote_ids, 'source_run_ids': source_run_ids}
-    saved = 'REVISION_CHANGED' if current != context.input_revision else store.save_agent_output(
-        context.case_id, context.agent_run_id, role, context.input_revision, output)
-    if saved == 'RUN_MISMATCH':
-        return {'status': 'REJECTED', 'code': 'RUN_MISMATCH'}
-    if saved != 'SAVED':
-        return {'status': 'REVISION_CHANGED', 'is_latest': False}
-    return {'status': 'SAVED', 'result_id': context.agent_run_id, 'is_latest': True}
-
-
 @register
 @tool
 def get_case_context(runtime: ToolRuntime[RunContext]) -> dict:
@@ -235,23 +198,6 @@ def read_mail_evidence(mail_id: str, runtime: ToolRuntime[RunContext], part: str
       / NOT_FOUND(이 업무의 메일인데 part·page가 틀렸으면 available_parts로 읽을 수 있는 part·쪽수를 알려준다)
     '''
     return load_evidence(_case_store, _run_context(_case_store, runtime), mail_id, part, page)
-
-
-@register
-@tool
-def save_agent_result(next_action: str, reason: str, runtime: ToolRuntime[RunContext],
-                      unknown_fields: list[str] | None = None, source_quote_ids: list[str] | None = None,
-                      source_run_ids: list[str] | None = None) -> dict:
-    '''이번 역할 실행의 중간 결과(next_action·reason·unknown_fields)와 참조한 견적 버전 ID·이전 역할 실행 ID를 저장한다.
-    최종 결과는 마지막 응답으로 저장되므로 이 도구로 대신하지 않는다.
-    next_action은 이 역할이 고를 수 있는 값이어야 하고 reason은 1~500자다.
-
-    반환 status: SAVED면 result_id·is_latest / REVISION_CHANGED(저장 안 함)
-      / REJECTED(code: INVALID_NEXT_ACTION·INVALID_REASON·RUN_MISMATCH(이 실행 기록에 쓸 수 없음)) / CASE_NOT_FOUND
-    '''
-    context = _run_context(_case_store, runtime)
-    return save_result(_case_store, context, _agent_role(runtime), next_action, reason, unknown_fields or [],
-                       source_quote_ids or [], source_run_ids or [])
 
 
 # ① INFO_EXTRACTOR: store_structured_mail
@@ -963,7 +909,6 @@ class CandidateStore(CaseStore, Protocol):
         unit_price, total_amount, currency)."""
 
 
-
 _candidate_store: CandidateStore | None = None
 
 
@@ -1396,7 +1341,6 @@ def create_rfq_draft(supplier_item_ids: list[str], supplier_ids: list[str], runt
     '''
     return save_mail_drafts(_draft_store, _run_context(_draft_store, runtime), 'RFQ', supplier_item_ids, supplier_ids,
                             questions)
-
 
 
 # ─────────────────────────────────────────────
