@@ -6,10 +6,26 @@
 """
 import json
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Protocol
 
 from app.agents import tools
-from app.agents.schemas import PlanCheck, PriceCheck
+from app.agents.schemas import CounterOfferSummary, PlanCheck, PriceCheck, ReviewCard
+
+
+class ReviewCardStore(Protocol):
+    """검토 카드 저장소 (06 work_cases.latest_review_jsonb·latest_review_run_ids, workflow_logs REVIEW_CREATED)."""
+
+    def save_review_card(self, case_id: str, expected_input_revision: int, card: dict) -> str | None:
+        """업무의 최신 카드로 저장하고 상태를 Complete로 바꾼다. 이전 카드는 workflow_logs에 남긴다.
+        revision 확인과 저장은 한 트랜잭션이다. 저장하면 card_id, revision이 바뀌었으면 None."""
+
+
+_card_store: ReviewCardStore | None = None
+
+
+def use_card_store(store: ReviewCardStore | None) -> None:
+    global _card_store
+    _card_store = store
 
 
 def preprocess(state) -> dict:
@@ -50,10 +66,31 @@ def price_validation(state) -> dict:
     return update
 
 
+COUNTER_STATUS = {'COUNTER_OFFER_PROPOSED': 'PROPOSED', 'COUNTER_OFFER_SKIPPED': 'SKIPPED', 'HOLD': 'HOLD'}
+
+
+def build_review_card(state) -> ReviewCard:
+    """그래프 상태에서 검토 카드를 만든다. ⑤가 돌지 않았으면 역제안 칸은 비운다."""
+    result = state.get('counter_offer_result') or {}
+    counter = None
+    if result.get('next_action') in COUNTER_STATUS:
+        counter = CounterOfferSummary(status=COUNTER_STATUS[result['next_action']], target=state.get('counter_offer'),
+                                      reference=result.get('reference'), draft_ids=result.get('draft_ids', []),
+                                      reason=result.get('reason'))
+    return ReviewCard(case_id=state['case_id'], input_revision=state['input_revision'],
+                      quote_version_ids=state.get('quote_version_ids', []), plans=state.get('plans', []),
+                      counter_offer=counter, questions=state.get('questions', []),
+                      unresolved=list(dict.fromkeys(state.get('unresolved', []))), steps=state.get('steps', []))
+
+
 def review_card(state) -> dict:
-    """검토 카드 저장. revision은 그래프가 직전에 확인한다. 역제안을 생략했으면 counter_offer_skip_reason을 표시한다.
-    반환: {'card_id': str}"""
-    raise NotImplementedError
+    """검토 카드 저장. revision은 그래프가 직전에 확인하고, 저장소가 저장 트랜잭션 안에서 다시 확인한다.
+    역제안을 생략·보류했으면 그 사유와 참고 계산을 카드에 보인다.
+    반환: {'card_id': str} 또는 revision이 바뀌어 저장하지 못했으면 {'card_id': None}"""
+    if _card_store is None:
+        raise RuntimeError('review card store is not configured')
+    card = build_review_card(state).model_dump(mode='json')
+    return {'card_id': _card_store.save_review_card(state['case_id'], state['input_revision'], card)}
 
 
 @dataclass(frozen=True)

@@ -215,6 +215,28 @@ class CounterOfferTarget(StrictModel):
     alternative: list[Allocation] = []               # 비교한 대안의 배분
 
 
+class CounterOfferSummary(StrictModel):
+    """검토 카드의 ⑤ 결과. 생략·보류에도 사유와 참고 계산을 보인다."""
+    status: Literal['PROPOSED', 'SKIPPED', 'HOLD']
+    target: CounterOfferTarget | None = None
+    reference: CounterOfferReference | None = None
+    draft_ids: list[str] = []
+    reason: str | None = None
+
+
+class ReviewCard(StrictModel):
+    """검토 카드 (06 work_cases.latest_review_jsonb). 담당자가 보는 구매안·역제안·미확인과 그 근거 견적.
+    숫자는 검증 노드를 통과한 값을 그대로 옮긴다(카드에 보인 숫자는 계산 코드가 바뀌어도 카드에 남는다)."""
+    case_id: str
+    input_revision: int
+    quote_version_ids: list[str] = []
+    plans: list[Plan] = []
+    counter_offer: CounterOfferSummary | None = None
+    questions: list[Question] = []         # ③이 남긴 확인 항목 (묻지 않은 LOW_VALUE 근거 포함)
+    unresolved: list[str] = []             # 미확인·보류 사유
+    steps: list['AgentStep'] = []          # 역할 호출 기록 (next_action·reason)
+
+
 # ─────────────────────────────────────────────
 # 5. 에이전트 입력
 # ─────────────────────────────────────────────
@@ -348,3 +370,4 @@ AGENT_IO = {
 }
 
 RunCaseOutput.model_rebuild()
+ReviewCard.model_rebuild()

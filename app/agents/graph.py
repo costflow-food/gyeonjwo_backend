@@ -8,7 +8,8 @@
                          ⑤ ─ COUNTER_OFFER_PROPOSED ─┬ price_validation ─ PASS ─ review_card (COMPLETE)
                            └ COUNTER_OFFER_SKIPPED ──┘                 FIX → ⑤ · NEED_INFO → ③
     COUNTER_OFFER_SKIPPED: 정책상 역제안 불필요. 가격 검증이 생략 허용을 확인하고, 카드에 생략 사유를 남긴다.
-    ③④⑤ RECHECK_SOURCE → ① · ④⑤ NEEDS_EVIDENCE → ③ · 모든 역할 HOLD → hold (ON_HOLD)
+    ③④⑤ RECHECK_SOURCE → ① · ④⑤ NEEDS_EVIDENCE → ③ · ①~④ HOLD → hold (ON_HOLD)
+    ⑤ HOLD(정책 없음 등) → review_card: 구매안은 검증을 통과했으므로 카드에 구매안·역제안 보류 사유·참고 계산을 보인다
 
 회신·승인 대기에서는 그래프를 끝낸다(WAITING_REPLY). 백엔드가 발송하고, 회신이 오면 start_from=REPLY로 다시 실행한다.
 역할 호출이 MAX_ROLE_CALLS_PER_RUN을 넘거나, 에이전트·노드 오류·형식 위반이면 FAILED,
@@ -25,8 +26,8 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.nodes import Nodes
 from app.agents.schemas import (AGENT_IO, MAX_ROLE_CALLS_PER_RUN, AgentInput, AgentNextAction as N, AgentOutput,
-                                AgentRole, AgentStep, Candidate, CandidateIn, CounterOfferIn, CounterOfferReference,
-                                CounterOfferTarget, ExtractionIn, Plan, PlanCheck, PlanIn, PriceCheck, PriorityIn,
+                                AgentRole, AgentStep, Candidate, CandidateIn, CounterOfferIn, CounterOfferTarget,
+                                ExtractionIn, Plan, PlanCheck, PlanIn, PriceCheck, PriorityIn,
                                 ProcessingStep,
                                 Question, RunCaseInput, RunCaseOutput, RunStatus, StartFrom)
 
@@ -54,7 +55,7 @@ class CaseState(TypedDict, total=False):
     plans: list[Plan]                                 # ④
     counter_offer: CounterOfferTarget | None          # ⑤
     counter_offer_skip_reason: str | None             # ⑤ COUNTER_OFFER_SKIPPED 사유
-    counter_offer_reference: CounterOfferReference | None  # ⑤ 참고 계산 (검토 카드에 보인다)
+    counter_offer_result: dict | None                 # ⑤ next_action·reason·reference·draft_ids (검토 카드용)
     # 분기 기준
     last_action: N
     plan_check: PlanCheck
@@ -103,7 +104,9 @@ OUTPUTS = {
     AgentRole.INFO_PRIORITY: lambda o: {'questions': o.questions, 'draft_ids': o.draft_ids, 'pending_questions': []},
     AgentRole.RESPONSE_PLAN: lambda o: {'plans': o.plans},
     AgentRole.COUNTER_OFFER: lambda o: {
-        'counter_offer': o.target, 'draft_ids': o.draft_ids, 'counter_offer_reference': o.reference,
+        'counter_offer': o.target, 'draft_ids': o.draft_ids,
+        'counter_offer_result': {'next_action': o.next_action, 'reason': o.reason, 'draft_ids': o.draft_ids,
+                                 'reference': o.reference and o.reference.model_dump(mode='json')},
         'counter_offer_skip_reason': o.reason if o.next_action == N.COUNTER_OFFER_SKIPPED else None},
 }
 
@@ -185,7 +188,10 @@ def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: N
     def review_card(state):
         if changed(state):
             return STALE
-        return nodes.review_card(state) | {'status': RunStatus.COMPLETE, 'processing_step': ProcessingStep.REVIEW_READY}
+        card = nodes.review_card(state)
+        if not card.get('card_id'):
+            return STALE
+        return card | {'status': RunStatus.COMPLETE, 'processing_step': ProcessingStep.REVIEW_READY}
 
     graph.add_node('review_card', code_node('review_card', review_card))
     graph.add_node('wait_reply', lambda s: {'status': RunStatus.WAITING_REPLY})
@@ -204,7 +210,8 @@ def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: N
         'priority': {N.REQUEST_CLARIFICATION: 'wait_reply', N.BUILD_PLANS: 'plan', N.RECHECK_SOURCE: 'extraction'},
         'plan': {N.PLANS_PROPOSED: 'plan_validation', N.NEEDS_EVIDENCE: 'priority', N.RECHECK_SOURCE: 'extraction'},
         'counter_offer': {N.COUNTER_OFFER_PROPOSED: 'price_validation', N.COUNTER_OFFER_SKIPPED: 'price_validation',
-                          N.NEEDS_EVIDENCE: 'priority', N.RECHECK_SOURCE: 'extraction'},
+                          N.NEEDS_EVIDENCE: 'priority', N.RECHECK_SOURCE: 'extraction',
+                          N.HOLD: 'review_card'},     # 역제안만 보류: 검증된 구매안과 참고 계산을 카드로 보인다
     }
     for name, table in routes.items():
         def route(state, table=table):
