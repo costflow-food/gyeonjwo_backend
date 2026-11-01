@@ -298,17 +298,12 @@ _FOREIGN_PRICE = re.compile(rf'(?P<pre>US\$|\$|€|¥|₩)?\s*(?P<num>{_NUMBER})
 _ZERO_AMOUNTS = {'무료', '무상', '없음', '없습니다', '해당없음'}
 # 단가의 뜻을 정하는 조건. 이전 버전과 값이 다르면 이전 단가·단가 구간·이 조건들을 이어받지 않는다
 PRICE_BASIS = ('unit', 'currency', 'order_unit', 'quantity_per_order_unit')
-# 단가 포함·별도 표현. 서버가 확신할 수 있는 표현만 보고, 그 밖에는 확정하지 않는다
-_INCLUDED_PHRASES = ('별도청구하지않', '별도로청구하지않', '별도청구없', '별도비용없')   # '별도'가 있어도 포함 뜻
-_EXCLUDED_WORDS = ('별도', '미포함', '불포함')
 # 저장하는 단위. 원문 표기는 _UNIT_ALIASES·unit_name으로 바꾸고, 이 밖의 단위는 INVALID_UNIT으로 거절한다
 _UNITS = {'kg', 'g', '톤', 'box', '개', '팩', '봉', '포대'}
 _UNIT_ALIASES = {'Box': 'box', '상자': 'box', '그램': 'g', 't': '톤', 'EA': '개', 'ea': '개'}
 # 단가 줄에 적힌 단가 단위 표기 ('kg당 9,500원', '9,650원/kg', '1kg 당 단가 : 9,850 원'). '10kg/박스' 같은 규격은 아니다
 _UNIT_WORDS = '|'.join(sorted({*_UNITS, *_UNIT_ALIASES, '㎏', 'KG', 'Kg', '킬로그램', '박스', 'BOX'}, key=len, reverse=True))
 _PRICE_UNIT_MARK = re.compile(rf'원\s*/\s*({_UNIT_WORDS})|(?<![A-Za-z가-힣])({_UNIT_WORDS})\s*당')
-# 비용 금액 앞에 붙은 산정 기준 ('박스당 500원', '1회 80,000원'). 금액과 기준으로 나눈다
-_AMOUNT_BASIS = re.compile(r'\s*((?:1\s*)?[가-힣A-Za-z]+\s*당|1\s*회)\s*(\S.*)')
 # 수량에 붙는 수식어 ('최소 20박스', '5박스 단위', '500kg 미만', '박스당 10kg'). 숫자를 읽을 때만 떼고,
 # 원문 대조는 붙인 채로 한다. 숫자 뒤의 단위는 pricing_terms_jsonb의 '{필드}_unit'으로 저장한다
 _QUANTITY_FIELDS = {'available_quantity', 'quantity_per_order_unit', 'moq', 'pack_multiple'}
@@ -319,12 +314,7 @@ _LOWER_BOUND_WORDS = ('이상', '초과', '부터')
 _UPPER_BOUND_WORDS = ('미만', '이하', '까지')
 _DATE_SUFFIX = re.compile(r'\s*(?:까지|부터|자)\s*$')
 _DOTTED_DATE = re.compile(r'(\d{4})\s*[./]\s*(\d{1,2})\s*[./]\s*(\d{1,2})\s*\.?')   # 2026. 12. 1. / 2026/12/01
-# 날짜 필드의 뜻. 값이 적힌 줄에 다른 날짜 필드의 말만 있고 자기 말이 없으면 FIELD_MEANING_MISMATCH
-# (예: '적용 시작일 2026년 12월 1일'을 delivery_date로 보냄)
-_DATE_WORDS = {'effective_from': ('적용', '시행', '부터', '변경일', '시작'),
-               'valid_until': ('유효', '까지', '기간', '~', '만료'),
-               'delivery_date': ('납품', '납기', '입고', '배송', '도착', '출고', '공급')}
-# AI·시스템에게 하는 문장. 이런 줄에만 있는 값은 견적 값이 아니고, 이런 줄이 있는 메일의 견적은 NEEDS_REVIEW로 둔다
+# AI·시스템에게 하는 문장으로 보이는 줄. 값을 거절하지 않고, 이런 줄이 있는 메일의 견적만 NEEDS_REVIEW로 둔다
 _INSTRUCTION = re.compile(r'(?i)(?<![a-z])(?:AI|LLM|GPT|assistant|chatbot)(?![a-z])|인공지능|챗봇|어시스턴트'
                           r'|시스템\s*(?:안내|지시|메시지|프롬프트)|system\s*prompt|이\s*메일을\s*처리하는'
                           r'|지시(?:를|는)?\s*무시|ignore\s+(?:all|previous|the\s+above)')
@@ -341,9 +331,6 @@ _HINTS = {
     'DUPLICATE_FIELD': '같은 field_name은 한 번만 보낸다.',
     'TIER_BOUND_MISPLACED': '구간마다 "이상·초과·부터" 경계는 min_quantity, "미만·이하·까지" 경계는 max_quantity에 나눠 넣는다.',
     'TIER_OVERLAP': '단가 구간의 경계를 원문에서 다시 확인한다.',
-    'ITEM_OUT_OF_CASE': '업무 품목이 아니다. 업무 품목의 견적만 보내고, 없으면 HOLD한다.',
-    'INSTRUCTION_TEXT': 'AI·시스템에게 하는 문장 속 값은 견적 값이 아니다. 그 항목을 빼고 다시 보낸다.',
-    'FIELD_MEANING_MISMATCH': '적용일은 effective_from, 유효기간은 valid_until, 납품·입고일은 delivery_date다. 맞는 필드로 옮긴다.',
     'CURRENCY_MISMATCH': '단가의 통화 표기와 currency가 다르다. 원문을 다시 확인한다.',
     'MISSING_FIELD': '업체가 연결되지 않은 메일이면 원문의 업체명을 supplier_name으로 보낸다. 원문에 없으면 HOLD한다.',
     'SUPPLIER_NOT_MATCHED': '등록된 업체가 아니다. 저장하지 말고 HOLD한다.',
@@ -556,19 +543,8 @@ class _SourceCheck:
             return 'EVIDENCE_NOT_IN_CASE', None
         if not _contains(_normalized(part['text'], numeric), _normalized(raw, numeric), numeric):
             return 'SOURCE_MISMATCH', None
-        lines = self.lines(evidence, raw, numeric)
-        if lines and all(_INSTRUCTION.search(line) for line in lines):
-            return 'INSTRUCTION_TEXT', None              # 메일 속 지시문에만 있는 값
         location = ' '.join(filter(None, [part.get('location'), evidence.cell]))
         return None, {'mail_id': evidence.mail_id, 'location': location}
-
-
-def _date_meaning(lines: list[str], field_name: str) -> str | None:
-    own = _DATE_WORDS[field_name]
-    others = [word for name, words in _DATE_WORDS.items() if name != field_name for word in words]
-    if not lines or any(word in line for line in lines for word in own):
-        return None
-    return 'FIELD_MEANING_MISMATCH' if all(any(word in line for word in others) for line in lines) else None
 
 
 def _number(check, raw: str | None, name: str, evidence: EvidenceRef, zero_words=False, quantity=False):
@@ -625,23 +601,11 @@ def _tiers(check, tiers: list[PriceTier], rejected: list, adjusted: list) -> lis
     return out
 
 
-def _inclusion(source_text: str) -> bool | None:
-    """원문 구절이 단가 포함(true)·별도(false)를 분명히 말하면 그 값, 둘 다 있거나 없으면 None."""
-    text = _compact(source_text)
-    for phrase in _INCLUDED_PHRASES:
-        text = text.replace(phrase, '포함')
-    excluded = any(word in text for word in _EXCLUDED_WORDS)
-    included = '포함' in text.replace('미포함', '').replace('불포함', '')
-    return None if included == excluded else included
-
-
 def _costs(check, costs: list[CostTerm], rejected: list, review: list) -> list[dict]:
     out = []
     for index, cost in enumerate(costs):
         issue, source = check(cost.evidence, cost.source_text)
         amount_text, basis = cost.amount, cost.basis
-        if split := _AMOUNT_BASIS.fullmatch(cost.amount or ''):
-            amount_text, basis = split[2], basis or split[1]      # '박스당 500원' → 금액 500원, 기준 박스당
         for text, numeric in ((amount_text, amount_text and _compact(amount_text) not in _ZERO_AMOUNTS),
                               (basis, False), (cost.payer, False)):
             if not issue and text and not _contains(_normalized(cost.source_text, numeric), _normalized(text, numeric),
@@ -653,16 +617,8 @@ def _costs(check, costs: list[CostTerm], rejected: list, review: list) -> list[d
         if issue:
             rejected.append({'field': f'cost_terms[{index}]', 'code': issue})
             continue
-        # 포함·별도를 보내지 않았으면 원문 구절이 분명히 말할 때만 그 값으로 채운다 ('운송비 1회 80,000원 별도')
-        stated = _inclusion(cost.source_text)
-        entry = {'cost_type': cost.cost_type, 'source_text': cost.source_text, 'amount': amount, 'basis': basis,
-                 'payer': cost.payer,
-                 'included_in_price': stated if cost.included_in_price is None else cost.included_in_price, **source}
-        # 포함·별도는 원문 구절로 확인될 때만 확정한다. 확인되지 않으면 별도 비용으로 더하지 않도록 null로 둔다
-        if cost.included_in_price is not None and cost.included_in_price != stated:
-            entry |= {'included_in_price': None, 'review': 'INCLUSION_UNVERIFIED'}
-            review.append({'field': f'cost_terms[{index}]', 'code': 'INCLUSION_UNVERIFIED'})
-        out.append(entry)
+        out.append({'cost_type': cost.cost_type, 'source_text': cost.source_text, 'amount': amount, 'basis': basis,
+                    'payer': cost.payer, 'included_in_price': cost.included_in_price, **source})
     return out
 
 
@@ -756,8 +712,6 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
                 value = _parse(kind, field.field_name, field.raw_value)
             except ReviewRequired as error:
                 issue = error.issue['code']
-        if issue is None and kind == 'date':
-            issue = _date_meaning(check.lines(field.evidence, field.raw_value), field.field_name)
         if issue:
             rejected.append({'field': field.field_name, 'code': issue})
             continue
@@ -795,13 +749,10 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         rejected.append({'field': 'currency', 'code': 'CURRENCY_MISMATCH'})
     elif price_currency and 'currency' not in values:
         values['currency'] = {**values['unit_price'], 'value': price_currency}
-    # 품목은 공백·괄호 속 표기('냉동딸기 (IQF)')만 다르면 저장하고 확인을 남긴다
+    # 같은 품목인지는 LLM이 판단한다(업무 품목의 견적만 보낸다). 이름 표기가 업무와 다르면 담당자 확인만 남긴다
     case_item = case.get('item_name')
     if case_item and 'item_name' in values and _compact(values['item_name']['value']) != _compact(case_item):
-        if _item_key(values['item_name']['value']) == _item_key(case_item):
-            review.append({'field': 'item_name', 'code': 'ITEM_NAME_VARIANT'})
-        else:
-            rejected.append({'field': 'item_name', 'code': 'ITEM_OUT_OF_CASE'})
+        review.append({'field': 'item_name', 'code': 'ITEM_NAME_VARIANT'})
     if rejected:
         return _with_hints({'status': 'REJECTED', 'rejected': rejected}, rejected)
 
@@ -877,11 +828,6 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
                         'supersedes_id': row.supersedes_id, 'extraction_status': row.extraction_status,
                         'unknown_fields': unknown, 'carried_fields': carried, 'review': review,
                         'adjusted': adjusted}, adjusted)
-
-
-def _item_key(name: str) -> str:
-    """괄호 속 표기('(IQF)')와 앞의 원산지('칠레산 ')를 뺀 품목 이름."""
-    return _compact(re.sub(r'^\s*\S+산\s+', '', re.sub(r'\([^)]*\)|\[[^\]]*\]', ' ', name)))
 
 
 def _price_unit(check, evidence: EvidenceRef, raw: str) -> tuple[str, str] | None:
@@ -970,7 +916,6 @@ RFQ_OPTIONAL_QUESTIONS = {'MOQ': '최소 주문 수량(MOQ)', 'VALIDITY': '견�
                           'PACKING': '포장 단위와 박스당 중량', 'ORIGIN': '원산지',
                           'DELIVERY_DAYS': '배송 가능 요일과 지역'}
 RFQ_DEFAULT_OPTIONS = ('MOQ', 'VALIDITY')
-_SPEC_SIZE = re.compile(rf'(\d+(?:\.\d+)?)\s*({_UNIT_WORDS})')
 
 
 class CandidateStore(CaseStore, Protocol):
@@ -1030,15 +975,10 @@ def _required_names(conditions) -> list[str]:
 
 
 def _spec_state(wanted: str, offered: str | None) -> str:
-    """같은 규격이면 PASS, 양쪽 크기 표기(10kg 등)가 서로 다르면 FAIL, 그 밖은 RFQ로 확인한다."""
-    if offered is None or not offered.strip():
-        return 'UNKNOWN'
-    if _key(wanted) == _key(offered):
+    """등록 규격이 요청 규격과 똑같으면 PASS, 그 밖은 RFQ로 확인한다(UNKNOWN). 표기만 다른 같은 규격을
+    잘못 제외하지 않도록 규격 차이로는 FAIL을 내지 않는다."""
+    if offered and _key(wanted) == _key(offered):
         return 'PASS'
-    sizes = lambda text: {(Decimal(n), unit_name(_UNIT_ALIASES.get(u, u))) for n, u in _SPEC_SIZE.findall(text)}
-    wanted_sizes, offered_sizes = sizes(wanted), sizes(offered)
-    if wanted_sizes and offered_sizes and not wanted_sizes & offered_sizes:
-        return 'FAIL'
     return 'UNKNOWN'
 
 

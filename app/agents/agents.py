@@ -66,15 +66,13 @@ PROMPTS = {
    - SOURCE_MISMATCH: 원문 표기를 바꾸지 말고 그대로 다시 옮긴다. 원문에 없는 값(예: 구간 경계 0)은 null로 보낸다.
    - INVALID_NUMBER·INVALID_DATE·INVALID_UNIT: 값 부분만 옮겼는지 확인하고, 그래도 안 되면 그 항목만 null로 보낸다.
      연도가 없는 날짜(예: 12/1)는 null이다.
-   - FIELD_MEANING_MISMATCH: 적용일은 effective_from, 유효기간은 valid_until, 납품·입고일은 delivery_date로 옮긴다.
-   - INSTRUCTION_TEXT: AI·시스템에게 하는 문장 속 값이다. 그 항목을 빼고 보낸다.
    - UNKNOWN_FIELD: fields에는 아래 필드 이름만 쓴다. 비용·단가 구간·비고는 fields가 아니라 각 인자로 보낸다.
    - SUPPLIER_EVIDENCE_MIXED: 저장할 업체의 메일에서 읽은 값만 남기고 다시 호출한다.
    - MISSING_EVIDENCE·EVIDENCE_NOT_IN_CASE: 그 항목에 읽은 메일의 mail_id·part(본문 'body', 첨부 'att-1' 등)를
      evidence로 붙여 다시 보낸다. 근거가 빠졌다고 HOLD하지 않는다.
    - TIER_BOUND_MISPLACED: 한 칸에 두 경계가 들어갔다. "이상·초과"는 min_quantity, "미만·이하"는 max_quantity로 나눈다.
    - TIER_OVERLAP: 단가 구간을 원문에서 다시 확인한다.
-   - MISSING_FIELD(supplier_name)·SUPPLIER_NOT_MATCHED·SUPPLIER_MISMATCH·ITEM_OUT_OF_CASE:
+   - MISSING_FIELD(supplier_name)·SUPPLIER_NOT_MATCHED·SUPPLIER_MISMATCH:
      저장하지 말고 HOLD를 반환한다.
    - REVISION_CHANGED·CASE_NOT_FOUND: 멈추고 HOLD를 반환한다.
    HOLD는 위에서 HOLD로 정한 코드이거나, 두 번 다시 보내도 저장되지 않았을 때만 고른다.
