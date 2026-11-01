@@ -566,6 +566,7 @@ class AgentRunner:
                                            {'partial_tool_calls': log.calls} if log.calls else None,
                                            {'type': type(error).__name__})
             raise
-        if self.runs is not None:
-            self.runs.finish_agent_run(context.agent_run_id, 'COMPLETED', output.model_dump(mode='json'), None)
+        if self.runs is not None:      # 06 agent_runs.output_jsonb: 구조화 결과 + 참고한 견적 ID(source_quote_ids)
+            sources = {'source_quote_ids': list(data.quote_version_ids)} if hasattr(data, 'quote_version_ids') else {}
+            self.runs.finish_agent_run(context.agent_run_id, 'COMPLETED', output.model_dump(mode='json') | sources, None)
         return output
