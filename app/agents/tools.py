@@ -1991,6 +1991,13 @@ def _evaluate_plan(case: dict, suppliers: dict, plan_type: str, parts: list[tupl
             'tax_basis': sorted({sheet.tax_basis or '미확인' for sheet in total['sheets']})}
 
 
+def _cheaper_than_single(split: dict, singles: list[dict]) -> bool:
+    """분산안이 두 업체 중 전량을 맡을 수 있는 쪽의 전량안보다 싼지. 한 업체가 전량을 맡을 수 있는데 분산이 더 싸지 않으면
+    그 분산은 사실상 전환안(예: D 999 + A 1)이라 보이지 않는다."""
+    totals = [Decimal(p['total_amount']) for p in singles if p['status'] != 'INVALID' and p['total_amount'] is not None]
+    return split['total_amount'] is not None and all(Decimal(split['total_amount']) < total for total in totals)
+
+
 def plan_candidates(store: ComparisonStore, context: RunContext, met: list[MetRequirement]) -> dict:
     """build_plan_candidates의 본체. 유지안, 전환안·분산안(각각 총액이 낮은 MAX_PLAN_OPTIONS개)과 만들지 못한 이유."""
     case, suppliers = _plan_suppliers(store, context, met)
@@ -2012,8 +2019,13 @@ def plan_candidates(store: ComparisonStore, context: RunContext, met: list[MetRe
                 if found['status'] != 'FOUND':
                     not_split.append({'supplier_ids': [first, second], 'code': found['status']})
                     continue
-                splits.append(_evaluate_plan(case, suppliers, 'SPLIT', [(first, found['quantities'][0]),
-                                                                        (second, found['quantities'][1])]))
+                plan = _evaluate_plan(case, suppliers, 'SPLIT', [(first, found['quantities'][0]),
+                                                                 (second, found['quantities'][1])])
+                if not _cheaper_than_single(plan, [p for p in keep + switches if p['allocations'][0]['supplier_id']
+                                                   in (first, second)]):
+                    not_split.append({'supplier_ids': [first, second], 'code': 'NOT_CHEAPER_THAN_SINGLE'})
+                    continue
+                splits.append(plan)
     by_total = lambda plan: (plan['status'] == 'INVALID', Decimal(plan['total_amount'] or 'Infinity'))
     infeasible = [{'plan_type': p['plan_type'], 'supplier_ids': [a['supplier_id'] for a in p['allocations']],
                    'violations': [v['code'] for v in p['violations']]} for p in switches + splits if p['status'] == 'INVALID']
@@ -2087,6 +2099,12 @@ def validate_plan(store: ComparisonStore, context: RunContext, plan_type: str, a
                     'hint': '이 두 업체로는 조건(MOQ·발주 배수·공급량)을 만족하는 배분이 없다. 다른 조합을 고르거나 이 안을 뺀다.'}
         parts = [(ids[0], split[0]), (ids[1], split[1])]
     result = _evaluate_plan(case, suppliers, plan_type, parts)
+    if plan_type == 'SPLIT' and mode == 'cheapest' and result['status'] != 'INVALID':
+        singles = [_evaluate_plan(case, suppliers, 'KEEP' if suppliers[sid]['is_incumbent'] else 'SWITCH', [(sid, quantity)])
+                   for sid in ids]
+        if not _cheaper_than_single(result, singles):
+            return result | {'status': 'INVALID', 'violations': [{'code': 'NOT_CHEAPER_THAN_SINGLE', 'supplier_id': None}],
+                             'hint': '한 업체가 전량을 맡는 안이 더 싸다. 분산할 비용 외 이유가 있으면 mode=quantities로 수량을 정한다.'}
     return result | {'adjustments': adjustments}
 
 
