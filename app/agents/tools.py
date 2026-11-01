@@ -338,6 +338,7 @@ _HINTS = {
     'SUPPLIER_MISMATCH': '메일에 연결된 업체와 업체명이 다르다. 저장하지 말고 HOLD한다.',
     'SUPPLIER_EVIDENCE_MIXED': '한 업체의 메일 근거만 남기고 다시 보낸다.',
     'TIER_BOUND_SWAPPED': '경계 표현에 맞게 min·max를 바꿔 저장했다. 다시 보내지 않는다.',
+    'TAX_BASIS_NOT_TAX_TERMS': 'tax_basis는 field_name이 tax_terms인 항목에만 붙인다.',
     'NOT_A_FIELD': '비용·단가 구간·비고는 fields가 아니라 각 인자로 보낸다. 빠진 비용이 있으면 cost_terms로 다시 보낸다.',
     'INSTRUCTION_NOT_NOTE': 'AI·시스템에게 하는 문장이라 비고에서 뺐다. 다시 보내지 않는다.',
     'UNIT_FROM_PRICE_LINE': '단가 표기·단가가 적힌 줄의 단위로 저장했다. 다시 보내지 않는다.',
@@ -356,6 +357,8 @@ class QuoteField(StrictModel):
     field_name: str
     raw_value: str | None              # 원문에 적힌 그대로. 원문에 없으면 null
     evidence: EvidenceRef | None = None
+    # field_name이 tax_terms일 때만: 원문이 말하는 부가세 기준 (포함·별도·면세). 판단할 수 없으면 null
+    tax_basis: Literal['INCLUDED', 'EXCLUDED', 'EXEMPT'] | None = None
 
 
 class PriceTier(StrictModel):
@@ -704,6 +707,9 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         if field.field_name in seen:
             rejected.append({'field': field.field_name, 'code': 'DUPLICATE_FIELD'})
             continue
+        if field.tax_basis and field.field_name != 'tax_terms':
+            rejected.append({'field': field.field_name, 'code': 'TAX_BASIS_NOT_TAX_TERMS'})
+            continue
         seen.add(field.field_name)
         if field.raw_value is None or not field.raw_value.strip():
             sent_null.append(field.field_name)
@@ -724,6 +730,8 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
             entry['quantity_unit'] = unit
         if kind == 'price' and (currency := _price(field.raw_value, field.field_name)[1]):
             entry['currency'] = currency
+        if field.tax_basis:             # 근거 원문과 함께 저장되고, 다음 버전으로도 이어받는다
+            entry['tax_basis'] = field.tax_basis
     tiers = _tiers(check, price_tiers, rejected, adjusted)
     if tiers and 'unit_price' in values and values['unit_price']['value'] in {tier['unit_price'] for tier in tiers}:
         # 구간 단가 하나를 단일 단가로도 보냈다. 물량별 견적이므로 단일 단가로 저장하지 않는다
@@ -810,7 +818,9 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         unit_price=value('unit_price'), unit=value('unit'), shipping_cost=shipping,
         available_quantity=value('available_quantity'), effective_from=value('effective_from'),
         valid_until=value('valid_until'),
-        checks_jsonb={name: {'state': 'STATED', 'value': v} for name, v in grouped('checks').items()},
+        checks_jsonb={name: {'state': 'STATED', 'value': v} for name, v in grouped('checks').items()} | (
+            {'tax_basis': {'state': 'STATED', 'value': values['tax_terms']['tax_basis']}}
+            if values.get('tax_terms', {}).get('tax_basis') else {}),
         pricing_terms_jsonb=grouped('pricing') | quantity_units | ({'price_tiers': tiers} if tiers else {}),
         cost_terms_jsonb=costs, item_notes_jsonb=notes,
         evidence_jsonb={name: entry for name, entry in values.items() if QUOTE_FIELDS[name][1] != 'mail'},
