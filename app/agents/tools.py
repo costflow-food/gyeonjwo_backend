@@ -2027,6 +2027,7 @@ def plan_candidates(store: ComparisonStore, context: RunContext, met: list[MetRe
                     continue
                 splits.append(plan)
     by_total = lambda plan: (plan['status'] == 'INVALID', Decimal(plan['total_amount'] or 'Infinity'))
+    shown = keep + [p for p in sorted(switches, key=by_total) if p['status'] != 'INVALID'][:MAX_PLAN_OPTIONS]         + [p for p in sorted(splits, key=by_total) if p['status'] != 'INVALID'][:MAX_PLAN_OPTIONS]
     infeasible = [{'plan_type': p['plan_type'], 'supplier_ids': [a['supplier_id'] for a in p['allocations']],
                    'violations': [v['code'] for v in p['violations']]} for p in switches + splits if p['status'] == 'INVALID']
     return {'status': 'OK', 'quantity': _amount_text(quantity), 'unit': case['unit'],
@@ -2034,11 +2035,12 @@ def plan_candidates(store: ComparisonStore, context: RunContext, met: list[MetRe
                           'order_limits': {k: _won(v) for k, v in order_limits(suppliers[sid]['record'], case['unit']).items()},
                           'conditions': suppliers[sid]['conditions']} for sid in eligible],
             'excluded': [{'supplier_id': sid, 'reasons': s['reasons']} for sid, s in suppliers.items() if not s['eligible']],
-            'plans': keep + [p for p in sorted(switches, key=by_total) if p['status'] != 'INVALID'][:MAX_PLAN_OPTIONS]
-            + [p for p in sorted(splits, key=by_total) if p['status'] != 'INVALID'][:MAX_PLAN_OPTIONS],
+            'plans': shown,
             'infeasible': infeasible + not_split,
             'search_scope': {'suppliers': len(eligible), 'split_pairs': pairs,
-                             'split_allowed': policy.get('allow_split') is not False}}
+                             'split_allowed': policy.get('allow_split') is not False}} | (
+        {} if any(p['status'] != 'INVALID' for p in shown) else
+        {'next': '가능한 안이 없다. 다른 도구를 부르지 말고 HOLD로 최종 응답한다. reason에 빠진 업체의 이유(excluded)를 쓴다.'})
 
 
 @register
