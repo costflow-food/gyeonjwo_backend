@@ -42,6 +42,7 @@
 | create_clarification_draft| ③     | 업체·질문 묶음·근거 → 보완 요청 초안 ID                          | 내부 저장만, 발송은 백엔드        |
 | create_counter_offer_draft| ⑤     | 검증된 목표 조건(validation_ref)·문안 → 역제안 초안 ID           | 내부 저장만, 발송은 백엔드        |
 """
+import dataclasses
 import hashlib
 import re
 from datetime import date, timedelta
@@ -1385,3 +1386,349 @@ def create_rfq_draft(supplier_item_ids: list[str], supplier_ids: list[str], runt
     '''
     return save_mail_drafts(_draft_store, _run_context(_draft_store, runtime), 'RFQ', supplier_item_ids, supplier_ids,
                             questions)
+
+
+
+# ─────────────────────────────────────────────
+# 공통 계산 (③④⑤ 도구와 구매안·가격 검증 노드가 함께 쓴다. LLM이 직접 부르는 도구가 아니다)
+#   설계: docs/AGENTS345_COMMON_DESIGN.md. 견적 행(QuoteVersionRecord)을 업무 수량·단위 기준으로 계산한다.
+#   - 금액은 Decimal로 계산한다. 적히지 않은 비용은 0원이 아니라 미확인이다("없음"·"무료"만 0원)
+#   - 단가 구간 경계는 원문 표기(이상·초과·미만·이하·까지)대로 적용한다
+#   - 단위는 kg·g·톤 사이, 그리고 견적에 박스당 중량이 적혀 있을 때만 박스↔무게로 바꾼다
+#   - 세금 기준(TAX_BASES)이 같은 견적끼리만 총액을 비교한다. 다르거나 모르면 비교하지 않는다
+# ─────────────────────────────────────────────
+
+_WEIGHT_KG = {'kg': Decimal(1), 'g': Decimal('0.001'), '톤': Decimal(1000)}
+# 비용 산정 기준 중 주문(배송) 한 번에 한 번 붙는 것. '회당'·'1회'·'건당' 등에서 '당'·'1'을 뗀 표기
+_PER_ORDER = {'회', '건', '주문', '발주', '배송', '납품', '배송회', '주문건'}
+# 비교에 꼭 있어야 하는 비용. 견적에 아예 적혀 있지 않으면 미확인으로 본다
+REQUIRED_COST_TYPES = ('SHIPPING',)
+# 세금 기준. ①이 checks_jsonb.tax_basis에 이 값 중 하나로 저장했을 때만 비교에 쓴다
+TAX_BASES = ('INCLUDED', 'EXCLUDED', 'EXEMPT')      # 부가세 포함 / 별도 / 면세
+MAX_SPLIT_STEPS = 100_000                           # 배정량 탐색 상한 (업무 수량 ÷ 단위)
+
+
+def _amount(value) -> Decimal | None:
+    """저장된 숫자 문자열을 Decimal로. 비어 있거나 숫자가 아니면 None."""
+    if value is None or str(value).strip() == '':
+        return None
+    try:
+        return Decimal(str(value).replace(',', ''))
+    except Exception:
+        return None
+
+
+def _amount_text(amount: Decimal) -> str:
+    """Decimal을 지수 표기 없는 문자열로. 10000 → '10000', 1.50 → '1.5'."""
+    text = format(amount, 'f')
+    return text.rstrip('0').rstrip('.') if '.' in text else text
+
+
+def _unit_key(raw: str | None) -> str | None:
+    """단위 표기를 ① 저장 단위로 맞춘다('㎏'·'KG' → 'kg', '박스당' → 'box'). 정해진 단위가 아니면 원문 그대로."""
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return _unit(raw, 'unit')
+    except ReviewRequired:
+        return raw.strip()
+
+
+def unit_ratio(record: QuoteVersionRecord, from_unit: str | None, to_unit: str | None) -> Decimal | None:
+    """from_unit 1단위가 to_unit으로 몇인지. 바꿀 근거가 없으면 None.
+    같은 단위, kg·g·톤 사이, 그리고 견적의 '박스당 N kg'(quantity_per_order_unit)이 있을 때 박스↔무게만 바꾼다."""
+    if from_unit is None or to_unit is None:
+        return None
+    if from_unit == to_unit:
+        return Decimal(1)
+    if from_unit in _WEIGHT_KG and to_unit in _WEIGHT_KG:
+        return _WEIGHT_KG[from_unit] / _WEIGHT_KG[to_unit]
+    pricing = record.pricing_terms_jsonb or {}
+    per_box, per_box_unit = _amount(pricing.get('quantity_per_order_unit')), pricing.get('quantity_per_order_unit_unit')
+    if per_box is None or per_box <= 0 or per_box_unit not in _WEIGHT_KG or 'box' not in (from_unit, to_unit):
+        return None
+    box_kg = per_box * _WEIGHT_KG[per_box_unit]
+    if from_unit == 'box' and to_unit in _WEIGHT_KG:
+        return box_kg / _WEIGHT_KG[to_unit]
+    if to_unit == 'box' and from_unit in _WEIGHT_KG:
+        return _WEIGHT_KG[from_unit] / box_kg
+    return None
+
+
+def tax_basis(record: QuoteVersionRecord) -> str | None:
+    """견적의 세금 기준(TAX_BASES 중 하나). 정해진 값으로 저장되지 않았으면 None(미확인)."""
+    value = ((record.checks_jsonb or {}).get('tax_basis') or {}).get('value')
+    return value if value in TAX_BASES else None
+
+
+def order_limits(record: QuoteVersionRecord, case_unit: str | None) -> dict:
+    """업무 단위로 바꾼 주문 조건 {moq, multiple, max}. 적혀 있지 않거나 단위를 바꿀 수 없으면 그 값은 None.
+    단위가 없는 MOQ·발주 배수·공급량은 견적 단가 단위로 본다."""
+    pricing, quote_unit = record.pricing_terms_jsonb or {}, _unit_key(record.unit)
+
+    def convert(value, unit):
+        number = _amount(value)
+        ratio = unit_ratio(record, unit or quote_unit, case_unit)
+        return None if number is None or ratio is None else number * ratio
+    return {'moq': convert(pricing.get('moq'), pricing.get('moq_unit')),
+            'multiple': convert(pricing.get('pack_multiple'), pricing.get('pack_multiple_unit')),
+            'max': convert(record.available_quantity, pricing.get('available_quantity_unit'))}
+
+
+def tier_price(tiers: list[dict], quantity: Decimal) -> tuple[Decimal | None, str | None]:
+    """견적 단가 단위 수량에 맞는 단가 구간의 단가. 반환: (단가, 사유 코드).
+    아래 경계는 '초과'가 아니면 포함, 위 경계는 '이하'·'까지'일 때만 포함한다('미만'·표기 없음은 제외).
+    맞는 구간이 없으면 TIER_NOT_COVERED, 단가가 다른 구간이 둘 이상 맞으면 TIER_UNCLEAR."""
+    matched = []
+    for tier in tiers:
+        low, high = _amount(tier.get('min_quantity')), _amount(tier.get('max_quantity'))
+        low_raw, high_raw = tier.get('min_quantity_raw') or '', tier.get('max_quantity_raw') or ''
+        above = low is None or quantity > low or (quantity == low and '초과' not in low_raw)
+        below = high is None or quantity < high or (quantity == high and any(w in high_raw for w in ('이하', '까지')))
+        if above and below:
+            matched.append(tier)
+    if not matched:
+        return None, 'TIER_NOT_COVERED'
+    if len({tier.get('unit_price') for tier in matched}) > 1:
+        return None, 'TIER_UNCLEAR'
+    price = _amount(matched[0].get('unit_price'))
+    return (price, None) if price is not None else (None, 'NO_PRICE')
+
+
+@dataclasses.dataclass
+class CostSheet:
+    """업체 한 곳의 견적을 주어진 수량 기준으로 계산한 결과. 배분 탐색에서 많이 만들어 가벼운 dataclass로 둔다."""
+    supplier_id: str
+    quote_version_id: str
+    quantity: Decimal                            # 업무 단위 수량
+    unit_price: Decimal | None = None            # 견적 단가 단위의 적용 단가 (구간이면 해당 구간 단가)
+    product_amount: Decimal | None = None        # 상품값 = 적용 단가 × 견적 단위 수량
+    known_costs: list[dict] = dataclasses.field(default_factory=list)    # 더한 비용 {cost_type, amount, basis, total}
+    unknown_costs: list[dict] = dataclasses.field(default_factory=list)  # 금액을 알 수 없는 비용 {cost_type, code}
+    blocked: list[str] = dataclasses.field(default_factory=list)         # 총액을 낼 수 없는 사유 코드
+    warnings: list[str] = dataclasses.field(default_factory=list)        # 확인이 필요한 점(SUPPLY_SHORT 등)
+    tax_basis: str | None = None
+
+    @property
+    def known_total(self) -> Decimal | None:
+        """확인된 금액만 더한 총액. 계산을 막는 사유가 있으면 None."""
+        if self.blocked or self.product_amount is None:
+            return None
+        return self.product_amount + sum((cost['total'] for cost in self.known_costs), Decimal(0))
+
+
+def _cost_line(record: QuoteVersionRecord, cost: dict, quantity: Decimal, case_unit: str | None
+               ) -> tuple[Decimal | None, str | None]:
+    """비용 한 줄의 금액. 반환: (금액, 미확인 사유 코드).
+    단가 포함·'없음'·'무료'는 0, 기준이 없거나 회·건당이면 주문 한 번 금액, 단위당이면 수량을 그 단위로 바꿔 곱한다."""
+    if cost.get('included_in_price') is True:
+        return Decimal(0), None
+    amount = _amount(cost.get('amount'))
+    if amount is None:
+        return None, 'AMOUNT_UNKNOWN'
+    if amount == 0:
+        return Decimal(0), None
+    if cost.get('included_in_price') is None:
+        return None, 'INCLUSION_UNCLEAR'
+    basis = (cost.get('basis') or '').replace(' ', '')
+    if not basis or basis.removesuffix('당').removeprefix('1') in _PER_ORDER:
+        return amount, None
+    ratio = unit_ratio(record, case_unit, _unit_key(basis))
+    return (amount * quantity * ratio, None) if ratio is not None else (None, 'BASIS_UNCLEAR')
+
+
+def _off_multiple(quantity: Decimal, multiple: Decimal | None) -> bool:
+    return multiple is not None and multiple > 0 and quantity % multiple != 0
+
+
+def cost_sheet(quote_version_id: str, record: QuoteVersionRecord, quantity, case_unit: str | None) -> CostSheet:
+    """견적 한 행을 업무 단위 수량 기준으로 계산한다. 공급량·MOQ·발주 배수는 계산을 막지 않고 warnings에 남긴다."""
+    quantity = _amount(quantity)
+    sheet = CostSheet(supplier_id=record.supplier_id, quote_version_id=quote_version_id,
+                      quantity=quantity if quantity is not None else Decimal(0), tax_basis=tax_basis(record))
+    pricing, case_unit, quote_unit = record.pricing_terms_jsonb or {}, _unit_key(case_unit), _unit_key(record.unit)
+    ratio = unit_ratio(record, case_unit, quote_unit)
+    if quantity is None or quantity <= 0:
+        sheet.blocked.append('QUANTITY_MISSING')
+    if quote_unit is None:
+        sheet.blocked.append('UNIT_MISSING')
+    elif ratio is None:
+        sheet.blocked.append('UNIT_MISMATCH')
+    if (pricing.get('currency') or record.currency or 'KRW') != 'KRW':
+        sheet.blocked.append('FOREIGN_CURRENCY')
+    if sheet.blocked:
+        return sheet
+
+    quote_quantity = quantity * ratio
+    if pricing.get('price_tiers'):
+        price, code = tier_price(pricing['price_tiers'], quote_quantity)
+    else:
+        price = _amount(record.unit_price)
+        code = None if price is not None else 'NO_PRICE'
+    if code:
+        sheet.blocked.append(code)
+        return sheet
+    sheet.unit_price, sheet.product_amount = price, price * quote_quantity
+
+    costs = record.cost_terms_jsonb or []
+    for cost in costs:
+        total, code = _cost_line(record, cost, quantity, case_unit)
+        if code:
+            sheet.unknown_costs.append({'cost_type': cost.get('cost_type'), 'code': code})
+        elif total:
+            sheet.known_costs.append({'cost_type': cost.get('cost_type'), 'amount': cost.get('amount'),
+                                      'basis': cost.get('basis'), 'total': total})
+    stated = {cost.get('cost_type') for cost in costs}
+    sheet.unknown_costs += [{'cost_type': kind, 'code': 'NOT_STATED'} for kind in REQUIRED_COST_TYPES
+                            if kind not in stated]
+    limits = order_limits(record, case_unit)
+    if limits['max'] is not None and limits['max'] < quantity:
+        sheet.warnings.append('SUPPLY_SHORT')
+    if limits['moq'] is not None and quantity < limits['moq']:
+        sheet.warnings.append('BELOW_MOQ')
+    if _off_multiple(quantity, limits['multiple']):
+        sheet.warnings.append('NOT_MULTIPLE')
+    return sheet
+
+
+def plan_total(parts: list[tuple[str, QuoteVersionRecord, Decimal]], case_quantity, case_unit: str | None,
+               policy: dict | None = None) -> dict:
+    """구매안(업체별 배정량)의 총액과 위반. parts: [(견적 버전 ID, 견적 행, 업무 단위 배정량)].
+    위반은 {code, supplier_id}: 업체 수(MAX_SUPPLIERS·SPLIT_NOT_ALLOWED), 배정 합계(SUM_MISMATCH),
+    공급량·MOQ·발주 배수(SUPPLY_SHORT·BELOW_MOQ·NOT_MULTIPLE), 계산 불가(BLOCKED), 세금 기준(TAX_BASIS_MIXED·UNKNOWN)."""
+    policy = policy or {}
+    sheets = [cost_sheet(quote_id, record, quantity, case_unit) for quote_id, record, quantity in parts]
+    violations = []
+    suppliers = {sheet.supplier_id for sheet in sheets}
+    if len(suppliers) != len(sheets):
+        violations.append({'code': 'DUPLICATE_SUPPLIER', 'supplier_id': None})
+    if len(suppliers) > int(policy.get('max_suppliers') or 2):
+        violations.append({'code': 'MAX_SUPPLIERS', 'supplier_id': None})
+    if len(suppliers) > 1 and policy.get('allow_split') is False:
+        violations.append({'code': 'SPLIT_NOT_ALLOWED', 'supplier_id': None})
+    if sum((sheet.quantity for sheet in sheets), Decimal(0)) != _amount(case_quantity):
+        violations.append({'code': 'SUM_MISMATCH', 'supplier_id': None})
+    for sheet in sheets:
+        violations += [{'code': code, 'supplier_id': sheet.supplier_id} for code in sheet.warnings]
+        violations += [{'code': 'BLOCKED', 'supplier_id': sheet.supplier_id, 'reasons': sheet.blocked}] \
+            if sheet.blocked else []
+    bases = {sheet.tax_basis for sheet in sheets}
+    if None in bases:
+        violations.append({'code': 'TAX_BASIS_UNKNOWN', 'supplier_id': None})
+    elif len(bases) > 1:
+        violations.append({'code': 'TAX_BASIS_MIXED', 'supplier_id': None})
+    totals = [sheet.known_total for sheet in sheets]
+    known_total = None if None in totals else sum(totals, Decimal(0))
+    return {'sheets': sheets, 'known_total': known_total, 'violations': violations,
+            'unknown_costs': [{'supplier_id': s.supplier_id, **cost} for s in sheets for cost in s.unknown_costs]}
+
+
+def _split_quantities(first: QuoteVersionRecord, second: QuoteVersionRecord, case_quantity: Decimal,
+                      case_unit: str | None) -> list[tuple[Decimal, Decimal]]:
+    """두 업체가 합계 case_quantity를 나눠 맡을 수 있는 배정량 (첫 업체, 둘째 업체) 목록.
+    각 업체가 MOQ 이상·공급량 이하·발주 배수에 맞아야 한다. 발주 배수가 없는 업체는 업무 단위 1씩이다."""
+    a, b = order_limits(first, case_unit), order_limits(second, case_unit)
+    step = b['multiple'] if b['multiple'] and b['multiple'] > 0 else Decimal(1)
+    low = max(b['moq'] or Decimal(0), step)
+    high = min(case_quantity - (a['moq'] or Decimal(0)), b['max'] if b['max'] is not None else case_quantity)
+    found, quantity = [], (low / step).to_integral_value(rounding='ROUND_CEILING') * step
+    for _ in range(MAX_SPLIT_STEPS):
+        if quantity > high or quantity >= case_quantity:
+            break
+        rest = case_quantity - quantity
+        if (a['max'] is None or rest <= a['max']) and not _off_multiple(rest, a['multiple']):
+            found.append((rest, quantity))
+        quantity += step
+    return found
+
+
+def adjust_split(first: tuple[str, QuoteVersionRecord], second: tuple[str, QuoteVersionRecord], wanted_first,
+                 case_quantity, case_unit: str | None) -> dict:
+    """LLM이 정한 첫 업체 배정량(wanted_first)에 가장 가까운 가능한 배분으로 맞춘다. 가까운 후보가 둘이면 총액이 낮은 쪽.
+    반환: {status: ADJUSTED·UNCHANGED·NO_FEASIBLE_SPLIT, quantities: (첫, 둘째), wanted: (첫, 둘째)}"""
+    case_quantity, wanted = _amount(case_quantity), _amount(wanted_first)
+    options = _split_quantities(first[1], second[1], case_quantity, case_unit)
+    result = {'wanted': (wanted, case_quantity - wanted)}
+    if not options:
+        return result | {'status': 'NO_FEASIBLE_SPLIT', 'quantities': None}
+
+    def total(option):
+        value = plan_total([(first[0], first[1], option[0]), (second[0], second[1], option[1])],
+                           case_quantity, case_unit)['known_total']
+        return value if value is not None else Decimal('Infinity')
+    best = min(options, key=lambda option: (abs(option[0] - wanted), total(option)))
+    return result | {'status': 'UNCHANGED' if best[0] == wanted else 'ADJUSTED', 'quantities': best}
+
+
+def cheapest_split(first: tuple[str, QuoteVersionRecord], second: tuple[str, QuoteVersionRecord], case_quantity,
+                   case_unit: str | None) -> dict:
+    """두 업체 조합에서 가능한 배분 중 확인된 총액이 가장 낮은 것. 미확인 비용은 총액에 넣지 않고 함께 돌려준다.
+    반환: {status: FOUND·NO_FEASIBLE_SPLIT·NOT_COMPUTABLE, quantities, known_total, searched(살펴본 배분 수)}"""
+    case_quantity = _amount(case_quantity)
+    options = _split_quantities(first[1], second[1], case_quantity, case_unit)
+    if not options:
+        return {'status': 'NO_FEASIBLE_SPLIT', 'quantities': None, 'known_total': None, 'searched': 0}
+    priced = []
+    for option in options:
+        plan = plan_total([(first[0], first[1], option[0]), (second[0], second[1], option[1])], case_quantity,
+                          case_unit)
+        if plan['known_total'] is not None:
+            priced.append((plan['known_total'], option))
+    if not priced:
+        return {'status': 'NOT_COMPUTABLE', 'quantities': None, 'known_total': None, 'searched': len(options)}
+    total, option = min(priced, key=lambda item: item[0])
+    return {'status': 'FOUND', 'quantities': option, 'known_total': total, 'searched': len(options)}
+
+
+def break_even(target: CostSheet, rival: CostSheet) -> dict:
+    """역전 기준 (Notion 07 ③): target의 미확인 비용이 얼마 미만이면 target이 rival보다 싸지는지.
+    기준 금액 = rival 확인 총액 − target 확인 총액.
+    status: COMPUTED(rival 총액 확정) / CONDITIONAL(rival에도 미확인) / NO_UNKNOWN(target에 미확인 없음) /
+    NOT_COMPUTABLE(어느 한쪽 총액 불가) / TAX_BASIS_DIFFERENT(세금 기준이 다르거나 모름)
+    can_change_choice: 미확인 비용의 답에 따라 더 싼 쪽이 바뀔 수 있는지."""
+    result = {'target_supplier_id': target.supplier_id, 'target_quote_version_id': target.quote_version_id,
+              'rival_supplier_id': rival.supplier_id, 'rival_quote_version_id': rival.quote_version_id,
+              'target_unknown_costs': target.unknown_costs, 'rival_unknown_costs': rival.unknown_costs,
+              'warnings': {'target': target.warnings, 'rival': rival.warnings}}
+    if target.known_total is None or rival.known_total is None:
+        return result | {'status': 'NOT_COMPUTABLE', 'can_change_choice': None,
+                         'reasons': {'target': target.blocked, 'rival': rival.blocked}}
+    if target.tax_basis is None or target.tax_basis != rival.tax_basis:
+        return result | {'status': 'TAX_BASIS_DIFFERENT', 'can_change_choice': None,
+                         'tax_basis': {'target': target.tax_basis, 'rival': rival.tax_basis}}
+    target_total, rival_total = target.known_total, rival.known_total
+    amount = rival_total - target_total
+    difference = f'{_amount_text(rival_total)} - {_amount_text(target_total)} = {_amount_text(amount)}'
+    totals = {'target_known_total': _amount_text(target_total), 'rival_known_total': _amount_text(rival_total),
+              'break_even_amount': _amount_text(amount)}
+    if not target.unknown_costs:
+        return result | totals | {'status': 'NO_UNKNOWN', 'can_change_choice': bool(rival.unknown_costs),
+                                  'formula': difference}
+    target_terms = '+'.join(cost['cost_type'] for cost in target.unknown_costs)
+    formula = f'{difference}; target 미확인({target_terms}) < {_amount_text(amount)}'
+    if rival.unknown_costs:
+        rival_terms = '+'.join(cost['cost_type'] for cost in rival.unknown_costs)
+        return result | totals | {'status': 'CONDITIONAL', 'can_change_choice': True,
+                                  'formula': f'{formula} + rival 미확인({rival_terms})'}
+    return result | totals | {'status': 'COMPUTED', 'can_change_choice': amount > 0,
+                              'formula': f'{formula} 이면 target이 더 싸다'}
+
+
+def keep_price_ceiling(incumbent: CostSheet, record: QuoteVersionRecord, alternative_total: Decimal,
+                       alternative_tax_basis: str | None) -> dict:
+    """유지 상한 단가 (⑤): 기존 업체가 견적 단가 단위로 이 단가 이하면 검증된 대안 총액보다 싸거나 같다.
+    상한 = (대안 총액 − 기존 업체의 단가 외 확인 비용) ÷ 견적 단위 수량.
+    status: COMPUTED / CONDITIONAL(기존 업체에 미확인 비용) / NOT_COMPUTABLE / TAX_BASIS_DIFFERENT"""
+    if incumbent.known_total is None or incumbent.unit_price is None:
+        return {'status': 'NOT_COMPUTABLE', 'reasons': incumbent.blocked}
+    if incumbent.tax_basis is None or incumbent.tax_basis != alternative_tax_basis:
+        return {'status': 'TAX_BASIS_DIFFERENT',
+                'tax_basis': {'incumbent': incumbent.tax_basis, 'alternative': alternative_tax_basis}}
+    quote_quantity = incumbent.product_amount / incumbent.unit_price
+    other_costs = incumbent.known_total - incumbent.product_amount
+    ceiling = (_amount(alternative_total) - other_costs) / quote_quantity
+    return {'status': 'CONDITIONAL' if incumbent.unknown_costs else 'COMPUTED',
+            'ceiling_unit_price': _amount_text(ceiling), 'unit': _unit_key(record.unit),
+            'current_unit_price': _amount_text(incumbent.unit_price), 'unknown_costs': incumbent.unknown_costs,
+            'formula': f'({_amount_text(_amount(alternative_total))} - {_amount_text(other_costs)}) / '
+                       f'{_amount_text(quote_quantity)} = {_amount_text(ceiling)}'}
