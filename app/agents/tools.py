@@ -907,7 +907,7 @@ def store_structured_mail(fields: list[QuoteField], runtime: ToolRuntime[RunCont
 
 # ② CANDIDATE: search_supplier_evidence, create_rfq_draft
 #   06 work_cases·suppliers·supplier_items·purchase_history 기준. 후보·제외·체크리스트·선호 점수는 코드가 판정하고
-#   LLM은 점수가 같은 업체의 순서, 업체별 선택 질문, 등록 비고에 근거한 주의 표시를 정한다.
+#   LLM은 검색어, 같은 품목 고르기, 업체별 선택 질문, 등록 비고에 근거한 주의 표시를 정한다.
 #   과거 단가는 순위에도 쓰지 않는다(BR-03).
 
 MAX_CANDIDATES = 10                  # 후보·RFQ 상한 (Notion ② 10곳)
@@ -951,9 +951,6 @@ class CandidateStore(CaseStore, Protocol):
         """purchase_history 행 (06 컬럼 그대로: supplier_item_id, supplier_id, transaction_date, quantity, unit,
         unit_price, total_amount, currency)."""
 
-    def list_increase_reasons(self, case_id: str) -> list[dict]:
-        """이 업무 메일에서 정보 추출이 저장한 인상 사유 [{mail_id, supplier_id, text}].
-        mail_messages.normalized_jsonb.fields.increase_reason의 raw_value다. 없으면 []."""
 
 
 _candidate_store: CandidateStore | None = None
@@ -1184,9 +1181,6 @@ def evaluate_candidates(store: CandidateStore, context: RunContext, supplier_ite
                             '수량': f"{case['quantity']}{case.get('unit') or ''}" if case.get('quantity') else None,
                             '납기일': case.get('due_date')},
               'candidates': candidates, 'excluded': excluded,
-              'increase_reasons': [{'text': row['text'], 'ref': f"mail_messages:{row['mail_id']}.increase_reason"}
-                                   for row in _read(lambda: store.list_increase_reasons(context.case_id))
-                                   if (row.get('text') or '').strip()],
               'question_options': dict(RFQ_OPTIONAL_QUESTIONS), 'default_question_options': list(RFQ_DEFAULT_OPTIONS)}
     for entry in excluded:
         entry['label'] = EXCLUDE_LABELS[entry['code']]
@@ -1210,7 +1204,6 @@ def search_supplier_evidence(supplier_item_ids: list[str], runtime: ToolRuntime[
       candidates(supplier_id·supplier_name·checklist·preference_score·evidence_refs·origin·
       notes(후보 업체의 등록 비고)·notes_ref),
       excluded(supplier_id·code: INCUMBENT·REQUIRED_FAIL·OVER_LIMIT·label: 한글 사유),
-      increase_reasons(인상을 요청한 업체가 밝힌 인상 사유 text·ref),
       question_options(업체마다 고를 수 있는 선택 질문 {ID: 질문}), default_question_options(고르지 않을 때 묻는 ID),
       summary(구매담당자가 읽는 조회 결과 문장. HOLD면 reason에 이 문장을 쓴다)
     - REJECTED: code UNKNOWN_ITEMS(search_supplier_items에 없던 ID)
