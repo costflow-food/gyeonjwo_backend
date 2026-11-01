@@ -255,12 +255,14 @@ next_action:
 
 def chat_model(settings, role: AgentRole | None = None) -> BaseChatModel:
     """설정의 LLM 클라이언트. role을 주면 그 역할의 모델(LLM_MODEL_<ROLE>, 없으면 LLM_MODEL)과
-    추론 수준(LLM_REASONING_EFFORT_<ROLE>, 없으면 LLM_REASONING_EFFORT)을 쓴다. 추론 수준이 없으면 보내지 않는다."""
+    추론 수준(LLM_REASONING_EFFORT_<ROLE>, 없으면 LLM_REASONING_EFFORT)을 쓴다. 추론 수준이 없으면 보내지 않는다.
+    추론 수준이 있으면 Responses API로 부른다(Chat Completions는 도구 호출과 추론 수준을 함께 받지 않는 모델이 있다)."""
     settings.require_llm()
     effort = settings.llm_reasoning_effort_for(role)
     return ChatOpenAI(model=settings.llm_model_for(role) if role else settings.llm_model,
                       base_url=str(settings.llm_base_url), api_key=settings.llm_api_key.get_secret_value(),
-                      timeout=settings.llm_timeout_seconds, **({'reasoning_effort': effort} if effort else {}))
+                      timeout=settings.llm_timeout_seconds,
+                      **({'use_responses_api': True, 'reasoning': {'effort': effort}} if effort else {}))
 
 
 def role_models(settings) -> dict[AgentRole, BaseChatModel]:
