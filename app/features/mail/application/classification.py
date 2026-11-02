@@ -1,5 +1,5 @@
 from app.core.errors import ServiceError
-from app.features.mail.domain.schemas import Classification
+from app.features.mail.domain.schemas import Classification, ClassificationAnswer
 
 INSTRUCTION = '''Is this mail purchasing work: a supplier or trading partner telling or asking us something concrete
 about goods we buy? Judge the purpose of the mail, not its words. Purchasing words (price, quote, supply price,
@@ -72,8 +72,11 @@ def classify_or_raise(llm, subject, body):
     sample = (subject + '\n' + body[:6000]).lower()
     non_business = non_business_flag(subject, sample)
     if non_business and not business_flag(sample):
-        return Classification(status='FALSE', reason=f"비업무 키워드만 확인: {', '.join(non_business[:3])}")
-    return llm.run('classification', INSTRUCTION, {'subject': subject, 'body_excerpt': body[:6000]}, Classification)
+        return Classification(status='FALSE', reason=f"비업무 키워드만 확인: {', '.join(non_business[:3])}",
+                              source='RULE')
+    answer = llm.run('classification', INSTRUCTION, {'subject': subject, 'body_excerpt': body[:6000]},
+                     ClassificationAnswer)
+    return Classification(**answer.model_dump(), source='LIGHT_LLM')
 
 
 def classify(llm, subject, body):
@@ -81,4 +84,4 @@ def classify(llm, subject, body):
     try:
         return classify_or_raise(llm, subject, body)
     except (ServiceError, RuntimeError):
-        return Classification(status='PENDING', reason='분류 실패: CLASSIFICATION_UNAVAILABLE')
+        return Classification(status='PENDING', reason='분류 실패: CLASSIFICATION_UNAVAILABLE', source='LIGHT_LLM')
