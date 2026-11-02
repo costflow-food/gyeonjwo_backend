@@ -15,7 +15,7 @@ class CaseRuntimeRepository:
             result = self.client.rpc(name, params).execute().data
         except Exception as error:
             if getattr(error, 'code', None) == 'PGRST202':
-                raise ServiceError('EXTRACTION_SCHEMA_REQUIRED', '업무 실행·저장 DB 계약을 먼저 적용해야 합니다.', 503,
+                raise ServiceError('EXTRACTION_SCHEMA_REQUIRED', 'Supabase의 업무 실행·저장 함수 구성을 확인해야 합니다.', 503,
                                    retryable=False, next_action='CONTACT_SERVER_ADMIN') from None
             raise ServiceError('PROCESSING_UNAVAILABLE', '업무 실행 저장소를 확인할 수 없습니다.', 503) from None
         if isinstance(result, dict) and result.get('kind') == 'ERROR':
@@ -29,7 +29,12 @@ class CaseRuntimeRepository:
         return result
 
     def available(self):
-        result = self.call('case_extraction_health')
+        try:
+            result = self.call('review_start_health')
+        except ServiceError as error:
+            if error.code != 'EXTRACTION_SCHEMA_REQUIRED':
+                raise
+            result = self.call('case_agent_store_health')
         return isinstance(result, dict) and result.get('contract_version') == 1 and result.get('ready') is True
 
     def action(self, owner, case_id, revision, action, key, body_hash, request_id):
@@ -46,7 +51,7 @@ class CaseRuntimeRepository:
         try:
             rows = (self.client.table('work_cases').select(
                     'id,input_revision,current_batch_id,status,processing_step,archived_at,'
-                    'item_name,specification,quantity::text,unit,policy_jsonb').eq('owner_user_id', owner)
+                    'item_name,specification,quantity::text,unit,due_date,mandatory_conditions_jsonb,policy_jsonb').eq('owner_user_id', owner)
                     .eq('id', str(case_id)).limit(1).execute().data)
         except Exception:
             raise ServiceError('PROCESSING_UNAVAILABLE', '업무 정보를 확인할 수 없습니다.', 503) from None
@@ -87,23 +92,31 @@ class CaseRuntimeRepository:
         if self.call('heartbeat_case_extraction', p_job=job['job_id'], p_token=job['claim_token']) is not True:
             raise ServiceError('EXTRACTION_LEASE_LOST', '실행 소유권이 변경됐습니다.', 409)
 
-    def finish(self, job, output, result, model_id):
-        stored_output = output.model_dump(mode='json')
-        # SELECTING_CANDIDATES is an internal graph stop label; SQL v3.6
-        # stores CANDIDATES and rejects the former via its CHECK constraint.
-        if stored_output.get('processing_step') == 'SELECTING_CANDIDATES':
-            stored_output['processing_step'] = 'CANDIDATES'
-        stored_result = result.model_dump(mode='json') if result else None
-        if result is not None:
-            stored_result['stored_fields'] = result.stored_fields()
-        return self.call('complete_case_extraction', p_job=job['job_id'], p_token=job['claim_token'],
-                         p_revision=job['input_revision'], p_batch=job['batch_id'],
-                         p_output=stored_output,
-                         p_result=stored_result,
-                         p_model=model_id, p_prompt_version='extraction-v1')
-
     def fail(self, job, code):
         return self.call('fail_case_extraction', p_job=job['job_id'], p_token=job['claim_token'], p_code=code)
 
     def recover(self):
         return self.call('recover_case_extractions')
+
+    def finish_agent(self, job, output, quote_ids, metadata):
+        return self.call('complete_case_agent_extraction', p_job=job['job_id'], p_token=job['claim_token'],
+            p_revision=job['input_revision'], p_batch=job['batch_id'],
+            p_output=output.model_dump(mode='json'), p_quote_ids=quote_ids,
+            p_model=metadata.get('model_id') or 'unavailable',
+            p_prompt_version=metadata.get('prompt_version') or 'agent-owned',
+            p_agent_output=metadata.get('agent_output'))
+
+    def start_receipt(self, owner, case_id, revision, key):
+        from app.features.work_cases.application.actions import revision_body_hash
+        try:
+            result = self.call('lookup_work_case_start_request', p_owner=str(owner), p_case=str(case_id),
+                               p_key=key, p_hash=revision_body_hash(revision))
+        except ServiceError as error:
+            # Optional existing Supabase lookup. Absence requires no schema
+            # installation: the transactional submit RPC still owns replay.
+            if error.code == 'EXTRACTION_SCHEMA_REQUIRED':
+                return None
+            raise
+        if not isinstance(result, dict) or result.get('kind') not in {'NONE', 'REPLAY'}:
+            raise ServiceError('PROCESSING_UNAVAILABLE', '검토 접수 이력을 확인할 수 없습니다.', 503)
+        return result if result['kind'] == 'REPLAY' else None

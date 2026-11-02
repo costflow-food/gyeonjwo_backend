@@ -9,7 +9,7 @@ from app.features.work_cases.domain.extraction_outcome import ExtractionOutcome
 from app.core.errors import ServiceError
 from app.core.leases import LeaseHeartbeat
 from app.features.mail.infrastructure.attachments import AttachmentRepository
-from app.features.work_cases.application.extraction_tools import CURRENT_SCOPE, ExtractionScope
+from app.features.work_cases.application.extraction_scope import CURRENT_SCOPE, ExtractionScope
 
 logger = logging.getLogger('uvicorn.error.case_extraction')
 
@@ -38,7 +38,7 @@ class ExtractionWorker:
                     revision=job['input_revision'], batch_id=str(job['batch_id']), mail_ids=tuple(job['mail_ids']),
                     repo=self.repo, mailbox=self.mailbox, attachment_repo=self.attachment_repo,
                     max_characters=self.settings.max_document_characters,
-                    deadline=time.monotonic() + 60, lease_check=lease.check)
+                    deadline=time.monotonic() + 60, lease_check=lease.check, job=job)
                 token = CURRENT_SCOPE.set(scope)
                 try:
                     with tracing_context(enabled=False):
@@ -49,23 +49,15 @@ class ExtractionWorker:
                         output = ExtractionOutcome.model_validate(
                             raw.model_dump(mode='json') if hasattr(raw, 'model_dump') else raw)
                         scope.check(str(output.case_id), output.input_revision)
-                        if output.status in {'EXTRACTION_READY', 'NEEDS_INFO'}:
-                            if scope.result is None:
-                                raise ValueError('RESULT_NOT_STAGED')
-                            missing_item = 'item_name' in scope.result.unknown_fields
-                            output = output.model_copy(update={
-                                'status': 'NEEDS_INFO' if missing_item else 'EXTRACTION_READY',
-                                'processing_step': 'NEEDS_INFO' if missing_item else 'CANDIDATES'})
-                        elif output.status == 'ON_HOLD':
-                            output = output.model_copy(update={'processing_step': 'ON_HOLD'})
+                        if output.status in {'EXTRACTION_READY', 'NEEDS_INFO'} and not scope.full_quote_ids:
+                            raise ValueError('QUOTE_RESULTS_NOT_PERSISTED')
                         lease.check()
                         if output.status == 'FAILED':
                             self.repo.fail(job, 'EXTRACTION_FAILED')
                         elif output.status == 'STALE':
                             self.repo.fail(job, 'INPUT_REVISION_CHANGED')
                         else:
-                            staged = scope.result if output.status in {'EXTRACTION_READY', 'NEEDS_INFO'} else None
-                            result = self.repo.finish(job, output, staged, self.settings.llm_model)
+                            result = self.repo.finish_agent(job, output, scope.full_quote_ids, scope.agent_metadata)
                             if not isinstance(result, dict) or result.get('kind') not in {'STORED', 'STALE'}:
                                 raise ServiceError('PROCESSING_UNAVAILABLE', '추출 결과 저장을 확인할 수 없습니다.', 503)
                 finally:

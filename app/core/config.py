@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     worker_sync_seconds: int = Field(default=300, ge=60, le=3600)
     google_token_encryption_key: SecretStr | None = None
     google_mailbox_worker_enabled: bool = False
+    # Compatibility setting only; connected-mailbox scheduling uses the DB's
+    # internal.gmail_runtime_config.poll_seconds and mail_sync_states.next_sync_at.
     google_mailbox_poll_seconds: int = Field(default=90, ge=60, le=120)
     gmail_initial_sync_limit: int = Field(default=10, ge=1, le=500)
     app_build_revision: str = 'development'

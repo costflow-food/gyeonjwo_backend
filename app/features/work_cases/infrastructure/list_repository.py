@@ -10,7 +10,7 @@ from app.core.errors import ServiceError
 from uuid import UUID
 from app.features.work_cases.domain.replies import reply_summary
 
-CASE_COLUMNS = 'id,initial_mail_id,created_at,status,processing_step,input_revision,archived_at,item_name,decision'
+CASE_COLUMNS = 'id,initial_mail_id,created_at,status,processing_step,input_revision,archived_at,item_name,decision,current_batch_id'
 MAIL_COLUMNS = 'id,subject,sender,sent_or_received_at,attachments_jsonb,supplier_id'
 BATCH_SIZE = 200
 MAX_CASES = 10000
@@ -113,7 +113,7 @@ class WorkCaseListRepository:
                 if getattr(error, 'code', None) in {'P0002', 'PT404'}:
                     raise ServiceError('RESOURCE_NOT_FOUND', '업무를 찾을 수 없습니다.', 404) from None
                 if getattr(error, 'code', None) == 'PGRST202':
-                    raise ServiceError('PROCESSING_UNAVAILABLE', '회신 집계 DB 함수를 먼저 적용해야 합니다.', 503,
+                    raise ServiceError('PROCESSING_UNAVAILABLE', 'Supabase의 회신 집계 함수 구성을 확인해야 합니다.', 503,
                                        retryable=False, next_action='CONTACT_SERVER_ADMIN') from None
                 raise
             if (not isinstance(result, dict) or type(result.get('contract_version')) is not int

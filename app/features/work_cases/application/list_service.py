@@ -5,6 +5,9 @@ from app.core.errors import ServiceError
 from app.features.work_cases.application.cursor import CursorCodec, iso_z, utc_time
 from app.features.work_cases.domain.listing import QueueCounts, WorkCaseList, WorkCaseRow
 
+from app.features.work_cases.application.case_actions import case_actions
+from app.features.work_cases.application.start_readiness import StartReadiness
+
 STEP_MESSAGES = {
     'PENDING_START': '원문 확인 후 검토 시작',
     'ACKNOWLEDGED': '수신 메일 확인됨',
@@ -29,7 +32,9 @@ class WorkCaseListService:
         self.extraction_enabled = extraction_enabled
         self.now = now or (lambda: datetime.now(timezone.utc))
 
-    def list(self, owner, *, status=None, archived=False, q='', limit=25, cursor=None):
+    def list(self, owner, *, status=None, archived=False, q='', limit=25, cursor=None, start_readiness=None):
+        readiness = start_readiness if start_readiness is not None else (StartReadiness()
+            if self.extraction_enabled else StartReadiness('EXTRACTION_DISABLED', '서버의 검토 실행 설정이 꺼져 있습니다.'))
         query = q.strip().casefold()
         scope = self.codec.scope(owner, status, archived, query)
         snapshot, after = (self.codec.decode(cursor, scope) if cursor else (iso_z(self.now()), None))
@@ -56,15 +61,7 @@ class WorkCaseListService:
                 if after is not None and key >= after:
                     continue
                 archived_at = iso_z(utc_time(case['archived_at'])) if case['archived_at'] else None
-                actions = ['VIEW_ORIGINAL']
-                if archived:
-                    actions.append('RESTORE')
-                elif case['status'] == 'Waiting' and case['decision'] is None:
-                    actions.append('ACCEPT_INCREASE')
-                    if self.extraction_enabled:
-                        actions.insert(1, 'START')
-                elif case['status'] == 'Waiting' and case['decision'] == 'ACCEPT_INCREASE':
-                    actions.append('RESUME')
+                actions, disabled = case_actions(case, readiness)
                 step = case['processing_step']
                 attachments = mail.get('attachments_jsonb') or []
                 if not isinstance(attachments, list):
@@ -75,7 +72,7 @@ class WorkCaseListService:
                     received_at=received, status=case['status'], processing_step=step,
                     input_revision=case['input_revision'], archived_at=archived_at, item_name=case['item_name'],
                     attachment_count=len(attachments), step_detail={'code': step, 'message': STEP_MESSAGES.get(step, '처리 상태 확인')},
-                    allowed_actions=actions)
+                    allowed_actions=actions, disabled_actions=disabled)
                 filtered.append((key, row))
             filtered.sort(key=lambda item: item[0], reverse=True)
             page = filtered[:limit]
