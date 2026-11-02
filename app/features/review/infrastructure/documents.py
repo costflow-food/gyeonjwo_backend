@@ -77,6 +77,15 @@ def source_file(source: dict, work_id: str, filename: str) -> dict:
 
 
 def read_pdf(content: bytes) -> str:
+    return _pdf_worker(content)['text']
+
+
+def read_pdf_pages(content: bytes) -> list[str]:
+    """PDF 쪽마다의 텍스트. 텍스트가 없는 PDF(스캔본)는 빈 목록이다."""
+    return _pdf_worker(content)['pages']
+
+
+def _pdf_worker(content: bytes) -> dict:
     # Child process has no API keys; bounds runtime and keeps parser failures out of the server.
     import os
     env = {key: value for key, value in os.environ.items()
@@ -87,7 +96,7 @@ def read_pdf(content: bytes) -> str:
                                 cwd=Path(__file__).resolve().parents[4], creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         if result.returncode:
             raise ValueError('PDF text extraction failed')
-        return json.loads(result.stdout)['text']
+        return json.loads(result.stdout)
     except (ValueError, subprocess.SubprocessError):
         raise ValueError('PDF text extraction failed') from None
 
