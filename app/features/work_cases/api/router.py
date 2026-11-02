@@ -154,19 +154,12 @@ def action_response(request, principal, repo, case_id, payload, key, action):
     replay = None
     if action == 'START':
         validate_action_key(key)
-        # A stored 202 is replayed even when configuration/worker later goes down.
-        # Lookup is read-only; it cannot claim or begin a new job.
+        # Use a read-only receipt lookup only if already available in Supabase.
+        # Otherwise let the existing transactional submit RPC handle replay and
+        # revision/state guards; Python must not reject an already-started replay.
         replay = repo.start_receipt(principal.user_id, case_id, payload.expected_revision, key)
         if replay is None:
-            case = load_action_case(repo, principal.user_id, case_id)
-            if case['input_revision'] != payload.expected_revision:
-                raise ServiceError('REVISION_CONFLICT', '업무 입력이 변경됐습니다. 최신 내용을 확인해 주세요.', 409,
-                                   current_revision=case['input_revision'], retryable=False)
-            actions, disabled = case_actions(case, StartReadiness())
-            if 'START' not in actions:
-                reason = disabled[0]
-                code = 'WORK_ALREADY_STARTED' if reason['reason_code'] == 'WORK_ALREADY_STARTED' else 'ACTION_NOT_ALLOWED'
-                raise ServiceError(code, reason['message'], 409, retryable=False)
+            load_action_case(repo, principal.user_id, case_id)
             extraction_readiness(request, repo, fresh=True).require()
     status, response = WorkCaseActions(repo, extraction_enabled=True).submit(
         principal.user_id, case_id, payload.expected_revision, action, key, replay_result=replay)

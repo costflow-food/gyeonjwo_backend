@@ -52,10 +52,10 @@ def database_readiness(repo):
     try:
         if repo.available():
             return StartReadiness()
-        return StartReadiness('EXTRACTION_SCHEMA_REQUIRED', '검토 실행·견적 저장 DB 계약을 먼저 적용해야 합니다.')
+        return StartReadiness('EXTRACTION_SCHEMA_REQUIRED', 'Supabase의 검토 실행·견적 저장 함수 구성을 확인해야 합니다.')
     except ServiceError as error:
         if error.code == 'EXTRACTION_SCHEMA_REQUIRED':
-            return StartReadiness('EXTRACTION_SCHEMA_REQUIRED', '검토 실행·견적 저장 DB 계약을 먼저 적용해야 합니다.')
+            return StartReadiness('EXTRACTION_SCHEMA_REQUIRED', 'Supabase의 검토 실행·견적 저장 함수 구성을 확인해야 합니다.')
         return StartReadiness('PROCESSING_UNAVAILABLE', '검토 실행 저장소에 연결할 수 없습니다.')
     except Exception:
         return StartReadiness('PROCESSING_UNAVAILABLE', '검토 실행 저장소를 확인할 수 없습니다.')

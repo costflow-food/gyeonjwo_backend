@@ -15,7 +15,7 @@ class CaseRuntimeRepository:
             result = self.client.rpc(name, params).execute().data
         except Exception as error:
             if getattr(error, 'code', None) == 'PGRST202':
-                raise ServiceError('EXTRACTION_SCHEMA_REQUIRED', '업무 실행·저장 DB 계약을 먼저 적용해야 합니다.', 503,
+                raise ServiceError('EXTRACTION_SCHEMA_REQUIRED', 'Supabase의 업무 실행·저장 함수 구성을 확인해야 합니다.', 503,
                                    retryable=False, next_action='CONTACT_SERVER_ADMIN') from None
             raise ServiceError('PROCESSING_UNAVAILABLE', '업무 실행 저장소를 확인할 수 없습니다.', 503) from None
         if isinstance(result, dict) and result.get('kind') == 'ERROR':
@@ -29,7 +29,12 @@ class CaseRuntimeRepository:
         return result
 
     def available(self):
-        result = self.call('review_start_health')
+        try:
+            result = self.call('review_start_health')
+        except ServiceError as error:
+            if error.code != 'EXTRACTION_SCHEMA_REQUIRED':
+                raise
+            result = self.call('case_agent_store_health')
         return isinstance(result, dict) and result.get('contract_version') == 1 and result.get('ready') is True
 
     def action(self, owner, case_id, revision, action, key, body_hash, request_id):
@@ -103,8 +108,15 @@ class CaseRuntimeRepository:
 
     def start_receipt(self, owner, case_id, revision, key):
         from app.features.work_cases.application.actions import revision_body_hash
-        result = self.call('lookup_work_case_start_request', p_owner=str(owner), p_case=str(case_id),
-                           p_key=key, p_hash=revision_body_hash(revision))
+        try:
+            result = self.call('lookup_work_case_start_request', p_owner=str(owner), p_case=str(case_id),
+                               p_key=key, p_hash=revision_body_hash(revision))
+        except ServiceError as error:
+            # Optional existing Supabase lookup. Absence requires no schema
+            # installation: the transactional submit RPC still owns replay.
+            if error.code == 'EXTRACTION_SCHEMA_REQUIRED':
+                return None
+            raise
         if not isinstance(result, dict) or result.get('kind') not in {'NONE', 'REPLAY'}:
             raise ServiceError('PROCESSING_UNAVAILABLE', '검토 접수 이력을 확인할 수 없습니다.', 503)
         return result if result['kind'] == 'REPLAY' else None
