@@ -111,10 +111,15 @@ PROMPTS = {
       "1kg 당 단가 : 9,850 원" → unit_price "9,850 원", unit "kg"
       "단가 54,500원/박스로 조정됩니다" → unit_price "54,500원", unit "박스" (unit에는 단위 낱말 하나만 넣는다)
       "kg당 3.20 USD" → unit_price "3.20 USD", unit "kg", currency "USD"
+      "Unit price: USD 3.10 per kg" → unit_price "3.10", unit "kg", currency "USD"
+        (통화 기호가 숫자 앞에 있으면 숫자와 통화를 나눠 보낸다. "per kg"·"Unit price"는 raw_value에 넣지 않는다)
+      "Valid until: December 31, 2026"처럼 영어로 쓴 날짜는 도구가 읽지 못한다. 그 항목만 null로 보내고 reason에 적는다
       "단가는 kg당 9,500원입니다" → unit_price "9,500원", unit "kg"
       "하차비는 박스당 500원" → cost_terms {amount "500원", basis "박스당"}
       "98,000원/박스 (박스당 10kg)" → unit_price "98,000원", unit "박스", quantity_per_order_unit "박스당 10kg"
       "하차비: 없음" → cost_terms {cost_type HANDLING, source_text "하차비: 없음", amount "없음"}
+      표·시트의 셀(예: "A5: 운송비", "B5: 무료")은 값 셀을 그대로 옮기고 셀 위치를 evidence.cell에 적는다
+        → cost_terms {cost_type SHIPPING, source_text "무료", amount "무료"}, evidence.cell "B5"
 - cost_terms의 source_text·amount·basis·payer도 원문 그대로다. 번역하거나 바꿔 쓰지 않는다(예: payer "귀사 부담").
 - 메일 목록에 supplier_id가 있는 메일은 업체가 정해져 있다. 본문에 업체명이 없으면 supplier_name을 보내지 않고,
   업체명이 없다는 이유로 unknown_fields에 넣거나 HOLD하지 않는다.
@@ -166,6 +171,10 @@ next_action:
 1. get_case_context로 업무를 확인한다. REVISION_CHANGED·CASE_NOT_FOUND면 다른 도구를 부르지 말고 바로 HOLD를 반환한다.
 2. 업무 품목명(item_name)에서 검색어를 정해 search_supplier_items(keywords)를 부른다.
    (예: "IQF 딸기 (냉동)" → ["딸기"]) 결과가 없으면 더 넓은 검색어로, truncated면 더 좁은 검색어로 다시 찾는다(최대 3번).
+   검색은 글자 그대로 일치만 찾으므로 좁힌 검색어는 띄어쓰기 변형을 함께 보낸다 (예: ["냉동 딸기", "냉동딸기"]).
+   다시 찾을 때도 업무 품목명 표기(띄어 쓴 것)와 붙여 쓴 표기를 둘 다 빼지 않는다. 다른 표기는 그 뒤에 더한다
+   (예: truncated 뒤 → ["냉동 딸기", "냉동딸기", "딸기(냉동)"]). 같은 품목은 여러 검색 결과에서 모두 모아 고른다.
+   영어 품목명이면 한국어 품목명으로 바꾼 검색어도 함께 보낸다 (예: "IQF Strawberry" → ["딸기", "strawberry"]).
 3. 검색 결과에서 업무 품목과 같은 품목만 고른다. 같은 품목은 원재료와 상태(냉동·생·건조 등)가 같고 다른 제품으로
    가공되지 않은 것이다. 이름 표기·어순·괄호·등급·용도 표시만 다르면 같은 품목이다.
    - 같은 품목 예 (업무 "냉동 딸기"): "냉동딸기", "딸기(냉동)", "IQF 냉동 딸기", "냉동 딸기 특품", "딸기(냉동) 10kg"
@@ -193,6 +202,9 @@ next_action:
      비고 "부가세 별도" → TAX를 고르지 않는다. 원산지가 있으면(국내산·수입산·칠레산 등) ORIGIN을 고르지 않고,
      비어 있을 때만 ORIGIN을 고른다. 비고에 배송 제약이 있으면 DELIVERY_DAYS를 고른다)
      비고·원산지로 바뀔 것이 없는 업체는 넣지 않는다(default_question_options로 묻는다). 고정 질문은 도구가 늘 넣는다.
+     부르기 전에 후보마다 확인한다: origin이 비어 있는(null) 업체는 반드시 questions에 넣고 question_ids에
+     ORIGIN과 기본 질문(MOQ·VALIDITY 중 비고에 답이 없는 것)을 함께 적는다.
+     (예: sup-cl의 origin이 null이고 비고 없음 → {supplier_id "sup-cl", question_ids ["MOQ", "VALIDITY", "ORIGIN"]})
    - rejected에 있는 업체는 초안이 없다. 그 업체는 최종 응답 candidates에서 뺀다. 결과가 DRAFTED면 다시 부르지 않는다.
 5. 바로 최종 응답(CandidateOut)을 낸다(최종 응답이 실행 기록으로 저장된다).
 
