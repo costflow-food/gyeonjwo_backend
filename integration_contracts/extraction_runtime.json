@@ -98,32 +98,6 @@
       "returns": "boolean",
       "requires": "Renew only a live owned lease whose case/batch/revision remains valid."
     },
-    "complete_case_extraction": {
-      "args": {
-        "p_job": "uuid",
-        "p_token": "uuid",
-        "p_revision": "integer",
-        "p_batch": "uuid",
-        "p_output": "RunCaseOutput JSON",
-        "p_result": "Validated ExtractionResult JSON plus server-computed stored_fields; null for HOLD",
-        "p_model": "text",
-        "p_prompt_version": "text"
-      },
-      "transaction": [
-        "Lock the owned job and case. Validate token, live lease, input revision and batch. Old input becomes STALE without changing newer work.",
-        "Recheck field whitelist, exact numeric range, source-mail ownership, body/subject excerpt presence and attachment part reference. PDF text provenance is validated by Python before SQL; SQL checks its owned provider part reference.",
-        "Match exactly one registered same-owner contact. Unknown/ambiguous suppliers stay unlinked: save normalized request evidence on the mail, never insert a supplier or fake quote FK.",
-        "Known supplier quotes are new immutable NEEDS_REVIEW versions. Initial narrow extraction does not pretend to confirm all procurement conditions.",
-        "Save requester/item/quantity/unit and normalized item key. Ready item -> Running/CANDIDATES; missing item -> Pending/NEEDS_INFO; HOLD -> Pending/ON_HOLD, consistent with SQL v3.6 five-state CHECK constraints.",
-        "Atomically finish the job, agent result and short workflow log. Source content remains in private evidence, never application logs."
-      ],
-      "returns": {
-        "kind": "STORED or STALE",
-        "quote_version_ids": [
-          "actual stored UUIDs"
-        ]
-      }
-    },
     "fail_case_extraction": {
       "args": {
         "p_job": "uuid",
@@ -137,6 +111,47 @@
       "args": {},
       "requires": "Fail only expired PROCESSING leases as WORKER_INTERRUPTED; preserve pending durable jobs, other live workers and newer case batches. Never reset/reexecute an expired job automatically.",
       "returns": "nonnegative integer"
+    },
+    "case_agent_store_health": {
+      "args": {},
+      "returns": {
+        "contract_version": 1,
+        "ready": true
+      }
+    },
+    "store_case_agent_quote": {
+      "args": {
+        "p_job": "uuid",
+        "p_token": "uuid",
+        "p_revision": "integer",
+        "p_record": "full QuoteVersionRecord jsonb"
+      },
+      "returns": "STORED + quote_id + exact stored record"
+    },
+    "complete_case_agent_extraction": {
+      "args": {
+        "p_job": "uuid",
+        "p_token": "uuid",
+        "p_revision": "integer",
+        "p_batch": "uuid",
+        "p_output": "backend ExtractionOutcome jsonb",
+        "p_quote_ids": "uuid[]",
+        "p_model": "text",
+        "p_prompt_version": "text",
+        "p_agent_output": "AgentRunner final ExtractionOut JSON"
+      },
+      "returns": "STORED + quote_version_ids"
+    },
+    "begin_case_agent_run": {
+      "args": {
+        "p_job": "uuid",
+        "p_token": "uuid",
+        "p_revision": "integer",
+        "p_model": "text",
+        "p_prompt_version": "text",
+        "p_input": "ExtractionIn JSON"
+      },
+      "returns": "boolean; reuses existing durable job row and records real role metadata before model invocation"
     }
   },
   "historical_observations_2026_10_29": [
@@ -145,5 +160,7 @@
     "Unregistered sender: quote_versions requires supplier_id. DB owner must support unlinked request evidence without inserting a synthetic supplier. No backend workaround or supplier insert is permitted."
   ],
   "local_sql": "migrations/003_case_extraction_runtime.sql",
-  "job_storage": "Existing agent_runs.input_snapshot_jsonb holds PENDING/PROCESSING/DONE job state, claim token and 120-second lease; no new job table."
+  "job_storage": "Existing agent_runs.input_snapshot_jsonb holds PENDING/PROCESSING/DONE job state, claim token and 120-second lease; no new job table.",
+  "agent_integration": "Backend implements team store protocols; no app.agents.backend_adapter required. Full quote writes are atomic per tool, separate from terminal run completion.",
+  "additional_migration": "004_agent_quote_store.sql; DB owner review/application required"
 }

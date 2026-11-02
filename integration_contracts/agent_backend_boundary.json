@@ -1,38 +1,29 @@
 {
-  "contract_version": 1,
+  "contract_version": 2,
   "owner_split": {
-    "agent_team": "Owns app/agents: prompts, graphs, role schemas and tools. Backend does not replace these files.",
-    "backend": "Owns API, durable extraction jobs, owner/revision checks, Gmail evidence retrieval and transactional completion."
+    "agent_team": "Owns all app/agents sources, prompts, graphs, schemas and tool protocols. No agent source changes in this integration.",
+    "backend": "Implements CaseStore, QuoteStore and AgentRunStore in app/features/work_cases/infrastructure/agent_store.py and calls public AgentRunner from its own application/agent_boundary.py."
   },
-  "module": "app.agents.backend_adapter",
-  "exports": {
-    "CONTRACT_VERSION": 1,
-    "EXTRACTION_ONLY": true,
-    "run_extraction": "Synchronous callable: keyword settings, scope. Returns ExtractionOutcome-compatible dict or model."
+  "entrypoint": "app.features.work_cases.application.agent_boundary.run_extraction",
+  "execution": "Call AgentRunner(INFO_EXTRACTOR, ExtractionIn) directly. No graph option/override and no roles 2-5.",
+  "persistence": {
+    "quote": "Full QuoteVersionRecord; pricing tiers, cost terms, tax checks, item notes, evidence, normalized mail and conditions retained.",
+    "atomic_quote_rpc": "store_case_agent_quote: quote + optional reference-price history + mail normalization + case conditions + workflow log in one transaction.",
+    "completion_rpc": "complete_case_agent_extraction: verify case/revision/batch/lease and stored quote IDs, then terminal run + case step + log.",
+    "partial_failure": "QuoteStore is a commit-on-tool contract. A quote already committed by a successful tool call remains immutable if later model/final-output validation fails. The job is then FAILED, never silently Complete.",
+    "json_mapping": "DB object-shaped cost_terms_jsonb/item_notes_jsonb store items arrays; pricing_terms_jsonb.agent_record retains the exact agent record for lossless readback.",
+    "decimal": "All scalar NUMERIC projections read as text; SQL rejects >6 meaningful decimal digits instead of rounding. MOQ and order increment are paired with units.",
+    "currency": "Base v3.6 allows KRW only. Foreign-currency records are rejected, never converted or relabeled.",
+    "role_output": "AgentRunner final next_action/reason/unknown_fields retained at agent_runs.output_jsonb top level. Raw partial tool-call payloads are discarded.",
+    "run_metadata_rpc": "begin_case_agent_run: records model/prompt and scoped input on existing job before model invocation; final role result remains top-level."
   },
-  "input_scope": [
-    "owner",
-    "case_id",
-    "revision",
-    "batch_id",
-    "mail_ids",
-    "remaining_seconds()",
-    "check(case_id, expected_revision)"
+  "run_scope": "Authenticated owner + durable job + revision + batch; ContextVar-scoped store proxy, not mutable per-user global stores.",
+  "privacy": "Disable tracing; never persist AgentRunner raw partial_tool_calls or log mail/model payloads.",
+  "requirements": [
+    "DB owner review/apply new local 004 after 002 and 003; no remote changes executed.",
+    "Existing REGISTERED/VERIFIED_WEB suppliers; no auto supplier creation. Unmatched supplier follows team HOLD behavior.",
+    "Requested purchase quantity is not supplier available_quantity and is not invented from it. Company label uses verified registered supplier name.",
+    "AgentRunner role-specific model/reasoning config is preserved. Provider retries disabled and per-request timeouts bounded by backend run deadline."
   ],
-  "backend_tools": {
-    "module": "app.features.work_cases.application.extraction_tools",
-    "context": "context(case_id, expected_revision)",
-    "evidence": "evidence(case_id, expected_revision, mail_id)",
-    "stage": "stage(case_id, expected_revision, result); fields/value/evidence schema is ExtractionResult; validates but does not persist"
-  },
-  "rules": [
-    "Do not execute roles 2-5, send mail or directly persist results in this adapter.",
-    "Use backend scope for owner, batch and revision; do not trust model-supplied identity.",
-    "Enforce remaining_seconds before every model/tool turn and bounded provider timeouts; disable tracing of payloads.",
-    "Successful extraction must stage evidence-backed ExtractionResult; worker revalidates identity and derives missing-item state before transactional commit.",
-    "ON_HOLD stages nothing for persistence; FAILED/STALE cannot become success.",
-    "Missing or incompatible adapter hides START, rejects start with 503 AGENT_INTEGRATION_REQUIRED, and stops extraction-worker startup before processing jobs."
-  ],
-  "response_model": "app.features.work_cases.domain.extraction_outcome.ExtractionOutcome",
-  "current_status": "Adapter deliberately not implemented here. Agent PR25 integration and real end-to-end test remain required."
+  "status": "Connected and validated with 47 offline checks: real team AgentRunner/FakeModel + isolated PGlite SQL; real provider deployment remains unverified."
 }

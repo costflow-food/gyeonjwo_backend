@@ -1,6 +1,6 @@
 {
   "saved_on": "2026-11-02",
-  "branch": "feature/work-cases-list",
+  "branch": "fix/agent-repository-integration",
   "scope": "Card 8 reply facts, RFQ preparation/delivery, draft approval/reconciliation HTTP, initial extraction runtime and safe interrupted-run recovery.",
   "verification": {
     "isolated_sql_checks_passed": 65,
@@ -15,11 +15,13 @@
     "openapi_generation": "passed",
     "real_db_mutations": false,
     "real_provider_sends": false,
-    "test_sources_retained": false
+    "test_sources_retained": false,
+    "agent_store_checks_passed": 47,
+    "agent_store_validation_engine": "PGlite PostgreSQL 18.6 isolated; real team AgentRunner with FakeModel; synthetic PDF through subprocess parser"
   },
   "database_apply": {
     "performed": false,
-    "requires": "DB owner reviews/applies 002 then 003 only after SQL v3.6 base/upgrade. Do not run the new-empty setup on an existing DB.",
+    "requires": "DB owner reviews/applies 002,003,004 in order on reviewed SQL v3.6; no remote schema changes performed.",
     "permission": "User prohibited Supabase structure changes; no remote schema change was executed."
   },
   "limits": [
@@ -36,21 +38,22 @@
     "actual_env_edited": false
   },
   "next_steps": [
-    "DB owner review/apply additive SQL contracts.",
-    "Verify real account JWT + frontend draft GET/approval payload using returned hashes/settings version.",
-    "Register test supplier evidence and explicit sending scope, then perform an explicitly authorized test-mail integration run."
+    "DB owner review/apply 004 after 002/003.",
+    "Start one extraction worker with LLM model/key configuration and registered supplier evidence.",
+    "Verify real JWT + frontend START -> real LLM/PDF -> full quote persistence and candidate wait."
   ],
   "sql_sha256": {
     "migrations/002_rfq_http_contract.sql": "2d2073bb500f5d2d63395dd8e495cc2e1fd83035e66458d70a8b5f870ad81759",
-    "migrations/003_case_extraction_runtime.sql": "2f1f9f85b5b5e530c1e6787861ed0f2acf758754b928cd9af1298633fd2b792c"
+    "migrations/003_case_extraction_runtime.sql": "2f1f9f85b5b5e530c1e6787861ed0f2acf758754b928cd9af1298633fd2b792c",
+    "migrations/004_agent_quote_store.sql": "7b289ae8cbf619fe671376affedb4f795ad9d810f261cff5be6dc178ccd8e6c8"
   },
   "agent_boundary": {
     "changed_on": "2026-11-02",
-    "agent_sources_removed": true,
-    "adapter_module": "app.agents.backend_adapter",
-    "adapter_provided": false,
-    "extraction_available": false,
-    "required_before_enabling": "Agent owner supplies contract v1 extraction-only adapter and validates backend evidence/staging transaction boundary. PR25 alone does not supply this adapter.",
-    "checks": "12 offline boundary/worker checks plus syntax/OpenAPI; no external services or retained tests"
+    "implementation": "backend CaseStore/QuoteStore/AgentRunStore and direct public AgentRunner INFO_EXTRACTOR call",
+    "agent_sources_modified": false,
+    "old_external_adapter_contract_removed": true,
+    "requires_db_migration": "004_agent_quote_store.sql after 002/003, by DB owner",
+    "verification": "47 offline application/SQL/FakeModel/PDF checks plus Python syntax/OpenAPI and role model/reasoning client wiring smoke; no real external account calls; no retained test files",
+    "live_ready_verified": false
   }
 }
