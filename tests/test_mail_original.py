@@ -97,6 +97,16 @@ def test_server_attachment_id_survives_reordering_and_gmail_id_rotation(data):
     assert attachment_id(str(uuid4()),first,0)!=old
 
 
+def test_null_new_part_ref_uses_valid_legacy_ref_and_preserves_root_id(data):
+    from app.features.mail.domain.attachment_ids import part_reference
+    assert part_reference({'provider_part_ref':None,'part_id':'0.1'})=='0.1'
+    assert part_reference({'provider_part_ref':'','part_id':'legacy'})==''
+    first=data['attachments_jsonb'][0]
+    current=attachment_id(data['id'],first,0)
+    first.update(provider_part_ref=None,part_id='0.1')
+    assert attachment_id(data['id'],first,5)==current
+
+
 def test_original_id_works_with_shared_attachment_download(data):
     public_id=service(data).get('owner',data['id']).attachments[0].attachment_id
     class Repo:
@@ -123,6 +133,33 @@ def test_storage_failure_never_echoes_body(data):
     with pytest.raises(ServiceError) as error:
         OriginalMailRepository(BadClient()).get('owner',data['id'])
     assert error.value.status==503 and 'sensitive' not in str(error.value)
+
+
+@pytest.mark.parametrize('rows',[None,{},'private body',[None]])
+def test_corrupt_sdk_response_is_not_reported_as_missing_mail(data,rows):
+    client=SelectOnlyClient(data)
+    client.execute=lambda:SimpleNamespace(data=rows)
+    with pytest.raises(ServiceError) as caught:
+        OriginalMailRepository(client).get('owner',data['id'])
+    assert caught.value.status==503 and 'private body' not in str(caught.value)
+
+
+def test_attachment_ownership_is_checked_before_oauth_configuration():
+    class Repo:
+        def message(self,*args):raise ServiceError('RESOURCE_NOT_FOUND','없음',404)
+    def factory():raise AssertionError('OAuth must not be initialized')
+    with pytest.raises(ServiceError) as caught:
+        fetch_gmail_attachment(Repo(),factory,'other',str(uuid4()),str(uuid4()))
+    assert caught.value.status==404
+
+
+def test_missing_attachment_is_checked_before_oauth_configuration(data):
+    class Repo:
+        def message(self,*args):return data
+    def factory():raise AssertionError('OAuth must not be initialized')
+    with pytest.raises(ServiceError) as caught:
+        fetch_gmail_attachment(Repo(),factory,'owner',data['id'],str(uuid4()))
+    assert caught.value.status==404
 
 
 def test_invalid_attachment_metadata_fails_without_echoing_it(data):

@@ -11,7 +11,7 @@ from urllib.parse import quote
 
 from app.core.errors import ServiceError
 from app.features.mailboxes.infrastructure.google import GoogleRejected
-from app.features.mail.domain.attachment_ids import attachment_id as server_attachment_id
+from app.features.mail.domain.attachment_ids import attachment_id as server_attachment_id, part_reference
 
 
 def missing():
@@ -41,21 +41,25 @@ def fetch_gmail_attachment(repo, mailbox_service, owner_id, mail_id, attachment_
     API-25 returns a server-generated UUID based on the mail and stable MIME part.
     Part references remain accepted for internal extraction and legacy clients.
     Gmail attachment IDs are not public identifiers.
+    A lazy mailbox factory may be supplied by HTTP callers so ownership and
+    attachment existence are checked before any OAuth configuration or access.
     """
     message = repo.message(owner_id, mail_id)
     attachments = message.get('attachments_jsonb')
     if not isinstance(attachments, list):
         raise missing()
     matches = [a for index, a in enumerate(attachments) if isinstance(a, dict) and (
-        attachment_id in (a.get('provider_part_ref'), a.get('part_id'))
+        attachment_id == part_reference(a)
         or attachment_id == server_attachment_id(mail_id, a, index))]
     if len(matches) != 1:
         raise missing()
     stored = matches[0]
-    part_id = stored.get('provider_part_ref', stored.get('part_id'))
+    part_id = part_reference(stored)
     if not isinstance(part_id, str) or str(message.get('provider', '')).upper() != 'GMAIL':
         raise missing()
     try:
+        if callable(mailbox_service):
+            mailbox_service = mailbox_service()
         connection, grant = mailbox_service.authorized(owner_id, 'read')
         if connection['mailbox_ref'] != message['mailbox_ref']:
             raise ServiceError('GOOGLE_RECONNECT_REQUIRED', '메일함을 다시 연결해 주세요.', 401)

@@ -15,7 +15,7 @@ MAX_CASES = 10000
 
 
 class WorkCaseListRepository:
-    def __init__(self, client, *, extraction_fields=False):
+    def __init__(self, client, *, extraction_fields=True):
         self.client, self.extraction_fields = client, extraction_fields
 
     def rows(self, owner, snapshot, archived):
@@ -28,7 +28,16 @@ class WorkCaseListRepository:
                 query = query.not_.is_('archived_at', 'null') if archived else query.is_('archived_at', 'null')
                 if after:
                     query = query.gt('id', after)
-                batch = query.execute().data
+                try:
+                    batch = query.execute().data
+                except Exception as error:
+                    if (self.extraction_fields and getattr(error, 'code', None) == '42703'
+                            and 'requester_name' in str(getattr(error, 'message', ''))):
+                        # Read stored names independently of whether new extraction
+                        # is enabled. Older schemas remain readable without migration.
+                        self.extraction_fields = False
+                        return self.rows(owner, snapshot, archived)
+                    raise
                 if not isinstance(batch, list):
                     raise ValueError('Invalid work-case response')
                 cases.extend(batch)

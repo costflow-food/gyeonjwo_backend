@@ -7,6 +7,7 @@ from app.core.errors import ServiceError
 from app.features.mail.application.attachments import fetch_gmail_attachment
 from app.features.review.infrastructure.documents import read_pdf
 from app.features.work_cases.domain.extraction import ExtractionResult
+from app.features.mail.domain.attachment_ids import part_reference
 
 
 @dataclass(repr=False)
@@ -24,11 +25,19 @@ class ExtractionScope:
     lease_check: object = lambda: None
     evidence_texts: dict = field(default_factory=dict)
     result: ExtractionResult | None = None
+    blocked: bool = False
+
+    def remaining_seconds(self):
+        self.lease_check()
+        if self.blocked:
+            raise ServiceError('EXTRACTION_DOCUMENT_LIMIT', '문서 처리 한도를 초과했습니다.', 503)
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise ServiceError('EXTRACTION_TIME_LIMIT', '추출 실행 한도를 초과했습니다.', 503)
+        return remaining
 
     def check(self, case_id, expected_revision):
-        self.lease_check()
-        if time.monotonic() >= self.deadline:
-            raise ServiceError('EXTRACTION_TIME_LIMIT', '추출 실행 한도를 초과했습니다.', 503)
+        self.remaining_seconds()
         if str(case_id) != self.case_id or expected_revision != self.revision:
             raise ServiceError('ACTION_NOT_ALLOWED', '도구 실행 범위를 벗어났습니다.', 409)
         return self.repo.context(self.owner, self.case_id, self.revision, self.batch_id)
@@ -58,7 +67,7 @@ def evidence(case_id, expected_revision, mail_id):
     sources = [{'evidence_id': f'{mail_id}:body', 'text': mail.get('body_text') or '', 'status': 'READABLE'},
                {'evidence_id': f'{mail_id}:subject', 'text': mail.get('subject') or '', 'status': 'READABLE'}]
     for attachment in mail.get('attachments_jsonb') or []:
-        ref = attachment.get('provider_part_ref', attachment.get('part_id'))
+        ref = part_reference(attachment)
         source = {'evidence_id': f'{mail_id}:part:{ref}', 'status': 'UNSUPPORTED', 'text': ''}
         if attachment.get('mime_type') == 'application/pdf' and isinstance(ref, str):
             # This is the same owner-scoped retrieval function as API-26.
@@ -78,6 +87,8 @@ def evidence(case_id, expected_revision, mail_id):
         if source['status'] == 'READABLE':
             scope.evidence_texts[source['evidence_id']] = source['text']
     if sum(map(len, scope.evidence_texts.values())) > scope.max_characters:
+        scope.blocked = True
+        scope.result = None
         raise ServiceError('EXTRACTION_DOCUMENT_LIMIT', '문서 처리 한도를 초과했습니다.', 503)
     scope.check(case_id, expected_revision)
     return {'sources': sources}
@@ -87,5 +98,6 @@ def stage(case_id, expected_revision, result):
     scope = get_scope(case_id, expected_revision)
     # No partial writes during the model/tool loop. The validated final result,
     # quote(s), work-case fields, run and log are committed together afterwards.
+    scope.result = None
     scope.result = ExtractionResult.model_validate(result).validated(scope.evidence_texts)
     return {'staged': True, 'persisted': False, 'unknown_fields': scope.result.unknown_fields}

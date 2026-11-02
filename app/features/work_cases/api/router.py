@@ -3,6 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, Request, Header
 from fastapi.responses import JSONResponse
 from uuid import UUID
+import time
 from pydantic import Field
 from app.shared.domain.schemas import StrictModel
 from app.core.errors import ServiceError
@@ -12,7 +13,7 @@ from app.features.work_cases.domain.actions import DeletedCase, StartedCase
 
 from app.api.responses import Envelope, api_json
 from app.features.mailboxes.api.router import require_google_user
-from app.features.work_cases.application.cursor import CursorCodec
+from app.features.work_cases.application.cursor import CursorCodec, utc_time, iso_z
 from app.features.work_cases.application.list_service import WorkCaseListService
 from app.features.work_cases.domain.listing import QueueFilter, WorkCaseList
 from app.features.work_cases.infrastructure.list_repository import WorkCaseListRepository
@@ -21,24 +22,35 @@ from app.shared.infrastructure.db.client import make_server_client
 router = APIRouter(prefix='/api/v1/work-cases', tags=['Work cases'])
 
 
+def extraction_available(request):
+    settings = request.app.state.settings
+    if not settings.agent_extraction_enabled or not settings.agent_stop_after_extraction:
+        return False
+    with request.app.state.service_lock:
+        cached = getattr(request.app.state, 'extraction_availability', None)
+        now = time.monotonic()
+        if cached is not None and now < cached[0]:
+            return cached[1]
+        try:
+            available = CaseRuntimeRepository(make_server_client(settings)).available()
+        except ServiceError:
+            available = False
+        request.app.state.extraction_availability = (now + 5, available)
+        return available
+
+
 def get_list_service(request: Request):
     with request.app.state.service_lock:
         service = getattr(request.app.state, 'work_case_list_service', None)
         if service is None:
             settings = request.app.state.settings
             client = make_server_client(settings)
-            enabled = False
-            if settings.agent_extraction_enabled and settings.agent_stop_after_extraction:
-                try:
-                    enabled = CaseRuntimeRepository(client).available()
-                except ServiceError:
-                    pass  # Keep listing usable, and START hidden, before DB rollout.
             service = WorkCaseListService(WorkCaseListRepository(client,
-                                         extraction_fields=enabled),
-                                         CursorCodec(settings.google_token_encryption_key.get_secret_value()),
-                                         extraction_enabled=enabled)
+                                         extraction_fields=True),
+                                         CursorCodec(settings.google_token_encryption_key.get_secret_value()))
             request.app.state.work_case_list_service = service
-        return service
+    service.extraction_enabled = extraction_available(request)
+    return service
 
 
 EXAMPLE = {
@@ -137,21 +149,28 @@ def case_progress(case_id: UUID, principal=Depends(require_google_user), repo=De
         raise ServiceError('RESOURCE_NOT_FOUND', '업무를 찾을 수 없습니다.', 404)
     row = rows[0]
     safe_codes = {'EXTRACTION_FAILED', 'EXTRACTION_TIME_LIMIT', 'WORKER_INTERRUPTED', 'INPUT_REVISION_CHANGED'}
-    code = (row.get('error_jsonb') or {}).get('code')
+    error = row.get('error_jsonb')
+    if error is not None and not isinstance(error, dict):
+        raise ServiceError('PROCESSING_UNAVAILABLE', '저장된 오류 상태를 확인할 수 없습니다.', 503)
+    code = (error or {}).get('code')
+    try:
+        updated_at = iso_z(utc_time(row['updated_at'])) if row.get('updated_at') else None
+    except (ValueError, AttributeError, TypeError):
+        raise ServiceError('PROCESSING_UNAVAILABLE', '저장된 시각 형식을 확인할 수 없습니다.', 503) from None
     return api_json({'case_id': row['id'], 'status': row['status'], 'processing_step': row['processing_step'],
-                     'input_revision': row['input_revision'], 'updated_at': row.get('updated_at'),
-                     'error': {'code': code if code in safe_codes else 'EXTRACTION_FAILED'} if code else None})
+                     'input_revision': row['input_revision'], 'updated_at': updated_at,
+                     'error': {'code': code if isinstance(code, str) and code in safe_codes else 'EXTRACTION_FAILED'} if code else None})
 
 
 @router.get('/{case_id}', summary='업무의 저장 상태 조회: 실행 없음')
 def get_case(case_id: UUID, principal=Depends(require_google_user), repo=Depends(get_runtime_repository)):
     try:
         rows = (repo.client.table('work_cases')
-                .select('id,initial_mail_id,status,processing_step,input_revision,item_name,specification,quantity,unit')
+                .select('id,initial_mail_id,status,processing_step,input_revision,item_name,specification,quantity::text,unit')
                 .eq('owner_user_id', principal.user_id).eq('id', str(case_id)).limit(1).execute().data)
     except Exception:
         raise ServiceError('PROCESSING_UNAVAILABLE', '업무를 조회할 수 없습니다.', 503) from None
     if not rows:
         raise ServiceError('RESOURCE_NOT_FOUND', '업무를 찾을 수 없습니다.', 404)
-    row = rows[0]
+    row = dict(rows[0])
     return api_json({'case_id': row.pop('id'), **row})

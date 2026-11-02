@@ -70,7 +70,8 @@ class ExtractionWorker:
                         elif output.status == 'STALE':
                             self.repo.fail(job, 'INPUT_REVISION_CHANGED')
                         else:
-                            result = self.repo.finish(job, output, scope.result, self.settings.llm_model)
+                            staged = scope.result if output.status in {'EXTRACTION_READY', 'NEEDS_INFO'} else None
+                            result = self.repo.finish(job, output, staged, self.settings.llm_model)
                             if not isinstance(result, dict) or result.get('kind') not in {'STORED', 'STALE'}:
                                 raise ServiceError('PROCESSING_UNAVAILABLE', '추출 결과 저장을 확인할 수 없습니다.', 503)
                 finally:

@@ -63,9 +63,10 @@ def original_mail(mail_id: UUID, principal=Depends(require_google_user),
                        409: {'description': 'MAILBOX_RECONNECT_REQUIRED'},
                        502: {'description': 'SOURCE_READ_FAILED'}})
 def attachment_content(mail_id: UUID, attachment_id: str, request: Request,
-                       principal=Depends(require_google_user), mailbox=Depends(get_mailbox_service)):
+                       principal=Depends(require_google_user)):
     repo = AttachmentRepository(make_server_client(request.app.state.settings))
-    result = fetch_gmail_attachment(repo, mailbox, principal.user_id, mail_id, attachment_id)
+    result = fetch_gmail_attachment(repo, lambda: get_mailbox_service(request),
+                                    principal.user_id, mail_id, attachment_id)
     # In-memory chunks only; never spool to a temporary file or persist the body.
     stream = BytesIO(result.content)
     return StreamingResponse(iter(lambda: stream.read(65536), b''), headers=result.headers())

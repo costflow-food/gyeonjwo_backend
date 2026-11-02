@@ -12,6 +12,8 @@ class WorkCaseActions:
         self.repo, self.extraction_enabled = repo, extraction_enabled
 
     def submit(self, owner, case_id, revision, action, key):
+        if action not in {'START', 'ACCEPT_INCREASE'}:
+            raise ServiceError('ACTION_NOT_ALLOWED', '허용하지 않은 업무 동작입니다.', 409, retryable=False)
         if not isinstance(key, str) or not 1 <= len(key) <= 200 or key.strip() != key or any(ord(c) < 32 for c in key):
             raise ServiceError('IDEMPOTENCY_KEY_REQUIRED', '유효한 Idempotency-Key가 필요합니다.', 400, retryable=False)
         if action == 'START' and not self.extraction_enabled:

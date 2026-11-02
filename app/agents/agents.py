@@ -19,7 +19,7 @@ PROMPTS에는 역할 목표, 어떤 도구를 언제 쓰는지, 어떤 경우 �
     print(runner(AgentRole.INFO_EXTRACTOR, ExtractionIn(case_id=uuid4(), input_revision=0, mail_ids=['m1'])))
 """
 from langchain.agents import create_agent
-from langchain.agents.middleware import ToolCallLimitMiddleware
+from langchain.agents.middleware import ToolCallLimitMiddleware, wrap_model_call
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
@@ -70,7 +70,21 @@ def chat_model(settings) -> BaseChatModel:
     settings.require_llm()
     return ChatOpenAI(model=settings.llm_model, base_url=str(settings.llm_base_url),
                       api_key=settings.llm_api_key.get_secret_value(), timeout=min(settings.llm_timeout_seconds, 20),
-                      max_retries=0)
+                      max_retries=0, store=False)
+
+
+@wrap_model_call
+def bounded_model_call(request, handler):
+    """Check the run budget before EVERY model turn, not just before/after the loop."""
+    from app.features.work_cases.application.extraction_tools import CURRENT_SCOPE
+    scope = CURRENT_SCOPE.get(None)
+    if scope is None:
+        return handler(request)
+    remaining = scope.remaining_seconds()
+    response = handler(request.override(model_settings={
+        **(request.model_settings or {}), 'timeout': min(20, remaining)}))
+    scope.remaining_seconds()
+    return response
 
 
 def build_agent(role: AgentRole, model: BaseChatModel):
@@ -78,7 +92,8 @@ def build_agent(role: AgentRole, model: BaseChatModel):
     return create_agent(
         model, tools_for(role), system_prompt=POLICY + '\nRole: ' + role + '\n' + PROMPTS[role],
         response_format=ToolStrategy(output),
-        middleware=[ToolCallLimitMiddleware(run_limit=MAX_TOOL_CALLS_PER_AGENT_CALL, exit_behavior='error')],
+        middleware=[bounded_model_call,
+                    ToolCallLimitMiddleware(run_limit=MAX_TOOL_CALLS_PER_AGENT_CALL, exit_behavior='error')],
         name=role.lower(),
     )
 

@@ -170,6 +170,71 @@ def test_false_stored_without_staging_is_failure():
     assert repo.saved == [] and repo.row['processing_step'] == 'FAILED'
 
 
+def test_staged_fields_are_not_committed_when_final_result_is_hold():
+    from app.features.work_cases.application.extraction_tools import evidence
+    repo=FakeRepository()
+    def runner(role,data):
+        evidence(repo.case_id,1,repo.mail_id)
+        stage(repo.case_id,1,result_fields(repo))
+        return ExtractionOut(next_action='HOLD',reason='추출 보류')
+    worker(repo,runner_factory=lambda:runner).process_once()
+    assert repo.row['processing_step']=='ON_HOLD'
+    assert repo.row['item_name'] is None and repo.row['requester_name'] is None
+
+
+def test_invalid_restage_clears_prior_staged_result():
+    from app.features.work_cases.application.extraction_tools import evidence
+    repo=FakeRepository()
+    scope=ExtractionScope(repo.owner,repo.case_id,1,repo.batch,(repo.mail_id,),repo,object(),object(),120000,time.monotonic()+60)
+    token=CURRENT_SCOPE.set(scope)
+    try:
+        evidence(repo.case_id,1,repo.mail_id)
+        stage(repo.case_id,1,result_fields(repo))
+        assert scope.result is not None
+        with pytest.raises(ValueError):
+            stage(repo.case_id,1,{'fields':{'not_allowed':{'value':'invented','evidence':[]}}})
+        assert scope.result is None
+    finally:CURRENT_SCOPE.reset(token)
+
+
+def test_document_limit_cannot_be_bypassed_by_followup_save():
+    from app.features.work_cases.application.extraction_tools import evidence
+    repo=FakeRepository()
+    scope=ExtractionScope(repo.owner,repo.case_id,1,repo.batch,(repo.mail_id,),repo,object(),object(),1,time.monotonic()+60)
+    token=CURRENT_SCOPE.set(scope)
+    try:
+        with pytest.raises(ServiceError):evidence(repo.case_id,1,repo.mail_id)
+        with pytest.raises(ServiceError):stage(repo.case_id,1,result_fields(repo))
+        assert scope.blocked and scope.result is None
+    finally:CURRENT_SCOPE.reset(token)
+
+
+def test_expired_scope_blocks_model_before_first_request():
+    repo=FakeRepository()
+    scope=ExtractionScope(repo.owner,repo.case_id,1,repo.batch,(repo.mail_id,),repo,object(),object(),120000,time.monotonic()-1)
+    token=CURRENT_SCOPE.set(scope)
+    try:
+        runner=AgentRunner(FakeModel(messages=iter([])))
+        from app.agents.schemas import ExtractionIn
+        with pytest.raises(ServiceError) as caught:
+            runner('INFO_EXTRACTOR',ExtractionIn(case_id=repo.case_id,input_revision=1,mail_ids=[repo.mail_id]))
+        assert caught.value.code=='EXTRACTION_TIME_LIMIT'
+    finally:CURRENT_SCOPE.reset(token)
+
+
+def test_each_model_turn_receives_remaining_budget_as_timeout():
+    from app.agents.agents import bounded_model_call
+    from langchain.agents.middleware.types import ModelRequest
+    request=ModelRequest(model=FakeModel(messages=iter([])),messages=[],model_settings={'temperature':0})
+    remaining=iter([3.5,3.0]);received=[]
+    token=CURRENT_SCOPE.set(SimpleNamespace(remaining_seconds=lambda:next(remaining)))
+    try:
+        marker=object()
+        result=bounded_model_call.wrap_model_call(request,lambda r:received.append(r.model_settings) or marker)
+        assert result is marker and received==[{'temperature':0,'timeout':3.5}]
+    finally:CURRENT_SCOPE.reset(token)
+
+
 def test_revision_race_never_overwrites_newer_work():
     repo = FakeRepository()
     def runner(role, data):

@@ -35,13 +35,18 @@ class CaseRuntimeRepository:
     def action(self, owner, case_id, revision, action, key, body_hash, request_id):
         # The wrapper owns begin_api_request -> action -> durable job ->
         # complete_api_request, on ONE DB connection/transaction.
-        name = 'accept_and_delete_work_case' if action == 'ACCEPT_INCREASE' else 'submit_work_case_start'
+        names = {'ACCEPT_INCREASE': 'accept_and_delete_work_case', 'START': 'submit_work_case_start'}
+        if action not in names:
+            raise ServiceError('ACTION_NOT_ALLOWED', '허용하지 않은 업무 동작입니다.', 409, retryable=False)
+        name = names[action]
         return self.call(name, p_owner=owner, p_case=str(case_id), p_revision=revision,
                          p_key=key, p_hash=body_hash, p_request_id=request_id)
 
     def context(self, owner, case_id, revision, batch):
         try:
-            rows = (self.client.table('work_cases').select('*').eq('owner_user_id', owner)
+            rows = (self.client.table('work_cases').select(
+                    'id,input_revision,current_batch_id,status,processing_step,archived_at,'
+                    'item_name,specification,quantity::text,unit,policy_jsonb').eq('owner_user_id', owner)
                     .eq('id', str(case_id)).limit(1).execute().data)
         except Exception:
             raise ServiceError('PROCESSING_UNAVAILABLE', '업무 정보를 확인할 수 없습니다.', 503) from None
