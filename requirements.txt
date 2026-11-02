@@ -6,3 +6,6 @@ httpx==0.28.1
 google-auth[requests]==2.62.0
 pypdf==6.21.2
 cryptography==50.0.2
+langgraph==1.2.18
+langchain==1.4.7
+langchain-openai==1.7.3

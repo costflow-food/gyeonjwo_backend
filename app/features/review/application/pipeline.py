@@ -24,8 +24,12 @@ def cost_value(cost, quantity, start, end):
     if cost['payer'] != 'BUYER' or cost['included_in_price'] != 'FALSE' or cost['amount'] is None:
         return None
     if cost['basis'] == 'PER_UNIT':
-        if cost['coverage_from'] and not (as_date(cost['coverage_from']) <= start <= end <= as_date(cost['coverage_to'])):
-            return None
+        coverage_from, coverage_to = cost.get('coverage_from'), cost.get('coverage_to')
+        if coverage_from or coverage_to:
+            if not coverage_from or not coverage_to:
+                return None
+            if not (as_date(coverage_from) <= start <= end <= as_date(coverage_to)):
+                return None
         if cost.get('coverage_quantity') is not None and cost['coverage_quantity'] != quantity:
             return None
         return cost['amount'] * quantity

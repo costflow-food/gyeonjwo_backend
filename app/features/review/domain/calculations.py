@@ -32,7 +32,8 @@ def evaluate(proposal, registry, expected):
                                     'total_cost': total}
     baseline = result['BEFORE']['total_cost']
     for value in result.values():
-        value['difference_from_before'] = None if value['total_cost'] is None else value['total_cost'] - baseline
+        value['difference_from_before'] = (None if value['total_cost'] is None or baseline is None
+                                           else value['total_cost'] - baseline)
     return result
 
 

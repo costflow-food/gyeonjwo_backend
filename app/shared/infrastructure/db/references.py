@@ -14,12 +14,15 @@ class ReferenceRepository:
         if table not in REFERENCE_COLUMNS:
             raise ValueError('Unknown reference table')
         columns = REFERENCE_COLUMNS[table]
+        # Avoid JSON float conversion before Decimal sees a NUMERIC value.
+        selected = ','.join(name + '::text' if name in DECIMAL_COLUMNS else name
+                            for name in columns.split(','))
         if equals.keys() - set(columns.split(',')):
             raise ValueError('Unknown filter column')
         rows = []
         offset = 0
         while True:
-            query = self.client.table(table).select(columns)
+            query = self.client.table(table).select(selected)
             for key, value in equals.items():
                 query = query.is_(key, 'null') if value is None else query.eq(key, value)
             # Stable primary-key order and small pages work with standard Supabase limits.

@@ -22,7 +22,8 @@ class RequestIdentity:
 
 
 def request_identity(user_id: str, method: str, path: str, key: str | None, body: Any) -> RequestIdentity:
-    if not key or not key.strip():
+    if (not isinstance(key, str) or not 1 <= len(key) <= 200 or key.strip() != key
+            or any(ord(c) < 32 or ord(c) == 127 for c in key)):
         raise ServiceError('INVALID_REQUEST', 'Idempotency-Key가 필요합니다.', 422,
                            fields=['header.Idempotency-Key'], retryable=False)
     if not user_id or not path.startswith('/') or method.upper() not in {'POST', 'PUT', 'PATCH', 'DELETE'}:

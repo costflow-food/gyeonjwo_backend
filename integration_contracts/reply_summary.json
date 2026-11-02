@@ -1,0 +1,206 @@
+{
+  "status": "sql_v3.6_verified_not_deployed",
+  "rpc": "get_work_case_reply_facts",
+  "contract_version": 1,
+  "parameters": {
+    "p_owner": "verified JWT user UUID",
+    "p_case_ids": "UUID[]; current page only, maximum 100"
+  },
+  "response": {
+    "contract_version": 1,
+    "owner_user_id": "same as p_owner",
+    "cases": [
+      {
+        "case_id": "requested UUID",
+        "request_round_id": "authoritative current RFQ request round UUID or null",
+        "sent_supplier_ids": [],
+        "valid_reply_supplier_ids": []
+      }
+    ]
+  },
+  "requirements": [
+    "Read-only, service-only function; verify ownership of every case, draft, intent, linked message and quote. Do not expose internal tables to Data API.",
+    "Use one database snapshot for round, successful sends and verified reply evidence. Return exactly one row per requested owned case; reject unknown or foreign cases.",
+    "Current round must come from authoritative RFQ workflow/intent state. Do not equate extraction current_batch_id with RFQ round or infer a round by newest timestamp.",
+    "sent_supplier_ids contains only suppliers with RFQ purpose and SENT success evidence in the current round; exclude DRAFT, SENDING, FAILED and UNKNOWN.",
+    "valid_reply_supplier_ids contains only suppliers with a verified valid quote reply linked to the same owner, case and current RFQ send/round. Header link alone, BUSINESS classification, thread identity or receipt time alone is not proof of a valid quote reply.",
+    "Uncertain or ambiguous links and invalid/unconfirmed quote replies are excluded. Valid supplementary replies count once with their original supplier. Outbound and initial request mail never count as replies.",
+    "No RFQ round returns null plus two empty arrays. Missing infrastructure must error, never pretend there are no requests.",
+    "Return IDs only: no body, subject, email address, attachment contents or tokens. No writes, sidebar aggregate, per-case frontend request or new logs. API returns the intersection of replied suppliers and successfully requested suppliers.",
+    "DB v3.6 deduplicates case IDs in first-input order. Null arrays/elements are invalid; at most 100 inputs. Empty input yields cases: [].",
+    "A VALID quote reply is evidence of a response, not purchase feasibility. A 15kg MOQ reply to a 10kg request still counts if otherwise a verified valid quote.",
+    "Current-round SENT suppliers must contain every valid reply supplier. Contract violations fail rather than silently hiding inconsistent evidence.",
+    "Legacy sends without an explicit RFQ round remain unmodified and return null plus empty arrays. No automatic backfill.",
+    "Gmail provider message ID is not RFC Message-ID. Delayed headers must not reduce SENT denominator. Ambiguous links require actual user confirmation before assess_rfq_reply.",
+    "SQL open_rfq_round accepts CANDIDATES/GENERATING_PLANS/WAITING_REPLY, not extraction stop step SELECTING_CANDIDATES. Candidate orchestration must explicitly bridge stages; do not bypass the DB guard.",
+    "Full v3.6 SQL reviewed locally. No remote SQL execution, supplier seeding, mail sending or approval performed during development.",
+    "Direct mail_drafts INSERT uses SQL draft_chain and rfq_draft_current guards and deterministic intent-derived draft identity. No RFQ evidence table is inserted by server code.",
+    "Automatic send requires a completed matching CANDIDATE run and current policy fingerprint matching creation. Approval-ON drafts never become automatically eligible by switching policy OFF.",
+    "Sender accepts only authorized=true DB claims, makes one provider POST, stores SENT only with provider ID, and records ambiguous provider outcomes UNKNOWN. A lost finish acknowledgement never triggers another send.",
+    "No supplier data leads to NEEDS_INFO without an LLM call. No past prices or contact addresses are sent to the selection model. Commercial RFQ text is rendered from stored case facts, not model-invented terms."
+  ],
+  "schema_version": "4.6",
+  "current_round_field": "work_cases.current_rfq_round_id",
+  "source_sql": {
+    "filename": "02_gyeonjwo_upgrade_v3.5_to_v3.6.sql",
+    "sha256": "50857dc29981c9d9569530935a99596f038ec09c320064941cce988c7f601aeb"
+  },
+  "sql_errors": {
+    "P0002": {
+      "http_status": 404,
+      "code": "RESOURCE_NOT_FOUND",
+      "scope": "get_work_case_reply_facts: missing or foreign case"
+    },
+    "22023": {
+      "http_status": 503,
+      "code": "PROCESSING_UNAVAILABLE",
+      "scope": "internal caller supplied an invalid argument"
+    },
+    "PGRST202": {
+      "http_status": 503,
+      "code": "PROCESSING_UNAVAILABLE",
+      "next_action": "CONTACT_SERVER_ADMIN"
+    }
+  },
+  "producer_rpc_contracts": {
+    "open_rfq_round": {
+      "parameters": [
+        "p_owner uuid",
+        "p_case uuid",
+        "p_expected_revision integer",
+        "p_expected_current_round uuid",
+        "p_suppliers uuid[]",
+        "p_key text"
+      ],
+      "response_fields": [
+        "case_id",
+        "request_round_id",
+        "round_no",
+        "targets[].supplier_id",
+        "targets[].target_id",
+        "targets[].intent_id"
+      ],
+      "required_steps": [
+        "CANDIDATES",
+        "GENERATING_PLANS",
+        "WAITING_REPLY"
+      ]
+    },
+    "claim_rfq_outbound_metadata": {
+      "parameters": [
+        "p_owner uuid",
+        "p_limit integer DEFAULT 20"
+      ],
+      "response": "array",
+      "job_fields": [
+        "sent_message_id",
+        "mailbox_ref",
+        "provider_message_id",
+        "claim_token",
+        "lease_expires_at"
+      ],
+      "lease_seconds": 300
+    },
+    "complete_rfq_outbound_metadata": {
+      "parameters": [
+        "p_owner uuid",
+        "p_sent uuid",
+        "p_token uuid",
+        "p_message jsonb"
+      ],
+      "message_fields": [
+        "gmail_message_id",
+        "gmail_thread_id",
+        "message_id_header",
+        "received_at",
+        "sender",
+        "recipients",
+        "subject"
+      ],
+      "response_fields": [
+        "sent_message_id",
+        "outbound_mail_id",
+        "metadata_state"
+      ],
+      "body_text": "not required; SQL stores empty outbound body"
+    },
+    "fail_rfq_outbound_metadata": {
+      "parameters": [
+        "p_owner uuid",
+        "p_sent uuid",
+        "p_token uuid"
+      ],
+      "response": "boolean",
+      "max_attempts": 5
+    },
+    "retry_rfq_outbound_metadata": {
+      "parameters": [
+        "p_owner uuid",
+        "p_sent uuid"
+      ],
+      "response": "boolean",
+      "scope": "explicit retry for UNAVAILABLE jobs"
+    }
+  },
+  "server_implementation": {
+    "round_creation_adapter": "app/features/work_cases/infrastructure/rfq_repository.py:RfqRepository.open_round",
+    "metadata_worker": "app/features/work_cases/application/rfq_metadata_worker.py:RfqMetadataWorker",
+    "worker_enabled_by_default": false,
+    "settings": [
+      "RFQ_WORKFLOW_ENABLED",
+      "RFQ_WORKFLOW_OWNER_IDS",
+      "RFQ_MAIL_SENDING_ENABLED",
+      "RFQ_METADATA_WORKER_ENABLED",
+      "RFQ_METADATA_OWNER_IDS"
+    ],
+    "metadata_fetch_format": "Gmail metadata, requested headers only",
+    "producer_call_site": "Configured-owner worker scans SQL CANDIDATES (and legacy SELECTING_CANDIDATES); scoped candidate run, round and complete draft preparation gate all sending.",
+    "deployment": "not performed",
+    "real_gmail_validation": "not performed",
+    "preparation": "app/features/work_cases/application/rfq_preparation.py:RfqPreparation",
+    "delivery": "app/features/work_cases/application/rfq_delivery.py:RfqDelivery",
+    "workflow_worker": "app/features/work_cases/application/rfq_workflow_worker.py:RfqWorkflowWorker",
+    "workflow_enabled_by_default": false,
+    "mail_sending_enabled_by_default": false,
+    "approval_http_api": "API-16 list, API-17 detail, API-19 atomic approval/202, API-20 durable read-only reconciliation/202 are implemented. Requires local migration 002 to be reviewed/deployed by DB owner.",
+    "interrupted_preparation": "Three-minute preparation deadline plus run fences; recover_rfq_server atomically fails five-minute-old runs and matching active case. No automatic reexecution.",
+    "interrupted_sending": "Five-minute-old SENDING becomes UNKNOWN, never FAILED or resent. API-20 reads exact sent evidence; absence stays UNKNOWN.",
+    "verification": {
+      "isolated_sql_checks_passed": 65,
+      "application_sql_integration_checks_passed": 17,
+      "http_layer_checks_passed": 19,
+      "http_principal": "mocked; real Supabase JWT flow not reverified",
+      "reply_extraction": "synthetic confirmed quote fixture",
+      "last_sql_validation": "2026-11-02",
+      "last_application_sql_validation": "2026-11-02",
+      "python_sources_parsed": 119,
+      "startup_guards": "passed",
+      "openapi_generation": "passed",
+      "real_db_mutations": false,
+      "real_provider_sends": false,
+      "test_sources_retained": false
+    },
+    "candidate_policy": "Exact normalized item handling evidence; known specification mismatch excluded; model selects only server-proven IDs; mandatory unknowns requested in RFQ; no invented prices or contacts.",
+    "draft_wording": "Server-rendered commercial facts and confirmation questions; effective signature/tone snapshot. Selection prompt cannot author or change commercial amounts."
+  },
+  "full_setup_sql": {
+    "filename": "01_gyeonjwo_setup_v3.6.sql",
+    "sha256": "22fa54d48e6012a047cc77e72837323735ca555f6ca004f47db0a6786b4bdbb5",
+    "executed": false
+  },
+  "http_contract": {
+    "approval_request": [
+      "expected_revision",
+      "snapshot_hash",
+      "expected_settings_version"
+    ],
+    "settings_version": "Opaque string returned by GET; not a local numeric counter.",
+    "snapshot_hash": "SHA256 of UTF-8 byte-length-framed immutable draft fields; shared Python/SQL implementation.",
+    "idempotency": "Single SQL transaction claims request, approves or enqueues reconciliation, stores first 202 envelope. Nonblocking request lock returns REQUEST_IN_PROGRESS.",
+    "cache_control": "private, no-store"
+  },
+  "additional_sql": [
+    "migrations/002_rfq_http_contract.sql",
+    "migrations/003_case_extraction_runtime.sql"
+  ]
+}

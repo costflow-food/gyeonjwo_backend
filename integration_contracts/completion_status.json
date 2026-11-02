@@ -1,0 +1,47 @@
+{
+  "saved_on": "2026-11-02",
+  "branch": "feature/work-cases-list",
+  "scope": "Card 8 reply facts, RFQ preparation/delivery, draft approval/reconciliation HTTP, initial extraction runtime and safe interrupted-run recovery.",
+  "verification": {
+    "isolated_sql_checks_passed": 65,
+    "application_sql_integration_checks_passed": 17,
+    "http_layer_checks_passed": 19,
+    "http_principal": "mocked; real Supabase JWT flow not reverified",
+    "reply_extraction": "synthetic confirmed quote fixture",
+    "last_sql_validation": "2026-11-02",
+    "last_application_sql_validation": "2026-11-02",
+    "python_sources_parsed": 119,
+    "startup_guards": "passed",
+    "openapi_generation": "passed",
+    "real_db_mutations": false,
+    "real_provider_sends": false,
+    "test_sources_retained": false
+  },
+  "database_apply": {
+    "performed": false,
+    "requires": "DB owner reviews/applies 002 then 003 only after SQL v3.6 base/upgrade. Do not run the new-empty setup on an existing DB.",
+    "permission": "User prohibited Supabase structure changes; no remote schema change was executed."
+  },
+  "limits": [
+    "Real Google/LLM delivery and real JWT integration are unverified.",
+    "Reply extraction was represented by a synthetic confirmed quote in application/SQL validation; that is not a measurement of reply-extraction accuracy.",
+    "PGlite PostgreSQL 18.6 validates SQL in isolation; production Supabase PostgreSQL 17 and true multi-connection contention still need integration testing.",
+    "Existing supplier/item seed data and configured send policies are required; no real supplier data was created.",
+    "Other service APIs and roles ③–⑤ are outside this RFQ completion scope."
+  ],
+  "runtime_defaults": {
+    "RFQ_WORKFLOW_ENABLED": false,
+    "RFQ_MAIL_SENDING_ENABLED": false,
+    "RFQ_METADATA_WORKER_ENABLED": false,
+    "actual_env_edited": false
+  },
+  "next_steps": [
+    "DB owner review/apply additive SQL contracts.",
+    "Verify real account JWT + frontend draft GET/approval payload using returned hashes/settings version.",
+    "Register test supplier evidence and explicit sending scope, then perform an explicitly authorized test-mail integration run."
+  ],
+  "sql_sha256": {
+    "migrations/002_rfq_http_contract.sql": "2d2073bb500f5d2d63395dd8e495cc2e1fd83035e66458d70a8b5f870ad81759",
+    "migrations/003_case_extraction_runtime.sql": "2f1f9f85b5b5e530c1e6787861ed0f2acf758754b928cd9af1298633fd2b792c"
+  }
+}
