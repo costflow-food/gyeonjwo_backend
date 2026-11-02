@@ -43,5 +43,14 @@
   "sql_sha256": {
     "migrations/002_rfq_http_contract.sql": "2d2073bb500f5d2d63395dd8e495cc2e1fd83035e66458d70a8b5f870ad81759",
     "migrations/003_case_extraction_runtime.sql": "2f1f9f85b5b5e530c1e6787861ed0f2acf758754b928cd9af1298633fd2b792c"
+  },
+  "agent_boundary": {
+    "changed_on": "2026-11-02",
+    "agent_sources_removed": true,
+    "adapter_module": "app.agents.backend_adapter",
+    "adapter_provided": false,
+    "extraction_available": false,
+    "required_before_enabling": "Agent owner supplies contract v1 extraction-only adapter and validates backend evidence/staging transaction boundary. PR25 alone does not supply this adapter.",
+    "checks": "12 offline boundary/worker checks plus syntax/OpenAPI; no external services or retained tests"
   }
 }
