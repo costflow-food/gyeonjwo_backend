@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
 from pydantic import Field, HttpUrl, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -32,6 +33,8 @@ class Settings(BaseSettings):
     llm_reasoning_effort_info_priority: ReasoningEffort | None = None
     llm_reasoning_effort_response_plan: ReasoningEffort | None = None
     llm_reasoning_effort_counter_offer: ReasoningEffort | None = None
+    # Empty sends nothing. Supported values depend on the classification model.
+    llm_classification_reasoning_effort: Literal['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] = ''
     llm_timeout_seconds: int = Field(default=60, ge=5, le=180)
     analysis_timeout_seconds: int = Field(default=600, ge=30, le=1800)
     calculation_rounds: int = Field(default=3, ge=2, le=5)
@@ -53,6 +56,14 @@ class Settings(BaseSettings):
     google_mailbox_poll_seconds: int = Field(default=90, ge=60, le=120)
     gmail_initial_sync_limit: int = Field(default=10, ge=1, le=500)
     app_build_revision: str = 'development'
+    agent_stop_after_extraction: bool = True
+    agent_extraction_enabled: bool = False
+    agent_extraction_worker_enabled: bool = False
+    rfq_metadata_worker_enabled: bool = False
+    rfq_metadata_owner_ids: list[UUID] = Field(default_factory=list)
+    rfq_workflow_enabled: bool = False
+    rfq_workflow_owner_ids: list[UUID] = Field(default_factory=list)
+    rfq_mail_sending_enabled: bool = False
 
     @field_validator('supabase_url', 'llm_base_url', 'supabase_secret_key', 'supabase_publishable_key',
                      'llm_api_key', 'gmail_client_secret', 'gmail_refresh_token', 'google_token_encryption_key',

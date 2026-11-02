@@ -23,6 +23,8 @@ from app.features.mail.api.router import router as mail_router
 from app.features.review.api.router import router as review_router
 from app.features.mailboxes.api.router import router as mailbox_router, make_mailbox_service
 from app.features.mailboxes.application.worker import ConnectedMailboxWorker
+from app.features.work_cases.api.router import router as work_cases_router
+from app.features.work_cases.api.mail_drafts import router as mail_drafts_router
 from app.features.system.application.diagnostics import require_startup_configuration
 
 logger = logging.getLogger('gyeonjwo')
@@ -38,6 +40,9 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     async def lifespan(app):
         worker = None
         connected_worker = None
+        extraction_worker = None
+        rfq_worker = None
+        rfq_workflow = None
         if settings.worker_enabled and settings.google_mailbox_worker_enabled:
             raise RuntimeError('Legacy and connected-mailbox workers cannot run together')
         if settings.worker_enabled:
@@ -48,7 +53,6 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
                 app.state.services = Services(settings, make_server_client(settings))
             worker = GmailWorker(app.state.services)
             app.state.worker = worker
-            worker.start()
         if settings.google_mailbox_worker_enabled:
             settings.require_google_connect()
             settings.require_classification()
@@ -56,14 +60,65 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
                 app.state.mailbox_service = make_mailbox_service(settings)
             connected_worker = ConnectedMailboxWorker(app.state.mailbox_service)
             app.state.connected_mailbox_worker = connected_worker
-            connected_worker.start()
         try:
+            if settings.rfq_workflow_enabled:
+                from app.features.work_cases.infrastructure.rfq_delivery_repository import RfqDeliveryRepository
+                from app.features.work_cases.application.rfq_preparation import RfqPreparation
+                from app.features.work_cases.application.rfq_delivery import RfqDelivery
+                from app.features.work_cases.application.rfq_workflow_worker import RfqWorkflowWorker
+                from app.shared.infrastructure.llm import JsonAgent
+                if app.state.mailbox_service is None:
+                    app.state.mailbox_service = make_mailbox_service(settings)
+                delivery_repo = RfqDeliveryRepository(make_server_client(settings))
+                delivery_repo.require_schema()
+                delivery_repo.require_http_schema()
+                rfq_workflow = RfqWorkflowWorker(delivery_repo,
+                    RfqPreparation(delivery_repo, JsonAgent(settings), settings.llm_model),
+                    RfqDelivery(delivery_repo, app.state.mailbox_service),
+                    [str(x) for x in settings.rfq_workflow_owner_ids],
+                    sending_enabled=settings.rfq_mail_sending_enabled)
+                app.state.rfq_workflow_worker = rfq_workflow
+            if settings.rfq_metadata_worker_enabled:
+                if not settings.rfq_metadata_owner_ids:
+                    raise RuntimeError('RFQ_METADATA_OWNER_IDS is required')
+                from app.features.work_cases.infrastructure.rfq_repository import RfqRepository
+                from app.features.work_cases.application.rfq_metadata_worker import RfqMetadataWorker
+                if app.state.mailbox_service is None:
+                    app.state.mailbox_service = make_mailbox_service(settings)
+                metadata_repo = RfqRepository(make_server_client(settings))
+                metadata_repo.require_schema()
+                rfq_worker = RfqMetadataWorker(metadata_repo,
+                    app.state.mailbox_service, [str(x) for x in settings.rfq_metadata_owner_ids])
+                app.state.rfq_metadata_worker = rfq_worker
+            if settings.agent_extraction_worker_enabled:
+                if not settings.agent_extraction_enabled or not settings.agent_stop_after_extraction:
+                    raise RuntimeError('Enable extraction-only integration before starting its worker')
+                from app.features.work_cases.application.extraction_worker import ExtractionWorker
+                from app.features.work_cases.infrastructure.runtime_repository import CaseRuntimeRepository
+                if app.state.mailbox_service is None:
+                    app.state.mailbox_service = make_mailbox_service(settings)
+                repo = CaseRuntimeRepository(make_server_client(settings))
+                if not repo.available():
+                    raise RuntimeError('Extraction runtime DB contract is not ready')
+                extraction_worker = ExtractionWorker(settings, repo, app.state.mailbox_service)
+                app.state.extraction_worker = extraction_worker
+            # Validate every dependency before any worker can process mail.
+            # The sender starts last, after receiver/recovery startup succeeds.
+            for prepared_worker in (extraction_worker, worker, connected_worker, rfq_worker, rfq_workflow):
+                if prepared_worker is not None:
+                    prepared_worker.start()
             yield
         finally:
+            if rfq_workflow:
+                rfq_workflow.close()
+            if rfq_worker:
+                rfq_worker.close()
             if worker:
                 worker.close()
             if connected_worker:
                 connected_worker.close()
+            if extraction_worker:
+                extraction_worker.close()
 
     # Explicitly override FastAPI's default HTTPValidationError schema: runtime uses ErrorEnvelope.
     common_errors = {status: {'model': ErrorEnvelope} for status in
@@ -73,6 +128,9 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     app.state.settings, app.state.services, app.state.worker = settings, services, None
     app.state.mailbox_service = mailbox_service
     app.state.connected_mailbox_worker = None
+    app.state.extraction_worker = None
+    app.state.rfq_metadata_worker = None
+    app.state.rfq_workflow_worker = None
     app.state.service_lock = threading.Lock()
     app.state.push_verifier = push_verifier
     app.add_middleware(BodyLimitMiddleware)
@@ -115,7 +173,7 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False,
                        allow_methods=['GET', 'POST', 'PATCH', 'PUT'],
                        allow_headers=['Authorization', 'Content-Type', 'Idempotency-Key', 'Cache-Control'],
-                       expose_headers=['X-Request-ID', 'Retry-After'])
+                       expose_headers=['X-Request-ID', 'Retry-After', 'Content-Disposition'])
 
     @app.exception_handler(ServiceError)
     async def service_error(request, error):
@@ -151,6 +209,8 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     app.include_router(mail_router)
     app.include_router(review_router)
     app.include_router(mailbox_router)
+    app.include_router(work_cases_router)
+    app.include_router(mail_drafts_router)
     return app
 
 

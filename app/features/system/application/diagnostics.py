@@ -8,6 +8,16 @@ CONNECTION_FIELDS = ('supabase_url','supabase_publishable_key','supabase_secret_
 def configuration_report(settings, *, receiver=False):
     missing = [name.upper() for name in CONNECTION_FIELDS if not getattr(settings,name)]
     invalid = []
+    if settings.rfq_metadata_worker_enabled and not settings.rfq_metadata_owner_ids:
+        missing.append('RFQ_METADATA_OWNER_IDS')
+    if settings.rfq_workflow_enabled:
+        if not settings.rfq_workflow_owner_ids:
+            missing.append('RFQ_WORKFLOW_OWNER_IDS')
+        for name in ('llm_base_url', 'llm_api_key', 'llm_model'):
+            if not getattr(settings, name):
+                missing.append(name.upper())
+    if settings.rfq_mail_sending_enabled and not settings.rfq_workflow_enabled:
+        invalid.append('RFQ_MAIL_SENDING_ENABLED')
     for name, prefix in (('supabase_secret_key', 'sb_secret_'),
                          ('supabase_publishable_key', 'sb_publishable_')):
         value = getattr(settings, name)

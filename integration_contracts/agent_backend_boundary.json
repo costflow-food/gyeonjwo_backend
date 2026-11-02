@@ -1,0 +1,38 @@
+{
+  "contract_version": 1,
+  "owner_split": {
+    "agent_team": "Owns app/agents: prompts, graphs, role schemas and tools. Backend does not replace these files.",
+    "backend": "Owns API, durable extraction jobs, owner/revision checks, Gmail evidence retrieval and transactional completion."
+  },
+  "module": "app.agents.backend_adapter",
+  "exports": {
+    "CONTRACT_VERSION": 1,
+    "EXTRACTION_ONLY": true,
+    "run_extraction": "Synchronous callable: keyword settings, scope. Returns ExtractionOutcome-compatible dict or model."
+  },
+  "input_scope": [
+    "owner",
+    "case_id",
+    "revision",
+    "batch_id",
+    "mail_ids",
+    "remaining_seconds()",
+    "check(case_id, expected_revision)"
+  ],
+  "backend_tools": {
+    "module": "app.features.work_cases.application.extraction_tools",
+    "context": "context(case_id, expected_revision)",
+    "evidence": "evidence(case_id, expected_revision, mail_id)",
+    "stage": "stage(case_id, expected_revision, result); fields/value/evidence schema is ExtractionResult; validates but does not persist"
+  },
+  "rules": [
+    "Do not execute roles 2-5, send mail or directly persist results in this adapter.",
+    "Use backend scope for owner, batch and revision; do not trust model-supplied identity.",
+    "Enforce remaining_seconds before every model/tool turn and bounded provider timeouts; disable tracing of payloads.",
+    "Successful extraction must stage evidence-backed ExtractionResult; worker revalidates identity and derives missing-item state before transactional commit.",
+    "ON_HOLD stages nothing for persistence; FAILED/STALE cannot become success.",
+    "Missing or incompatible adapter hides START, rejects start with 503 AGENT_INTEGRATION_REQUIRED, and stops extraction-worker startup before processing jobs."
+  ],
+  "response_model": "app.features.work_cases.domain.extraction_outcome.ExtractionOutcome",
+  "current_status": "Adapter deliberately not implemented here. Agent PR25 integration and real end-to-end test remain required."
+}

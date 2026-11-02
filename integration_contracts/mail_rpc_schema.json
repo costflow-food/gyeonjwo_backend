@@ -1,0 +1,137 @@
+{
+  "claim_mail_send": {
+    "properties": {
+      "p_draft": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "p_owner": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "p_owner",
+      "p_draft"
+    ],
+    "type": "object"
+  },
+  "reconcile_mail_send": {
+    "properties": {
+      "p_draft": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "p_evidence": {
+        "format": "jsonb"
+      },
+      "p_owner": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "p_provider_id": {
+        "format": "text",
+        "type": "string"
+      },
+      "p_result": {
+        "format": "text",
+        "type": "string"
+      }
+    },
+    "required": [
+      "p_owner",
+      "p_draft",
+      "p_result",
+      "p_evidence"
+    ],
+    "type": "object"
+  },
+  "approve_mail_draft": {
+    "properties": {
+      "p_case": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "p_draft": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "p_owner": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "p_revision": {
+        "format": "int32",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "p_owner",
+      "p_case",
+      "p_revision",
+      "p_draft"
+    ],
+    "type": "object"
+  },
+  "finish_mail_send": {
+    "properties": {
+      "p_draft": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "p_error": {
+        "format": "jsonb"
+      },
+      "p_owner": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "p_provider_id": {
+        "format": "text",
+        "type": "string"
+      },
+      "p_result": {
+        "format": "text",
+        "type": "string"
+      }
+    },
+    "required": [
+      "p_owner",
+      "p_draft",
+      "p_result"
+    ],
+    "type": "object"
+  },
+  "withdraw_mail_draft": {
+    "properties": {
+      "p_case": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "p_draft": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "p_owner": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "p_reason": {
+        "format": "text",
+        "type": "string"
+      },
+      "p_revision": {
+        "format": "int32",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "p_owner",
+      "p_case",
+      "p_revision",
+      "p_draft",
+      "p_reason"
+    ],
+    "type": "object"
+  }
+}
