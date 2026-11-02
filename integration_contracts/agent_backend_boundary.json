@@ -20,7 +20,7 @@
   "run_scope": "Authenticated owner + durable job + revision + batch; ContextVar-scoped store proxy, not mutable per-user global stores.",
   "privacy": "Disable tracing; never persist AgentRunner raw partial_tool_calls or log mail/model payloads.",
   "requirements": [
-    "DB owner review/apply new local 004 after 002 and 003; no remote changes executed.",
+    "Existing Supabase store/job RPCs must match the documented backend contract; definitions are managed by the DB owner.",
     "Existing REGISTERED/VERIFIED_WEB suppliers; no auto supplier creation. Unmatched supplier follows team HOLD behavior.",
     "Requested purchase quantity is not supplier available_quantity and is not invented from it. Company label uses verified registered supplier name.",
     "AgentRunner role-specific model/reasoning config is preserved. Provider retries disabled and per-request timeouts bounded by backend run deadline."

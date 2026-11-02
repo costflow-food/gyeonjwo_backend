@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "status": "LOCAL_V3_6_SQL_VALIDATED_NOT_DEPLOYED",
-  "source": "Requester-supplied full SQL v3.6 plus local additive adapter; remote installation not performed.",
+  "source": "Existing Supabase RPC contracts maintained by the DB owner. No local SQL installation files or automatic schema changes.",
   "remote_changes_performed": false,
   "enable_only_after_db_owner_review": true,
   "all_mutations": {
@@ -152,14 +152,23 @@
         "p_input": "ExtractionIn JSON"
       },
       "returns": "boolean; reuses existing durable job row and records real role metadata before model invocation"
-    },
+    }
+  },
+  "historical_observations_2026_10_29": [
+    "Remote public.work_cases has no requester_name column.",
+    "accept_and_delete_work_case and extraction transaction/job RPCs below are not deployed.",
+    "Unregistered sender: quote_versions requires supplier_id. DB owner must support unlinked request evidence without inserting a synthetic supplier. No backend workaround or supplier insert is permitted."
+  ],
+  "job_storage": "Existing agent_runs.input_snapshot_jsonb holds PENDING/PROCESSING/DONE job state, claim token and 120-second lease; no new job table.",
+  "agent_integration": "Backend implements team store protocols; no app.agents.backend_adapter required. Full quote writes are atomic per tool, separate from terminal run completion.",
+  "optional_rpc": {
     "review_start_health": {
       "args": {},
       "returns": {
         "contract_version": 1,
         "ready": true
       },
-      "requires": "SQL005 plus prior full agent quote-store contract."
+      "requires": "Optional existing Supabase function; absence does not require a local migration."
     },
     "lookup_work_case_start_request": {
       "args": {
@@ -170,16 +179,8 @@
       },
       "returns": "NONE / REPLAY(202, first envelope) / ERROR(IDEMPOTENCY_KEY_REUSED or REQUEST_IN_PROGRESS)",
       "read_only": true,
-      "requires": "service_role; owner+POST+canonical case path+key scope. Never inserts a new api_requests row."
+      "requires": "Optional existing Supabase function; absence does not require a local migration."
     }
   },
-  "historical_observations_2026_10_29": [
-    "Remote public.work_cases has no requester_name column.",
-    "accept_and_delete_work_case and extraction transaction/job RPCs below are not deployed.",
-    "Unregistered sender: quote_versions requires supplier_id. DB owner must support unlinked request evidence without inserting a synthetic supplier. No backend workaround or supplier insert is permitted."
-  ],
-  "local_sql": "migrations/003_case_extraction_runtime.sql",
-  "job_storage": "Existing agent_runs.input_snapshot_jsonb holds PENDING/PROCESSING/DONE job state, claim token and 120-second lease; no new job table.",
-  "agent_integration": "Backend implements team store protocols; no app.agents.backend_adapter required. Full quote writes are atomic per tool, separate from terminal run completion.",
-  "additional_migration": "004_agent_quote_store.sql then 005_review_start_readiness.sql; DB owner review/application required."
+  "compatibility": "Without optional receipt lookup, ready-server replay is handled by submit_work_case_start; if runtime is unavailable return 503 without creating a duplicate job."
 }

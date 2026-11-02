@@ -199,8 +199,5 @@
     "idempotency": "Single SQL transaction claims request, approves or enqueues reconciliation, stores first 202 envelope. Nonblocking request lock returns REQUEST_IN_PROGRESS.",
     "cache_control": "private, no-store"
   },
-  "additional_sql": [
-    "migrations/002_rfq_http_contract.sql",
-    "migrations/003_case_extraction_runtime.sql"
-  ]
+  "database_definitions": "Managed in Supabase by the DB owner; backend ships no SQL installation files."
 }

@@ -113,7 +113,7 @@ class WorkCaseListRepository:
                 if getattr(error, 'code', None) in {'P0002', 'PT404'}:
                     raise ServiceError('RESOURCE_NOT_FOUND', '업무를 찾을 수 없습니다.', 404) from None
                 if getattr(error, 'code', None) == 'PGRST202':
-                    raise ServiceError('PROCESSING_UNAVAILABLE', '회신 집계 DB 함수를 먼저 적용해야 합니다.', 503,
+                    raise ServiceError('PROCESSING_UNAVAILABLE', 'Supabase의 회신 집계 함수 구성을 확인해야 합니다.', 503,
                                        retryable=False, next_action='CONTACT_SERVER_ADMIN') from None
                 raise
             if (not isinstance(result, dict) or type(result.get('contract_version')) is not int
