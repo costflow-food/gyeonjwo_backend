@@ -51,6 +51,8 @@ class JsonAgent:
                 'name': output.__name__, 'strict': False, 'schema': output.model_json_schema(),
             }},
         }
+        if role == 'classification' and self.settings.llm_classification_reasoning_effort:
+            body['reasoning_effort'] = self.settings.llm_classification_reasoning_effort
         try:
             # A new request has no conversation ID and never receives another round's answer.
             with httpx.Client(timeout=min(remaining, self.settings.llm_timeout_seconds), transport=self.transport) as client:
