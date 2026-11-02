@@ -19,12 +19,16 @@ from app.features.work_cases.domain.listing import QueueFilter, WorkCaseList
 from app.features.work_cases.infrastructure.list_repository import WorkCaseListRepository
 from app.shared.infrastructure.db.client import make_server_client
 
+from app.features.work_cases.application.agent_boundary import (
+    extraction_adapter_available, load_extraction_adapter)
+
 router = APIRouter(prefix='/api/v1/work-cases', tags=['Work cases'])
 
 
 def extraction_available(request):
     settings = request.app.state.settings
-    if not settings.agent_extraction_enabled or not settings.agent_stop_after_extraction:
+    if (not settings.agent_extraction_enabled or not settings.agent_stop_after_extraction
+            or not extraction_adapter_available()):
         return False
     with request.app.state.service_lock:
         cached = getattr(request.app.state, 'extraction_availability', None)
@@ -124,6 +128,8 @@ def stored_case_row(rows, required):
 def action_response(request, principal, repo, case_id, payload, key, action):
     enabled = (request.app.state.settings.agent_extraction_enabled
                and request.app.state.settings.agent_stop_after_extraction)
+    if action == 'START' and enabled:
+        load_extraction_adapter()  # Fail before accepting a job that cannot execute.
     if action == 'START' and enabled and not repo.available():
         raise ServiceError('EXTRACTION_SCHEMA_REQUIRED', '검토 실행 DB 계약을 먼저 적용해야 합니다.', 503, retryable=False)
     status, response = WorkCaseActions(repo, extraction_enabled=enabled).submit(

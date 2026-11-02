@@ -4,10 +4,8 @@ import threading
 import time
 
 from langsmith import tracing_context
-from app.agents.agents import AgentRunner, chat_model
-from app.agents.graph import build_graph, run_case
-from app.agents.nodes import Nodes
-from app.agents.schemas import AgentRole, RunCaseInput, StartFrom
+from app.features.work_cases.application.agent_boundary import load_extraction_adapter
+from app.features.work_cases.domain.extraction_outcome import ExtractionOutcome
 from app.core.errors import ServiceError
 from app.core.leases import LeaseHeartbeat
 from app.features.mail.infrastructure.attachments import AttachmentRepository
@@ -19,7 +17,8 @@ logger = logging.getLogger('uvicorn.error.case_extraction')
 class ExtractionWorker:
     def __init__(self, settings, repo, mailbox, *, runner_factory=None, attachment_repo=None):
         self.settings, self.repo, self.mailbox = settings, repo, mailbox
-        self.runner_factory = runner_factory or (lambda: AgentRunner(chat_model(settings)))
+        self.runner_factory = runner_factory
+        self.adapter = None
         self.attachment_repo = attachment_repo or AttachmentRepository(repo.client)
         self.stop, self.wake = threading.Event(), threading.Event()
         self.thread = None
@@ -43,27 +42,22 @@ class ExtractionWorker:
                 token = CURRENT_SCOPE.set(scope)
                 try:
                     with tracing_context(enabled=False):
-                        runner = self.runner_factory()
-
-                        def guarded_runner(role, data):
-                            if role != AgentRole.INFO_EXTRACTOR:
-                                raise ServiceError('EXTRACTION_ONLY', '후속 역할은 아직 실행하지 않습니다.', 409)
-                            scope.check(data.case_id, data.input_revision)
-                            output = runner(role, data)
-                            scope.check(data.case_id, data.input_revision)
-                            if output.next_action == 'STORED':
-                                if scope.result is None:
-                                    raise ValueError('RESULT_NOT_STAGED')
-                                # The staged, server-validated fields are authoritative.
-                                output = output.model_copy(update={'unknown_fields': scope.result.unknown_fields,
-                                                                   'quote_version_ids': []})
-                            return output
-
-                        graph = build_graph(guarded_runner,
-                            lambda _: self.repo.revision(scope.owner, scope.case_id),
-                            Nodes(preprocess=lambda _: {}), stop_after_extraction=True)
-                        output = run_case(graph, RunCaseInput(case_id=scope.case_id, start_from=StartFrom.START,
-                                                             input_revision=scope.revision, mail_ids=list(scope.mail_ids)))
+                        adapter = self.runner_factory() if self.runner_factory else self.adapter
+                        if adapter is None:
+                            adapter = load_extraction_adapter()
+                        raw = adapter(settings=self.settings, scope=scope)
+                        output = ExtractionOutcome.model_validate(
+                            raw.model_dump(mode='json') if hasattr(raw, 'model_dump') else raw)
+                        scope.check(str(output.case_id), output.input_revision)
+                        if output.status in {'EXTRACTION_READY', 'NEEDS_INFO'}:
+                            if scope.result is None:
+                                raise ValueError('RESULT_NOT_STAGED')
+                            missing_item = 'item_name' in scope.result.unknown_fields
+                            output = output.model_copy(update={
+                                'status': 'NEEDS_INFO' if missing_item else 'EXTRACTION_READY',
+                                'processing_step': 'NEEDS_INFO' if missing_item else 'CANDIDATES'})
+                        elif output.status == 'ON_HOLD':
+                            output = output.model_copy(update={'processing_step': 'ON_HOLD'})
                         lease.check()
                         if output.status == 'FAILED':
                             self.repo.fail(job, 'EXTRACTION_FAILED')
@@ -85,6 +79,8 @@ class ExtractionWorker:
         return True
 
     def start(self):
+        if not self.runner_factory:
+            self.adapter = load_extraction_adapter()
         if not self.repo.available():
             raise ServiceError('EXTRACTION_SCHEMA_REQUIRED', '실행 DB 계약이 준비되지 않았습니다.', 503)
         self.repo.recover()  # Only expired durable leases -> FAILED, never Complete.
