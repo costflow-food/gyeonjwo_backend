@@ -93,7 +93,7 @@ def fetch_gmail_attachment(repo, mailbox_service, owner_id, mail_id, attachment_
         raise ServiceError('MAILBOX_RECONNECT_REQUIRED', 'Google 메일함을 다시 연결해 주세요.', 409,
                            retryable=False, next_action='RECONNECT_MAILBOX') from None
     except ServiceError as error:
-        if error.code in {'GOOGLE_RECONNECT_REQUIRED', 'GMAIL_SCOPE_REQUIRED', 'CREDENTIALS_UNAVAILABLE'}:
+        if error.code in {'GOOGLE_RECONNECT_REQUIRED', 'MAILBOX_RECONNECT_REQUIRED', 'GMAIL_SCOPE_REQUIRED', 'CREDENTIALS_UNAVAILABLE'}:
             raise ServiceError('MAILBOX_RECONNECT_REQUIRED', 'Google 메일함을 다시 연결해 주세요.', 409,
                                retryable=False, next_action='RECONNECT_MAILBOX') from None
         if error.status == 503 and error.code not in {'GOOGLE_UNAVAILABLE'}:

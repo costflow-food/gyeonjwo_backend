@@ -29,7 +29,7 @@ class CaseRuntimeRepository:
         return result
 
     def available(self):
-        result = self.call('case_agent_store_health')
+        result = self.call('review_start_health')
         return isinstance(result, dict) and result.get('contract_version') == 1 and result.get('ready') is True
 
     def action(self, owner, case_id, revision, action, key, body_hash, request_id):
@@ -100,3 +100,11 @@ class CaseRuntimeRepository:
             p_model=metadata.get('model_id') or 'unavailable',
             p_prompt_version=metadata.get('prompt_version') or 'agent-owned',
             p_agent_output=metadata.get('agent_output'))
+
+    def start_receipt(self, owner, case_id, revision, key):
+        from app.features.work_cases.application.actions import revision_body_hash
+        result = self.call('lookup_work_case_start_request', p_owner=str(owner), p_case=str(case_id),
+                           p_key=key, p_hash=revision_body_hash(revision))
+        if not isinstance(result, dict) or result.get('kind') not in {'NONE', 'REPLAY'}:
+            raise ServiceError('PROCESSING_UNAVAILABLE', '검토 접수 이력을 확인할 수 없습니다.', 503)
+        return result if result['kind'] == 'REPLAY' else None
