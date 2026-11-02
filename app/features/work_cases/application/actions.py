@@ -28,8 +28,10 @@ class WorkCaseActions:
         if result.get('http_status') != expected_status or not isinstance(result.get('response'), dict):
             raise ServiceError('PROCESSING_UNAVAILABLE', '저장된 응답을 확인할 수 없습니다.', 503)
         response = result['response']
-        data = response.get('data', {})
-        if str(data.get('case_id')) != str(case_id) or not isinstance(response.get('meta', {}).get('request_id'), str):
+        data, meta = response.get('data'), response.get('meta')
+        if not isinstance(data, dict) or not isinstance(meta, dict):
+            raise ServiceError('PROCESSING_UNAVAILABLE', '저장된 응답 구조를 확인할 수 없습니다.', 503)
+        if str(data.get('case_id')) != str(case_id) or not isinstance(meta.get('request_id'), str):
             raise ServiceError('PROCESSING_UNAVAILABLE', '저장된 응답 범위를 확인할 수 없습니다.', 503)
         if action == 'ACCEPT_INCREASE' and data.get('deleted') is not True:
             raise ServiceError('PROCESSING_UNAVAILABLE', '수용 삭제 결과를 확인할 수 없습니다.', 503)

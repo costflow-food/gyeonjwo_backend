@@ -90,6 +90,8 @@ def list_work_cases(
     is omitted; total includes them, while named counters use API-01's three tabs.
     sender_name is null until its persistence contract is implemented. Other actions
     remain conservatively hidden until their individual endpoint guards are wired.
+    reply_summary counts distinct suppliers from SENT RFQs and verified quote
+    replies in the current request round. Sidebar totals belong to the frontend.
     """
     result = service.list(principal.user_id, status=status, archived=archived, q=q, limit=limit, cursor=cursor)
     return api_json(result.model_dump(mode='json'), headers={'Cache-Control': 'private, no-store'})
@@ -106,6 +108,17 @@ def get_runtime_repository(request: Request):
             repo = CaseRuntimeRepository(make_server_client(request.app.state.settings))
             request.app.state.case_runtime_repository = repo
         return repo
+
+
+def stored_case_row(rows, required):
+    """Distinguish missing rows from corrupt storage replies without leaking them."""
+    if (not isinstance(rows, list) or len(rows) > 1
+            or (rows and (not isinstance(rows[0], dict)
+                          or any(field not in rows[0] for field in required)))):
+        raise ServiceError('PROCESSING_UNAVAILABLE', '업무 조회 결과를 확인할 수 없습니다.', 503)
+    if not rows:
+        raise ServiceError('RESOURCE_NOT_FOUND', '업무를 찾을 수 없습니다.', 404)
+    return dict(rows[0])
 
 
 def action_response(request, principal, repo, case_id, payload, key, action):
@@ -145,10 +158,10 @@ def case_progress(case_id: UUID, principal=Depends(require_google_user), repo=De
                 .eq('owner_user_id', principal.user_id).eq('id', str(case_id)).limit(1).execute().data)
     except Exception:
         raise ServiceError('PROCESSING_UNAVAILABLE', '처리 단계를 조회할 수 없습니다.', 503) from None
-    if not rows:
-        raise ServiceError('RESOURCE_NOT_FOUND', '업무를 찾을 수 없습니다.', 404)
-    row = rows[0]
-    safe_codes = {'EXTRACTION_FAILED', 'EXTRACTION_TIME_LIMIT', 'WORKER_INTERRUPTED', 'INPUT_REVISION_CHANGED'}
+    row = stored_case_row(rows, ('id', 'status', 'processing_step', 'input_revision'))
+    safe_codes = {'EXTRACTION_FAILED', 'EXTRACTION_TIME_LIMIT', 'WORKER_INTERRUPTED', 'INPUT_REVISION_CHANGED',
+                  'RFQ_PREPARATION_FAILED', 'NO_REGISTERED_SUPPLIER_EVIDENCE', 'NO_SUITABLE_CANDIDATES',
+                  'SEND_POLICY_REQUIRED', 'SEND_RESULT_UNKNOWN', 'SETTINGS_CHANGED', 'RFQ_CONDITIONS_REQUIRED'}
     error = row.get('error_jsonb')
     if error is not None and not isinstance(error, dict):
         raise ServiceError('PROCESSING_UNAVAILABLE', '저장된 오류 상태를 확인할 수 없습니다.', 503)
@@ -170,7 +183,6 @@ def get_case(case_id: UUID, principal=Depends(require_google_user), repo=Depends
                 .eq('owner_user_id', principal.user_id).eq('id', str(case_id)).limit(1).execute().data)
     except Exception:
         raise ServiceError('PROCESSING_UNAVAILABLE', '업무를 조회할 수 없습니다.', 503) from None
-    if not rows:
-        raise ServiceError('RESOURCE_NOT_FOUND', '업무를 찾을 수 없습니다.', 404)
-    row = dict(rows[0])
+    row = stored_case_row(rows, ('id', 'initial_mail_id', 'status', 'processing_step', 'input_revision',
+                                 'item_name', 'specification', 'quantity', 'unit'))
     return api_json({'case_id': row.pop('id'), **row})

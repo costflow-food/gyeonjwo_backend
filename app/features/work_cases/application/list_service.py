@@ -17,6 +17,9 @@ STEP_MESSAGES = {
     'ON_HOLD': '검토 보류',
     'NEEDS_INFO': '추가 정보 확인 필요',
     'SELECTING_CANDIDATES': '후보 찾기 대기',
+    'CANDIDATES': '견적 요청 준비 중',
+    'GENERATING_PLANS': '검토안 생성 중',
+    'SEND_UNKNOWN': '발송 결과 확인 필요',
 }
 
 
@@ -76,6 +79,9 @@ class WorkCaseListService:
                 filtered.append((key, row))
             filtered.sort(key=lambda item: item[0], reverse=True)
             page = filtered[:limit]
+            summaries = self.repo.reply_summaries(owner, [str(row.case_id) for _, row in page])
+            for _, row in page:
+                row.reply_summary = summaries[str(row.case_id)]
             next_cursor = (self.codec.encode(scope, snapshot, page[-1][0]) if len(filtered) > limit else None)
             return WorkCaseList(items=[row for _, row in page], next_cursor=next_cursor,
                                 counts=counts, intake_pending=self.repo.intake_pending(owner))

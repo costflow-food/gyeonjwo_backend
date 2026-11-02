@@ -88,10 +88,18 @@ class CaseRuntimeRepository:
             raise ServiceError('EXTRACTION_LEASE_LOST', '실행 소유권이 변경됐습니다.', 409)
 
     def finish(self, job, output, result, model_id):
+        stored_output = output.model_dump(mode='json')
+        # SELECTING_CANDIDATES is an internal graph stop label; SQL v3.6
+        # stores CANDIDATES and rejects the former via its CHECK constraint.
+        if stored_output.get('processing_step') == 'SELECTING_CANDIDATES':
+            stored_output['processing_step'] = 'CANDIDATES'
+        stored_result = result.model_dump(mode='json') if result else None
+        if result is not None:
+            stored_result['stored_fields'] = result.stored_fields()
         return self.call('complete_case_extraction', p_job=job['job_id'], p_token=job['claim_token'],
                          p_revision=job['input_revision'], p_batch=job['batch_id'],
-                         p_output=output.model_dump(mode='json'),
-                         p_result=result.model_dump(mode='json') if result else None,
+                         p_output=stored_output,
+                         p_result=stored_result,
                          p_model=model_id, p_prompt_version='extraction-v1')
 
     def fail(self, job, code):

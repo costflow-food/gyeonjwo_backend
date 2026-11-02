@@ -2,7 +2,8 @@
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, model_validator
+from decimal import Decimal, InvalidOperation
 
 from app.shared.domain.schemas import StrictModel
 
@@ -15,9 +16,25 @@ class StepDetail(StrictModel):
 
 
 class ReplySummary(StrictModel):
-    requested_supplier_count: int = 0
-    responded_supplier_count: int = 0
+    requested_supplier_count: int = Field(default=0, strict=True, ge=0)
+    responded_supplier_count: int = Field(default=0, strict=True, ge=0)
     reply_rate: str | None = None
+
+    @model_validator(mode='after')
+    def validate_counts(self):
+        if self.responded_supplier_count > self.requested_supplier_count:
+            raise ValueError('Reply count exceeds successful requests')
+        if self.requested_supplier_count == 0:
+            if self.reply_rate is not None:
+                raise ValueError('No requests requires a null reply rate')
+        else:
+            try:
+                rate = Decimal(self.reply_rate) if self.reply_rate is not None else None
+                if rate is None or not rate.is_finite() or not 0 <= rate <= 1:
+                    raise ValueError('Invalid reply rate')
+            except InvalidOperation:
+                raise ValueError('Invalid reply rate') from None
+        return self
 
 
 class WorkCaseRow(StrictModel):

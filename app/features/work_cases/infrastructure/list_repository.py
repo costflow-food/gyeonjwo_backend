@@ -7,6 +7,8 @@ O(owner's cases) per page for exact cross-table search/counts; fail explicitly a
 replace this adapter after review with the DB owner. Never select body_text/tokens.
 """
 from app.core.errors import ServiceError
+from uuid import UUID
+from app.features.work_cases.domain.replies import reply_summary
 
 CASE_COLUMNS = 'id,initial_mail_id,created_at,status,processing_step,input_revision,archived_at,item_name,decision'
 MAIL_COLUMNS = 'id,subject,sender,sent_or_received_at,attachments_jsonb,supplier_id'
@@ -86,3 +88,64 @@ class WorkCaseListRepository:
             return response.count
         except Exception:
             raise ServiceError('PROCESSING_UNAVAILABLE', '접수 확인 건수를 조회할 수 없습니다.', 503) from None
+
+    def reply_summaries(self, owner, case_ids):
+        """One owner-scoped read RPC for the page; no per-row HTTP or mail reads.
+
+        The DB owner must supply the current RFQ round and verified reply links.
+        Never infer round membership from receipt time or a matching supplier.
+        """
+        if not isinstance(case_ids, (list, tuple)) or len(case_ids) > 100:
+            raise ServiceError('PROCESSING_UNAVAILABLE', '회신 집계 조회 범위를 확인할 수 없습니다.', 503)
+        if not case_ids:
+            return {}
+        try:
+            owner_id = str(UUID(str(owner)))
+            ordered = list(dict.fromkeys(str(UUID(str(value))) for value in case_ids))
+            expected = set(ordered)
+            try:
+                result = self.client.rpc('get_work_case_reply_facts', {
+                    'p_owner': owner_id, 'p_case_ids': ordered,
+                }).execute().data
+            except Exception as error:
+                # SQL v3.6 uses P0002 for both absent and foreign cases.
+                # Never inspect or expose database exception messages.
+                if getattr(error, 'code', None) in {'P0002', 'PT404'}:
+                    raise ServiceError('RESOURCE_NOT_FOUND', '업무를 찾을 수 없습니다.', 404) from None
+                if getattr(error, 'code', None) == 'PGRST202':
+                    raise ServiceError('PROCESSING_UNAVAILABLE', '회신 집계 DB 함수를 먼저 적용해야 합니다.', 503,
+                                       retryable=False, next_action='CONTACT_SERVER_ADMIN') from None
+                raise
+            if (not isinstance(result, dict) or type(result.get('contract_version')) is not int
+                    or result['contract_version'] != 1
+                    or str(result.get('owner_user_id')) != owner_id
+                    or not isinstance(result.get('cases'), list)):
+                raise ValueError('Invalid reply facts response')
+            summaries = {}
+            for row in result['cases']:
+                case_id = str(UUID(row['case_id']))
+                if case_id not in expected or case_id in summaries:
+                    raise ValueError('Invalid reply case scope')
+                sent, replied = row['sent_supplier_ids'], row['valid_reply_supplier_ids']
+                round_id = row['request_round_id']
+                if round_id is None:
+                    if sent != [] or replied != []:
+                        raise ValueError('Reply facts without a round')
+                else:
+                    UUID(round_id)
+                # v3.6 guarantees this relationship. Do not hide corrupt facts
+                # by silently counting only their intersection.
+                if not isinstance(sent, list) or not isinstance(replied, list):
+                    raise ValueError('Invalid reply facts')
+                if not {str(UUID(value)) for value in replied} <= {str(UUID(value)) for value in sent}:
+                    raise ValueError('Reply supplier without successful RFQ')
+                summaries[case_id] = reply_summary(sent, replied)
+            if summaries.keys() != expected:
+                raise ValueError('Incomplete reply facts')
+            return summaries
+        except ServiceError:
+            raise
+        except Exception:
+            # Missing infrastructure is not a proven 0/0. No provider details or
+            # contact information may escape through errors or logs.
+            raise ServiceError('PROCESSING_UNAVAILABLE', '견적 회신 집계를 조회할 수 없습니다.', 503) from None
