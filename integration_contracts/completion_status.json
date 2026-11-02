@@ -1,6 +1,6 @@
 {
   "saved_on": "2026-11-02",
-  "branch": "fix/agent-repository-integration",
+  "branch": "fix/review-start-readiness",
   "scope": "Card 8 reply facts, RFQ preparation/delivery, draft approval/reconciliation HTTP, initial extraction runtime and safe interrupted-run recovery.",
   "verification": {
     "isolated_sql_checks_passed": 65,
@@ -21,7 +21,7 @@
   },
   "database_apply": {
     "performed": false,
-    "requires": "DB owner reviews/applies 002,003,004 in order on reviewed SQL v3.6; no remote schema changes performed.",
+    "requires": "DB owner reviews/applies 002,003,004,005 in order on reviewed SQLv3.6. No remote schema changes performed.",
     "permission": "User prohibited Supabase structure changes; no remote schema change was executed."
   },
   "limits": [
@@ -45,7 +45,8 @@
   "sql_sha256": {
     "migrations/002_rfq_http_contract.sql": "2d2073bb500f5d2d63395dd8e495cc2e1fd83035e66458d70a8b5f870ad81759",
     "migrations/003_case_extraction_runtime.sql": "2f1f9f85b5b5e530c1e6787861ed0f2acf758754b928cd9af1298633fd2b792c",
-    "migrations/004_agent_quote_store.sql": "7b289ae8cbf619fe671376affedb4f795ad9d810f261cff5be6dc178ccd8e6c8"
+    "migrations/004_agent_quote_store.sql": "7b289ae8cbf619fe671376affedb4f795ad9d810f261cff5be6dc178ccd8e6c8",
+    "migrations/005_review_start_readiness.sql": "caebbfbe7d665ce55cf3ce0b70559591548c0b8bf6c36f74adc8130fc62a90dd"
   },
   "agent_boundary": {
     "changed_on": "2026-11-02",
@@ -55,5 +56,80 @@
     "requires_db_migration": "004_agent_quote_store.sql after 002/003, by DB owner",
     "verification": "47 offline application/SQL/FakeModel/PDF checks plus Python syntax/OpenAPI and role model/reasoning client wiring smoke; no real external account calls; no retained test files",
     "live_ready_verified": false
+  },
+  "final_review": {
+    "date": "2026-11-02",
+    "branch": "fix/extraction-final-review",
+    "based_on": "PR28 code tree; separate review branch",
+    "changes": [
+      "Sticky document budget checks apply to cached PDF pages and combined body/PDF content.",
+      "Storage/auth/lease/time errors propagate; only source-read problems become UNREADABLE. Blank PDF is NO_TEXT.",
+      "Canonical MAILBOX_RECONNECT_REQUIRED remains HTTP409 through attachment retrieval.",
+      "Unique owned REGISTERED/VERIFIED_WEB sender match enriches agent mail context; literal ILIKE escapes wildcards and never creates a supplier. The existing quote RPC performs persisted-link validation."
+    ],
+    "validation": {
+      "offline_regression_checks": 41,
+      "sender_and_actual_quote_tool_checks": 21,
+      "isolated_postgresql_email_match_checks": 5,
+      "total": 67,
+      "syntax_openapi_diff_check": "passed",
+      "new_test_files": false,
+      "real_db_changes": false,
+      "real_provider_calls": false,
+      "agent_sources_changed": false,
+      "sql_changed": false
+    },
+    "deployment_limit": "Existing SQL004 deployment and real account end-to-end checks remain required; this review adds no new migration."
+  },
+  "final_recheck": {
+    "date": "2026-11-02",
+    "branch": "fix/extraction-final-review",
+    "changes": [
+      "Cross-check supplier contact_email from returned row before sender enrichment; fuzzy/filter alias results cannot establish supplier identity.",
+      "Correct polling documentation: connected worker checks scheduler every 5 seconds; DB gmail_runtime_config.poll_seconds and next_sync_at control actual polling. SQLv3.6 default is 60s, real DB setting unverified. Compatibility Python 90s setting is not passed to this scheduling RPC."
+    ],
+    "verification": {
+      "additional_offline_checks": 39,
+      "covers": [
+        "unique/ambiguous/missing/mismatched registered email rows",
+        "owner-scoped queries and read-only sender enrichment",
+        "initial 10-message cap and no older-page traversal",
+        "all incremental pages, duplicate IDs, inbox filter, large history cursor and pagination cycles"
+      ],
+      "syntax_openapi_diff_check": "passed",
+      "test_sources_created": false,
+      "real_db_mutations": false,
+      "real_provider_calls": false,
+      "agent_sources_changed": false,
+      "sql_changed": false
+    }
+  },
+  "review_start_activation": {
+    "date": "2026-11-02",
+    "reported_api_host": "teammate Mac, no remote shell access; local Windows settings are not used as evidence of the Mac configuration",
+    "changes": [
+      "One read-only readiness policy for list/detail/fresh START: execution switch, extraction-only mode, LLM settings, agent interface, DB contract and live local worker.",
+      "List and detail share action-state policy. disabled_actions includes safe reason_code/message instead of silently hiding START.",
+      "START returns stored 202 receipts before readiness/state guards; same-key different body and in-progress requests keep 409. Fresh requests are owner/revision/state checked and admitted only while ready.",
+      "Progress and detail expose batch_id and progress_url. GET never starts extraction.",
+      "Read-only Mac diagnostic python -m scripts.check_review_start --db."
+    ],
+    "verification": {
+      "checks_passed": 81,
+      "scope": "Actual FastAPI HTTP + isolated full SQLv3.6/002/003/004/005 + actual background worker thread + real team AgentRunner/FakeModel; owner/auth rejection, readiness failures, state guards, revision, receipt replay during outage, CORS, progress and extraction-only stopping.",
+      "principal": "Mocked owner except unauthenticated HTTP rejection. Real Supabase JWT/Gmail/LLM not tested.",
+      "engine": "PGlite PostgreSQL18.6; real Supabase PostgreSQL17 and multi-connection races unverified.",
+      "test_files_retained": false,
+      "agent_files_changed": false,
+      "remote_db_changes": false,
+      "mac_server_restarted": false,
+      "external_mail_sent": false
+    },
+    "deployment": [
+      "DB owner applies reviewed 005 after 002/003/004. Do not execute the full empty setup on an existing database.",
+      "On the Mac API host configure LLM_BASE_URL, LLM_API_KEY and LLM_MODEL in its private .env; no values in logs/Git/chat.",
+      "Enable AGENT_EXTRACTION_ENABLED=true, AGENT_EXTRACTION_WORKER_ENABLED=true, AGENT_STOP_AFTER_EXTRACTION=true on that same API process; one worker server only.",
+      "Run python -m scripts.check_review_start --db on Mac, restart that API process, then verify list/detail START and real account progress. CLI prerequisites do not prove live-worker liveness."
+    ]
   }
 }

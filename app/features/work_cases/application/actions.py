@@ -7,20 +7,33 @@ from app.api.responses import Envelope
 from app.features.work_cases.domain.actions import DeletedCase, StartedCase
 
 
+def validate_action_key(key):
+    if not isinstance(key, str) or not 1 <= len(key) <= 200 or key.strip() != key or any(ord(c) < 32 for c in key):
+        raise ServiceError('IDEMPOTENCY_KEY_REQUIRED', '유효한 Idempotency-Key가 필요합니다.', 400, retryable=False)
+
+
+def revision_body_hash(revision):
+    body = json.dumps({'expected_revision': revision}, separators=(',', ':'), sort_keys=True)
+    return hashlib.sha256(body.encode()).hexdigest()
+
+
 class WorkCaseActions:
     def __init__(self, repo, *, extraction_enabled=False):
         self.repo, self.extraction_enabled = repo, extraction_enabled
 
-    def submit(self, owner, case_id, revision, action, key):
+    def submit(self, owner, case_id, revision, action, key, *, replay_result=None):
         if action not in {'START', 'ACCEPT_INCREASE'}:
             raise ServiceError('ACTION_NOT_ALLOWED', '허용하지 않은 업무 동작입니다.', 409, retryable=False)
-        if not isinstance(key, str) or not 1 <= len(key) <= 200 or key.strip() != key or any(ord(c) < 32 for c in key):
-            raise ServiceError('IDEMPOTENCY_KEY_REQUIRED', '유효한 Idempotency-Key가 필요합니다.', 400, retryable=False)
-        if action == 'START' and not self.extraction_enabled:
-            raise ServiceError('PROCESSING_UNAVAILABLE', '검토 실행 연결을 준비 중입니다.', 503, retryable=False)
-        body = json.dumps({'expected_revision': revision}, separators=(',', ':'), sort_keys=True)
-        result = self.repo.action(str(owner), str(case_id), revision, action, key,
-                                  hashlib.sha256(body.encode()).hexdigest(), current_request_id())
+        validate_action_key(key)
+        if replay_result is not None:
+            if action != 'START' or not isinstance(replay_result, dict) or replay_result.get('kind') != 'REPLAY':
+                raise ServiceError('PROCESSING_UNAVAILABLE', '저장된 요청 결과를 확인할 수 없습니다.', 503)
+            result = replay_result
+        else:
+            if action == 'START' and not self.extraction_enabled:
+                raise ServiceError('PROCESSING_UNAVAILABLE', '검토 실행 연결을 준비 중입니다.', 503, retryable=False)
+            result = self.repo.action(str(owner), str(case_id), revision, action, key,
+                                      revision_body_hash(revision), current_request_id())
         # The DB must replay before lookup, even if the case was already deleted.
         if not isinstance(result, dict) or result.get('kind') not in {'ACCEPTED', 'REPLAY'}:
             raise ServiceError('PROCESSING_UNAVAILABLE', '업무 접수를 확인할 수 없습니다.', 503)

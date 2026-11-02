@@ -7,7 +7,7 @@ import time
 from pydantic import Field
 from app.shared.domain.schemas import StrictModel
 from app.core.errors import ServiceError
-from app.features.work_cases.application.actions import WorkCaseActions
+from app.features.work_cases.application.actions import WorkCaseActions, validate_action_key
 from app.features.work_cases.infrastructure.runtime_repository import CaseRuntimeRepository
 from app.features.work_cases.domain.actions import DeletedCase, StartedCase
 
@@ -19,28 +19,39 @@ from app.features.work_cases.domain.listing import QueueFilter, WorkCaseList
 from app.features.work_cases.infrastructure.list_repository import WorkCaseListRepository
 from app.shared.infrastructure.db.client import make_server_client
 
-from app.features.work_cases.application.agent_boundary import (
-    extraction_adapter_available, load_extraction_adapter)
+from app.features.work_cases.application.start_readiness import (
+    StartReadiness, configuration_readiness, agent_readiness, database_readiness, worker_readiness)
+from app.features.work_cases.application.case_actions import case_actions
 
 router = APIRouter(prefix='/api/v1/work-cases', tags=['Work cases'])
 
 
-def extraction_available(request):
+def extraction_readiness(request, repo=None, *, fresh=False):
     settings = request.app.state.settings
-    if (not settings.agent_extraction_enabled or not settings.agent_stop_after_extraction
-            or not extraction_adapter_available()):
-        return False
+    for probe in (lambda: configuration_readiness(settings), agent_readiness):
+        result = probe()
+        if not result.available:
+            return result
     with request.app.state.service_lock:
         cached = getattr(request.app.state, 'extraction_availability', None)
         now = time.monotonic()
-        if cached is not None and now < cached[0]:
-            return cached[1]
-        try:
-            available = CaseRuntimeRepository(make_server_client(settings)).available()
-        except ServiceError:
-            available = False
-        request.app.state.extraction_availability = (now + 5, available)
-        return available
+        if not fresh and cached is not None and now < cached[0]:
+            result = cached[1]
+        else:
+            try:
+                repository = repo or CaseRuntimeRepository(make_server_client(settings))
+                result = database_readiness(repository)
+            except Exception:
+                result = StartReadiness('PROCESSING_UNAVAILABLE', '검토 실행 저장소에 연결할 수 없습니다.')
+            request.app.state.extraction_availability = (now + 5, result)
+    if not result.available:
+        return result
+    # Worker liveness is never cached: a stopped thread must immediately hide START.
+    return worker_readiness(settings, getattr(request.app.state, 'extraction_worker', None))
+
+
+def extraction_available(request):
+    return extraction_readiness(request).available
 
 
 def get_list_service(request: Request):
@@ -53,7 +64,6 @@ def get_list_service(request: Request):
                                          extraction_fields=True),
                                          CursorCodec(settings.google_token_encryption_key.get_secret_value()))
             request.app.state.work_case_list_service = service
-    service.extraction_enabled = extraction_available(request)
     return service
 
 
@@ -68,7 +78,9 @@ EXAMPLE = {
             'item_name': None, 'attachment_count': 1,
             'step_detail': {'code': 'PENDING_START', 'message': '원문 확인 후 검토 시작'},
             'reply_summary': {'requested_supplier_count': 0, 'responded_supplier_count': 0, 'reply_rate': None},
-            'allowed_actions': ['VIEW_ORIGINAL', 'ACCEPT_INCREASE'], 'disabled_actions': [],
+            'allowed_actions': ['VIEW_ORIGINAL', 'ACCEPT_INCREASE'],
+            'disabled_actions': [{'action': 'START', 'reason_code': 'EXTRACTION_DISABLED',
+                                  'message': '서버의 검토 실행 설정이 꺼져 있습니다.'}],
         }],
         'next_cursor': None, 'counts': {'Waiting': 1, 'Running': 0, 'Complete': 0, 'total': 1},
         'intake_pending': 0,
@@ -80,7 +92,7 @@ EXAMPLE = {
 @router.get('', response_model=Envelope[WorkCaseList], summary='업무 큐 목록·검색·상태별 건수',
             responses={200: {'content': {'application/json': {'example': EXAMPLE}}}})
 def list_work_cases(
-    principal=Depends(require_google_user), service=Depends(get_list_service),
+    request: Request, principal=Depends(require_google_user), service=Depends(get_list_service),
     status: QueueFilter | None = None,
     archived: bool = False,
     q: Annotated[str, Query(max_length=200)] = '',
@@ -97,7 +109,8 @@ def list_work_cases(
     reply_summary counts distinct suppliers from SENT RFQs and verified quote
     replies in the current request round. Sidebar totals belong to the frontend.
     """
-    result = service.list(principal.user_id, status=status, archived=archived, q=q, limit=limit, cursor=cursor)
+    result = service.list(principal.user_id, status=status, archived=archived, q=q, limit=limit, cursor=cursor,
+                          start_readiness=extraction_readiness(request))
     return api_json(result.model_dump(mode='json'), headers={'Cache-Control': 'private, no-store'})
 
 
@@ -125,15 +138,38 @@ def stored_case_row(rows, required):
     return dict(rows[0])
 
 
+def load_action_case(repo, owner, case_id):
+    try:
+        rows = (repo.client.table('work_cases')
+            .select('id,initial_mail_id,status,processing_step,input_revision,item_name,specification,quantity::text,unit,'
+                    'decision,archived_at,current_batch_id')
+            .eq('owner_user_id', str(owner)).eq('id', str(case_id)).limit(1).execute().data)
+    except Exception:
+        raise ServiceError('PROCESSING_UNAVAILABLE', '업무를 조회할 수 없습니다.', 503) from None
+    return stored_case_row(rows, ('id', 'initial_mail_id', 'status', 'processing_step', 'input_revision',
+                                 'item_name', 'specification', 'quantity', 'unit', 'decision', 'archived_at', 'current_batch_id'))
+
+
 def action_response(request, principal, repo, case_id, payload, key, action):
-    enabled = (request.app.state.settings.agent_extraction_enabled
-               and request.app.state.settings.agent_stop_after_extraction)
-    if action == 'START' and enabled:
-        load_extraction_adapter()  # Fail before accepting a job that cannot execute.
-    if action == 'START' and enabled and not repo.available():
-        raise ServiceError('EXTRACTION_SCHEMA_REQUIRED', '검토 실행 DB 계약을 먼저 적용해야 합니다.', 503, retryable=False)
-    status, response = WorkCaseActions(repo, extraction_enabled=enabled).submit(
-        principal.user_id, case_id, payload.expected_revision, action, key)
+    replay = None
+    if action == 'START':
+        validate_action_key(key)
+        # A stored 202 is replayed even when configuration/worker later goes down.
+        # Lookup is read-only; it cannot claim or begin a new job.
+        replay = repo.start_receipt(principal.user_id, case_id, payload.expected_revision, key)
+        if replay is None:
+            case = load_action_case(repo, principal.user_id, case_id)
+            if case['input_revision'] != payload.expected_revision:
+                raise ServiceError('REVISION_CONFLICT', '업무 입력이 변경됐습니다. 최신 내용을 확인해 주세요.', 409,
+                                   current_revision=case['input_revision'], retryable=False)
+            actions, disabled = case_actions(case, StartReadiness())
+            if 'START' not in actions:
+                reason = disabled[0]
+                code = 'WORK_ALREADY_STARTED' if reason['reason_code'] == 'WORK_ALREADY_STARTED' else 'ACTION_NOT_ALLOWED'
+                raise ServiceError(code, reason['message'], 409, retryable=False)
+            extraction_readiness(request, repo, fresh=True).require()
+    status, response = WorkCaseActions(repo, extraction_enabled=True).submit(
+        principal.user_id, case_id, payload.expected_revision, action, key, replay_result=replay)
     worker = getattr(request.app.state, 'extraction_worker', None)
     if action == 'START' and worker:
         worker.wake.set()
@@ -160,11 +196,11 @@ def start_case(case_id: UUID, payload: CaseActionRequest, request: Request,
 def case_progress(case_id: UUID, principal=Depends(require_google_user), repo=Depends(get_runtime_repository)):
     try:
         rows = (repo.client.table('work_cases')
-                .select('id,status,processing_step,input_revision,error_jsonb,updated_at')
+                .select('id,status,processing_step,input_revision,error_jsonb,updated_at,current_batch_id')
                 .eq('owner_user_id', principal.user_id).eq('id', str(case_id)).limit(1).execute().data)
     except Exception:
         raise ServiceError('PROCESSING_UNAVAILABLE', '처리 단계를 조회할 수 없습니다.', 503) from None
-    row = stored_case_row(rows, ('id', 'status', 'processing_step', 'input_revision'))
+    row = stored_case_row(rows, ('id', 'status', 'processing_step', 'input_revision', 'current_batch_id'))
     safe_codes = {'EXTRACTION_FAILED', 'EXTRACTION_TIME_LIMIT', 'WORKER_INTERRUPTED', 'INPUT_REVISION_CHANGED',
                   'RFQ_PREPARATION_FAILED', 'NO_REGISTERED_SUPPLIER_EVIDENCE', 'NO_SUITABLE_CANDIDATES',
                   'SEND_POLICY_REQUIRED', 'SEND_RESULT_UNKNOWN', 'SETTINGS_CHANGED', 'RFQ_CONDITIONS_REQUIRED'}
@@ -178,17 +214,15 @@ def case_progress(case_id: UUID, principal=Depends(require_google_user), repo=De
         raise ServiceError('PROCESSING_UNAVAILABLE', '저장된 시각 형식을 확인할 수 없습니다.', 503) from None
     return api_json({'case_id': row['id'], 'status': row['status'], 'processing_step': row['processing_step'],
                      'input_revision': row['input_revision'], 'updated_at': updated_at,
+                     'batch_id': row.get('current_batch_id'), 'progress_url': f'/api/v1/work-cases/{case_id}/progress',
                      'error': {'code': code if isinstance(code, str) and code in safe_codes else 'EXTRACTION_FAILED'} if code else None})
 
 
 @router.get('/{case_id}', summary='업무의 저장 상태 조회: 실행 없음')
-def get_case(case_id: UUID, principal=Depends(require_google_user), repo=Depends(get_runtime_repository)):
-    try:
-        rows = (repo.client.table('work_cases')
-                .select('id,initial_mail_id,status,processing_step,input_revision,item_name,specification,quantity::text,unit')
-                .eq('owner_user_id', principal.user_id).eq('id', str(case_id)).limit(1).execute().data)
-    except Exception:
-        raise ServiceError('PROCESSING_UNAVAILABLE', '업무를 조회할 수 없습니다.', 503) from None
-    row = stored_case_row(rows, ('id', 'initial_mail_id', 'status', 'processing_step', 'input_revision',
-                                 'item_name', 'specification', 'quantity', 'unit'))
-    return api_json({'case_id': row.pop('id'), **row})
+def get_case(case_id: UUID, request: Request, principal=Depends(require_google_user), repo=Depends(get_runtime_repository)):
+    row = load_action_case(repo, principal.user_id, case_id)
+    actions, disabled = case_actions(row, extraction_readiness(request, repo))
+    batch_id = row.pop('current_batch_id')
+    return api_json({'case_id': row.pop('id'), **row,
+                    'batch_id': batch_id, 'progress_url': f'/api/v1/work-cases/{case_id}/progress',
+                    'allowed_actions': actions, 'disabled_actions': disabled})

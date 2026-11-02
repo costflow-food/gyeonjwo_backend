@@ -16,6 +16,7 @@ class AgentStore:
         self.scope, self.repo, self.job = scope, scope.repo, job
         self.saved_ids, self.records, self.pages = set(), {}, {}
         self.body_lengths = {}
+        self.document_status = {}
         self.final_output = None
         self.model_id, self.prompt_version = '', ''
 
@@ -46,36 +47,82 @@ class AgentStore:
 
     def mails(self, case_id):
         self.check(case_id)
-        return self.rows(self.repo.client.table('mail_messages').select(
+        mails = self.rows(self.repo.client.table('mail_messages').select(
             'id,subject,body_text,sender,attachments_jsonb,supplier_id,message_role,direction,sent_or_received_at')
             .eq('owner_user_id', self.scope.owner).eq('work_case_id', str(case_id))
             .in_('id', list(self.scope.mail_ids)))
+        for mail in mails:
+            if mail.get('supplier_id') is not None or not isinstance(mail.get('sender'), str):
+                continue
+            sender = mail['sender'].strip()
+            if not sender:
+                continue
+            # An email address can legally contain '%'/'_'. They are literal
+            # characters here, never ILIKE wildcards for matching other firms.
+            literal = sender.replace('\\', '\\\\').replace('%', r'\%').replace('_', r'\_')
+            suppliers = self.rows(self.repo.client.table('suppliers').select('id,contact_email')
+                .eq('owner_user_id', self.scope.owner)
+                .in_('source_type', ['REGISTERED', 'VERIFIED_WEB'])
+                .ilike('contact_email', literal).limit(2))
+            if (len(suppliers) == 1
+                    and isinstance(suppliers[0].get('contact_email'), str)
+                    and suppliers[0]['contact_email'].strip().casefold() == sender.casefold()):
+                # Verify the returned address too: filter protocols can interpret
+                # wildcard aliases. A fuzzy candidate must never become a link.
+                # Read-time enrichment only. The quote RPC rechecks the sender
+                # and persists the link atomically, without creating suppliers.
+                mail['supplier_id'] = suppliers[0]['id']
+        return mails
 
     def list_case_mails(self, case_id):
-        return [{'mail_id':m['id'], 'subject':m['subject'], 'supplier_id':m.get('supplier_id'),
-                 'message_role':m['message_role'], 'direction':m['direction'], 'received_at':m['sent_or_received_at'],
-                 'attachments':[{'attachment_ref':part_reference(a), 'filename':a.get('filename'),
-                    'pages':len(self.document(m['id'], a)) if a.get('mime_type')=='application/pdf' else 0,
-                    'status':'READ' if a.get('mime_type')=='application/pdf' and self.document(m['id'],a) else 'UNSUPPORTED'}
-                    for a in m.get('attachments_jsonb') or [] if part_reference(a) is not None]}
-                for m in self.mails(case_id)]
+        result = []
+        for mail in self.mails(case_id):
+            attachments = []
+            for attachment in mail.get('attachments_jsonb') or []:
+                part = part_reference(attachment)
+                if part is None:
+                    continue
+                pages, status = [], 'UNSUPPORTED'
+                if attachment.get('mime_type') == 'application/pdf':
+                    pages = self.document(mail['id'], attachment)
+                    status = self.document_status[(mail['id'], part)]
+                attachments.append({'attachment_ref': part, 'filename': attachment.get('filename'),
+                                    'pages': len(pages), 'status': status})
+            result.append({'mail_id': mail['id'], 'subject': mail['subject'],
+                'supplier_id': mail.get('supplier_id'), 'message_role': mail['message_role'],
+                'direction': mail['direction'], 'received_at': mail['sent_or_received_at'],
+                'attachments': attachments})
+        return result
+
+    def check_document_budget(self):
+        self.scope.remaining_seconds()
+        total = sum(self.body_lengths.values()) + sum(len(text) for pages in self.pages.values() for text in pages)
+        if total > self.scope.max_characters:
+            # Sticky across tool retries: cached pages may never bypass a limit.
+            self.scope.blocked = True
+            raise ServiceError('EXTRACTION_DOCUMENT_LIMIT', '문서 처리 한도를 초과했습니다.', 503)
 
     def document(self, mail_id, attachment):
-        key=(mail_id, part_reference(attachment))
+        self.check_document_budget()
+        key = (mail_id, part_reference(attachment))
         if key not in self.pages:
             try:
-                content=fetch_gmail_attachment(self.scope.attachment_repo,self.scope.mailbox,
-                    self.scope.owner,mail_id,key[1])
-                self.pages[key]=read_pdf_pages(content.content)
+                content = fetch_gmail_attachment(self.scope.attachment_repo, self.scope.mailbox,
+                    self.scope.owner, mail_id, key[1])
+                pages = read_pdf_pages(content.content)
             except ValueError:
-                self.pages[key]=[]
+                pages, status = [], 'UNREADABLE'
             except ServiceError as error:
-                if error.code in {'MAILBOX_RECONNECT_REQUIRED','EXTRACTION_TIME_LIMIT'}:
+                # Only a proven source-read problem can become an unreadable
+                # attachment. Auth, storage, lease and time-limit failures abort.
+                if error.code not in {'SOURCE_READ_FAILED', 'RESOURCE_NOT_FOUND'}:
                     raise
-                self.pages[key]=[]
-            self.scope.remaining_seconds()
-            if sum(self.body_lengths.values())+sum(len(t) for pages in self.pages.values() for t in pages)>self.scope.max_characters:
-                raise ServiceError('EXTRACTION_DOCUMENT_LIMIT','문서 처리 한도를 초과했습니다.',503)
+                pages, status = [], 'UNREADABLE'
+            else:
+                status = 'READ' if any(text.strip() for text in pages) else 'NO_TEXT'
+            self.pages[key] = pages
+            self.document_status[key] = status
+        self.check_document_budget()
         return self.pages[key]
 
     def read_mail_part(self, case_id, mail_id, part, page):
@@ -88,8 +135,7 @@ class AgentStore:
                 return None
             text=mail.get('body_text') or ''
             self.body_lengths[mail_id]=len(text)
-            if sum(self.body_lengths.values())+sum(len(t) for pages in self.pages.values() for t in pages)>self.scope.max_characters:
-                raise ServiceError('EXTRACTION_DOCUMENT_LIMIT','문서 처리 한도를 초과했습니다.',503)
+            self.check_document_budget()
             return {'text':text,'location':'body'}
         for a in mail.get('attachments_jsonb') or []:
             if part_reference(a)==part and a.get('mime_type')=='application/pdf':

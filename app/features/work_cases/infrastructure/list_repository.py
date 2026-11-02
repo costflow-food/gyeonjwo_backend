@@ -10,7 +10,7 @@ from app.core.errors import ServiceError
 from uuid import UUID
 from app.features.work_cases.domain.replies import reply_summary
 
-CASE_COLUMNS = 'id,initial_mail_id,created_at,status,processing_step,input_revision,archived_at,item_name,decision'
+CASE_COLUMNS = 'id,initial_mail_id,created_at,status,processing_step,input_revision,archived_at,item_name,decision,current_batch_id'
 MAIL_COLUMNS = 'id,subject,sender,sent_or_received_at,attachments_jsonb,supplier_id'
 BATCH_SIZE = 200
 MAX_CASES = 10000

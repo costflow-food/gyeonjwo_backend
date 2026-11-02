@@ -152,6 +152,25 @@
         "p_input": "ExtractionIn JSON"
       },
       "returns": "boolean; reuses existing durable job row and records real role metadata before model invocation"
+    },
+    "review_start_health": {
+      "args": {},
+      "returns": {
+        "contract_version": 1,
+        "ready": true
+      },
+      "requires": "SQL005 plus prior full agent quote-store contract."
+    },
+    "lookup_work_case_start_request": {
+      "args": {
+        "p_owner": "uuid",
+        "p_case": "uuid",
+        "p_key": "text",
+        "p_hash": "sha256 text"
+      },
+      "returns": "NONE / REPLAY(202, first envelope) / ERROR(IDEMPOTENCY_KEY_REUSED or REQUEST_IN_PROGRESS)",
+      "read_only": true,
+      "requires": "service_role; owner+POST+canonical case path+key scope. Never inserts a new api_requests row."
     }
   },
   "historical_observations_2026_10_29": [
@@ -162,5 +181,5 @@
   "local_sql": "migrations/003_case_extraction_runtime.sql",
   "job_storage": "Existing agent_runs.input_snapshot_jsonb holds PENDING/PROCESSING/DONE job state, claim token and 120-second lease; no new job table.",
   "agent_integration": "Backend implements team store protocols; no app.agents.backend_adapter required. Full quote writes are atomic per tool, separate from terminal run completion.",
-  "additional_migration": "004_agent_quote_store.sql; DB owner review/application required"
+  "additional_migration": "004_agent_quote_store.sql then 005_review_start_readiness.sql; DB owner review/application required."
 }
