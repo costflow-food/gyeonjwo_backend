@@ -32,7 +32,10 @@ class JsonAgent:
         self.transport = transport
 
     def run(self, role: str, instruction: str, data: dict, output: type[BaseModel], deadline=None):
-        self.settings.require_llm()
+        if role == 'classification':
+            self.settings.require_classification()
+        else:
+            self.settings.require_llm()
         remaining = (deadline - time.monotonic()) if deadline is not None else self.settings.llm_timeout_seconds
         if remaining <= 0:
             raise ServiceError('ANALYSIS_TIMEOUT', '분석 제한 시간을 초과했습니다.', 504)

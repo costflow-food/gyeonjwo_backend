@@ -1,10 +1,13 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field, HttpUrl, SecretStr, field_validator
+from pydantic import Field, HttpUrl, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[2]
+# OpenAI reasoning effort 값 (2026-11-02 문서 기준). 모델마다 받는 값이 다르다 (예: gpt-5.4-mini는 minimal·max 없음)
+ReasoningEffort = Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
 
 class Settings(BaseSettings):
@@ -16,6 +19,19 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr | None = None
     llm_model: str = ''
     llm_classification_model: str = ''
+    # 에이전트 역할별 모델. 비워 두면 llm_model을 쓴다
+    llm_model_info_extractor: str = ''
+    llm_model_candidate: str = ''
+    llm_model_info_priority: str = ''
+    llm_model_response_plan: str = ''
+    llm_model_counter_offer: str = ''
+    # 에이전트 역할별 추론 수준(reasoning effort). 비워 두면 보내지 않는다(모델 기본값). 받는 값은 모델마다 다르다
+    llm_reasoning_effort: ReasoningEffort | None = None
+    llm_reasoning_effort_info_extractor: ReasoningEffort | None = None
+    llm_reasoning_effort_candidate: ReasoningEffort | None = None
+    llm_reasoning_effort_info_priority: ReasoningEffort | None = None
+    llm_reasoning_effort_response_plan: ReasoningEffort | None = None
+    llm_reasoning_effort_counter_offer: ReasoningEffort | None = None
     llm_timeout_seconds: int = Field(default=60, ge=5, le=180)
     analysis_timeout_seconds: int = Field(default=600, ge=30, le=1800)
     calculation_rounds: int = Field(default=3, ge=2, le=5)
@@ -35,9 +51,14 @@ class Settings(BaseSettings):
     google_token_encryption_key: SecretStr | None = None
     google_mailbox_worker_enabled: bool = False
     google_mailbox_poll_seconds: int = Field(default=90, ge=60, le=120)
+    gmail_initial_sync_limit: int = Field(default=10, ge=1, le=500)
+    app_build_revision: str = 'development'
 
     @field_validator('supabase_url', 'llm_base_url', 'supabase_secret_key', 'supabase_publishable_key',
-                     'llm_api_key', 'gmail_client_secret', 'gmail_refresh_token', 'google_token_encryption_key', mode='before')
+                     'llm_api_key', 'gmail_client_secret', 'gmail_refresh_token', 'google_token_encryption_key',
+                     'llm_reasoning_effort', 'llm_reasoning_effort_info_extractor', 'llm_reasoning_effort_candidate',
+                     'llm_reasoning_effort_info_priority', 'llm_reasoning_effort_response_plan',
+                     'llm_reasoning_effort_counter_offer', mode='before')
     @classmethod
     def empty_optional_values(cls, value):
         return None if isinstance(value, str) and not value.strip() else value
@@ -45,6 +66,19 @@ class Settings(BaseSettings):
     def require_llm(self):
         if not self.llm_base_url or not self.llm_api_key or not self.llm_api_key.get_secret_value() or not self.llm_model:
             raise RuntimeError('LLM endpoint, key and model must be configured')
+
+    def llm_model_for(self, role: str) -> str:
+        """에이전트 역할(INFO_EXTRACTOR 등)에 쓸 모델. 역할별 설정이 비어 있으면 llm_model."""
+        return getattr(self, f'llm_model_{role.lower()}', '') or self.llm_model
+
+    def llm_reasoning_effort_for(self, role: str | None) -> str | None:
+        """에이전트 역할에 쓸 추론 수준. 역할별 설정이 없으면 llm_reasoning_effort, 둘 다 없으면 None(보내지 않음)."""
+        value = getattr(self, f'llm_reasoning_effort_{role.lower()}', None) if role else None
+        return value or self.llm_reasoning_effort
+
+    def require_classification(self):
+        if not self.llm_base_url or not self.llm_api_key or not (self.llm_classification_model or self.llm_model):
+            raise RuntimeError('Classification endpoint, key and model must be configured')
 
     def require_gmail(self):
         names = ('gmail_email', 'gmail_client_id', 'gmail_client_secret', 'gmail_refresh_token',
@@ -55,15 +89,28 @@ class Settings(BaseSettings):
     def require_server(self) -> None:
         if not self.supabase_url or not self.supabase_secret_key or not self.supabase_secret_key.get_secret_value():
             raise RuntimeError('SUPABASE_URL and SUPABASE_SECRET_KEY must be configured locally.')
+        if self.supabase_url.host.casefold() == 'your_project.supabase.co':
+            raise RuntimeError('Supabase project URL is still a template')
 
     def require_google_connect(self):
         self.require_server()
         if not self.gmail_client_id or not self.gmail_client_secret or not self.google_token_encryption_key:
             raise RuntimeError('Google OAuth client and token encryption key must be configured')
-        if self.worker_enabled and self.google_mailbox_worker_enabled:
-            raise RuntimeError('Legacy and connected-mailbox workers cannot run together')
+        if self.worker_enabled:
+            raise RuntimeError('Disable the legacy receiver before using connected Google mailboxes')
+
+    @property
+    def gmail_push_configured(self):
+        return all((self.gmail_topic,self.gmail_subscription,self.pubsub_audience,self.pubsub_service_account))
 
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    try:
+        return Settings()
+    except ValidationError as error:
+        fields = sorted({str(item['loc'][0]).upper() for item in error.errors(include_input=False) if item['loc']})
+        raise SystemExit(', '.join(fields) or 'ENV_CONFIGURATION') from None
+    except Exception:
+        # Invalid dotenv/JSON settings may include raw input in their exception text.
+        raise SystemExit('ENV_CONFIGURATION') from None

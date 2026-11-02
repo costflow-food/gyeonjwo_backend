@@ -86,7 +86,7 @@ PLAN ─────────────────────────
   - 금액 계산은 도구가 Decimal로 한다.
   - 결과는 작게 돌려준다.
 - 공통 도구 3개(`get_case_context`, `read_mail_evidence`, `save_agent_result`)는 한 사람이 먼저 만든다. 누가 만들지 정하고 시작한다.
-- `create_mail_draft`는 ②③⑤가 같이 쓰므로 한 사람이 만든다.
+- 초안 도구는 역할별로 나눈다: `create_rfq_draft`(②)·`create_clarification_draft`(③)·`create_counter_offer_draft`(⑤). 저장은 같은 `mail_drafts` 테이블.
 
 #### 공통 도구 계약 (구현됨, `feature/agents-1-2`)
 

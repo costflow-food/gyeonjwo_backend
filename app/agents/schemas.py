@@ -122,6 +122,12 @@ class ConditionCheck(StrictModel):
     evidence_refs: list[str] = []
 
 
+class CandidateCaution(StrictModel):
+    """② 후보 업체의 등록 비고를 읽고 담당자 확인이 필요하다고 본 이유. 후보에서 빼지 않는다(BR-15)."""
+    reason: str = Field(min_length=1, max_length=300)
+    evidence_refs: list[str] = Field(min_length=1)
+
+
 class Candidate(StrictModel):
     """② 문의 대상 후보."""
     supplier_id: str
@@ -130,6 +136,7 @@ class Candidate(StrictModel):
     preference_score: DecimalStr | None = None  # 선호 조건 가중 합 (정렬용)
     provisional: StrictBool = False             # 웹 탐색 등 잠정 근거
     evidence_refs: list[str] = []
+    caution: CandidateCaution | None = None     # 있으면 승인 OFF에서도 자동 발송하지 않고 담당자가 확인한다
 
 
 class QuestionPriority(StrEnum):
@@ -145,8 +152,16 @@ class Question(StrictModel):
     priority: QuestionPriority
     reason: str = Field(min_length=1, max_length=300)
     evidence_refs: list[str] = []
-    calculation_ref: str | None = None         # calculate_break_even 결과 ID
-    break_even_amount: DecimalStr | None = None
+    break_even_amount: DecimalStr | None = None  # 최종 검사가 calculate_break_even 결과로 채운다
+    formula: str | None = None                 # 역전 기준 산식 (화면 표시용, 최종 검사가 채운다)
+
+
+class RecheckEvidence(StrictModel):
+    """③이 ①에 재추출을 넘길 근거: 견적에 빠진 항목의 답이 적힌 원문 문장. 최종 검사가 읽은 원문과 대조한다."""
+    supplier_id: str
+    field: str = Field(min_length=1)           # check_comparability의 missing_required·unknown_costs field
+    mail_id: str
+    source_text: str = Field(min_length=1)     # 답이 적힌 원문 구절 그대로 (예: "월 1,000kg 공급 가능")
 
 
 class PlanType(StrEnum):
@@ -162,12 +177,14 @@ class Allocation(StrictModel):
 
 
 class Plan(StrictModel):
-    """④ 구매안. 총액·검증은 도구 결과를 옮겨 적는다."""
+    """④ 구매안. 배정량·총액·검증 결과는 최종 검사가 validate_purchase_plan 결과로 채운다."""
     plan_type: PlanType
     allocations: list[Allocation] = Field(min_length=1, max_length=2)
     total_amount: DecimalStr | None = None     # validate_purchase_plan 결과
-    calculation_ref: str | None = None         # 도구 결과 ID
-    conditions: list[str] = []                 # 성립 조건 (예: B 공급량 600개 확인 시)
+    validation_status: Literal['VALID', 'CONDITIONAL'] = 'VALID'   # CONDITIONAL: 기존 업체의 미확인이 남은 유지안 등
+    conditions: list[str] = []                 # 성립 조건 (예: 기존 업체 운송비 미확인)
+    adjustments: list[str] = []                # 배정량 조정 내역 (예: 제안 A 610·B 390 → A 600·B 400, B 발주 배수 50)
+    reason: str | None = Field(default=None, max_length=300)   # 이 안을 보여 주는 이유 (담당자가 읽는 한 문장)
 
     @model_validator(mode='after')
     def allocation_count(self):
@@ -178,15 +195,46 @@ class Plan(StrictModel):
         return self
 
 
+class CounterOfferReference(StrictModel):
+    """⑤ 참고 계산. 정책이 없어 목표를 만들지 않을 때도 검토 카드에 보인다. 값은 최종 검사가 도구 결과로 채운다."""
+    status: str                                # PROPOSABLE·NO_POLICY·NOT_NEEDED·NOT_COMPETITIVE·NOT_COMPUTABLE 등
+    unit: str | None = None
+    requested_unit_price: DecimalStr | None = None   # 기존 업체가 요청한 단가
+    previous_unit_price: DecimalStr | None = None    # 인상 전 단가 (인상 통보 메일 근거)
+    ceiling_unit_price: DecimalStr | None = None     # 이 단가 이하면 비교한 대안보다 싸거나 같다
+    alternative_total: DecimalStr | None = None      # 비교한 대안의 총액
+    allowed_range: list[DecimalStr] = []             # 정책·상한을 만족하는 목표 단가 [최소, 최대]
+
+
 class CounterOfferTarget(StrictModel):
-    """⑤ 기존 업체 역제안 조건."""
+    """⑤ 기존 업체 역제안 조건. 근거·대안·상한은 최종 검사가 도구 결과로 채운다."""
     supplier_id: str
     target_unit_price: DecimalStr
     conditions: list[str] = []
-    basis_quote_version_ids: list[str] = Field(min_length=1)  # 인상 전·요청 가격 근거
-    alternative_plan_ref: str | None = None    # ④ 대안 비용 참조
-    policy_ref: str | None = None              # 회사 가격 정책
-    validation_ref: str | None = None          # validate_counter_offer 결과 ID
+    basis_quote_version_ids: list[str] = []          # 요청 단가 견적 (최종 검사가 채운다)
+    alternative: list[Allocation] = []               # 비교한 대안의 배분
+
+
+class CounterOfferSummary(StrictModel):
+    """검토 카드의 ⑤ 결과. 생략·보류에도 사유와 참고 계산을 보인다."""
+    status: Literal['PROPOSED', 'SKIPPED', 'HOLD']
+    target: CounterOfferTarget | None = None
+    reference: CounterOfferReference | None = None
+    draft_ids: list[str] = []
+    reason: str | None = None
+
+
+class ReviewCard(StrictModel):
+    """검토 카드 (06 work_cases.latest_review_jsonb). 담당자가 보는 구매안·역제안·미확인과 그 근거 견적.
+    숫자는 검증 노드를 통과한 값을 그대로 옮긴다(카드에 보인 숫자는 계산 코드가 바뀌어도 카드에 남는다)."""
+    case_id: str
+    input_revision: int
+    quote_version_ids: list[str] = []
+    plans: list[Plan] = []
+    counter_offer: CounterOfferSummary | None = None
+    questions: list[Question] = []         # ③이 남긴 확인 항목 (묻지 않은 LOW_VALUE 근거 포함)
+    unresolved: list[str] = []             # 미확인·보류 사유
+    steps: list['AgentStep'] = []          # 역할 호출 기록 (next_action·reason)
 
 
 # ─────────────────────────────────────────────
@@ -281,11 +329,13 @@ class PriorityOut(AgentOutput):
     next_action: Literal[N.REQUEST_CLARIFICATION, N.BUILD_PLANS, N.RECHECK_SOURCE, N.HOLD]
     questions: list[Question] = []
     draft_ids: list[str] = []
+    recheck: list[RecheckEvidence] = []    # RECHECK_SOURCE의 근거 (원문에 답이 있는데 견적에 빠진 항목)
 
 
 class PlanOut(AgentOutput):
     next_action: Literal[N.PLANS_PROPOSED, N.NEEDS_EVIDENCE, N.RECHECK_SOURCE, N.HOLD]
-    plans: list[Plan] = []
+    plans: list[Plan] = Field(default=[], max_length=5)
+    recheck: list[RecheckEvidence] = []    # RECHECK_SOURCE의 근거 (③과 같은 규칙)
 
 
 class CounterOfferOut(AgentOutput):
@@ -293,6 +343,8 @@ class CounterOfferOut(AgentOutput):
                          N.HOLD]
     target: CounterOfferTarget | None = None  # PROPOSED가 아니면 None
     draft_ids: list[str] = []
+    reference: CounterOfferReference | None = None   # 참고 계산 (정책 없음·생략·보류에도 남긴다)
+    recheck: list[RecheckEvidence] = []           # RECHECK_SOURCE의 근거 (③과 같은 규칙)
 
     @model_validator(mode='after')
     def skipped_has_no_offer(self):
@@ -318,3 +370,4 @@ AGENT_IO = {
 }
 
 RunCaseOutput.model_rebuild()
+ReviewCard.model_rebuild()

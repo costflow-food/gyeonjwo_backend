@@ -1,0 +1,21 @@
+# Development-only optional tunnel. Starting this profile publishes an HTTPS endpoint.
+# Run only after reviewing configuration and explicitly choosing to publish.
+services:
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    profiles: [https]
+    # Shares loopback with the API. Uvicorn trusts loopback proxy headers only;
+    # do not set forwarded-allow-ips='*' or expose an extra plaintext API port.
+    network_mode: service:api
+    command: [tunnel, --no-autoupdate, --url, "http://127.0.0.1:8000"]
+    depends_on:
+      api:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    mem_limit: 128m
+    pids_limit: 64
