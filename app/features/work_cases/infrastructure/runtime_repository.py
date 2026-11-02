@@ -47,6 +47,43 @@ class CaseRuntimeRepository:
         return self.call(name, p_owner=owner, p_case=str(case_id), p_revision=revision,
                          p_key=key, p_hash=body_hash, p_request_id=request_id)
 
+    def resume_available(self):
+        """Inspect published signatures only; never probe a mutation by calling it."""
+        expected = {
+            'submit_work_case_resume': {'p_owner', 'p_case', 'p_revision', 'p_reason', 'p_key', 'p_hash', 'p_request_id'},
+            'lookup_work_case_resume_request': {'p_owner', 'p_case', 'p_key', 'p_hash'},
+        }
+        try:
+            response = self.client.postgrest.session.get('', headers={'Accept': 'application/openapi+json'})
+            response.raise_for_status()
+            paths = response.json()['paths']
+            for name, args in expected.items():
+                parameters = paths.get('/rpc/' + name, {}).get('post', {}).get('parameters', [])
+                body = next((p.get('schema', {}) for p in parameters if p.get('in') == 'body'), {})
+                if set(body.get('properties', {})) != args or set(body.get('required', [])) != args:
+                    return False
+            return True
+        except Exception:
+            raise ServiceError('PROCESSING_UNAVAILABLE', '재개 저장소의 연결 상태를 확인할 수 없습니다.', 503) from None
+
+    def resume_receipt(self, owner, case_id, revision, reason, key):
+        from app.features.work_cases.application.actions import resume_body_hash
+        try:
+            result = self.call('lookup_work_case_resume_request', p_owner=str(owner), p_case=str(case_id),
+                               p_key=key, p_hash=resume_body_hash(revision, reason))
+        except ServiceError as error:
+            if error.code == 'EXTRACTION_SCHEMA_REQUIRED':
+                raise ServiceError('RESUME_INTEGRATION_REQUIRED', '보류 업무의 재개 저장 기능이 아직 연결되지 않았습니다.',
+                                   503, retryable=False, next_action='CONTACT_SERVER_ADMIN') from None
+            raise
+        if not isinstance(result, dict) or result.get('kind') not in {'NONE', 'REPLAY'}:
+            raise ServiceError('PROCESSING_UNAVAILABLE', '재개 접수 이력을 확인할 수 없습니다.', 503)
+        return result if result['kind'] == 'REPLAY' else None
+
+    def resume(self, owner, case_id, revision, reason, key, body_hash, request_id):
+        return self.call('submit_work_case_resume', p_owner=owner, p_case=str(case_id), p_revision=revision,
+                         p_reason=reason, p_key=key, p_hash=body_hash, p_request_id=request_id)
+
     def context(self, owner, case_id, revision, batch):
         try:
             rows = (self.client.table('work_cases').select(
