@@ -11,6 +11,7 @@ from urllib.parse import quote
 
 from app.core.errors import ServiceError
 from app.features.mailboxes.infrastructure.google import GoogleRejected
+from app.features.mail.domain.attachment_ids import attachment_id as server_attachment_id
 
 
 def missing():
@@ -37,17 +38,17 @@ class AttachmentContent:
 def fetch_gmail_attachment(repo, mailbox_service, owner_id, mail_id, attachment_id):
     """Return bytes in memory after owner, mailbox and current read-scope checks.
 
-    Public attachment identifiers should be the stable provider_part_ref (part_id
-    for legacy ingestion), or an explicit persisted attachment_id. The original
-    provider attachment reference is accepted only as a stored legacy identifier.
+    API-25 returns a server-generated UUID based on the mail and stable MIME part.
+    Part references remain accepted for internal extraction and legacy clients.
+    Gmail attachment IDs are not public identifiers.
     """
     message = repo.message(owner_id, mail_id)
     attachments = message.get('attachments_jsonb')
     if not isinstance(attachments, list):
         raise missing()
-    matches = [a for a in attachments if isinstance(a, dict) and attachment_id in {
-        a.get('attachment_id'), a.get('provider_part_ref'), a.get('part_id'),
-        a.get('provider_attachment_ref'), a.get('gmail_attachment_id')}]
+    matches = [a for index, a in enumerate(attachments) if isinstance(a, dict) and (
+        attachment_id in (a.get('provider_part_ref'), a.get('part_id'))
+        or attachment_id == server_attachment_id(mail_id, a, index))]
     if len(matches) != 1:
         raise missing()
     stored = matches[0]
