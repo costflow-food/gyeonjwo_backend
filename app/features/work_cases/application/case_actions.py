@@ -2,7 +2,7 @@
 from app.features.work_cases.application.start_readiness import StartReadiness
 
 
-def case_actions(case, readiness: StartReadiness):
+def case_actions(case, readiness: StartReadiness, resume_readiness: StartReadiness | None = None):
     actions = ['VIEW_ORIGINAL']
     reason = None
     if case.get('archived_at') is not None:
@@ -16,10 +16,30 @@ def case_actions(case, readiness: StartReadiness):
         else:
             return actions, [readiness.disabled_action()]
     elif case.get('status') == 'Waiting' and case.get('decision') == 'ACCEPT_INCREASE':
-        actions.append('RESUME')
         reason = ('ACTION_NOT_ALLOWED', '수용 이력이 있는 업무는 명시적으로 재개해야 합니다.')
     elif case.get('current_batch_id') or case.get('status') in {'Running', 'Complete'}:
         reason = ('WORK_ALREADY_STARTED', '이미 검토를 시작한 업무입니다. 현재 진행 상태를 확인해 주세요.')
     else:
         reason = ('ACTION_NOT_ALLOWED', '현재 업무 상태에서는 최초 검토를 시작할 수 없습니다.')
-    return actions, ([{'action': 'START', 'reason_code': reason[0], 'message': reason[1]}] if reason else [])
+    disabled = ([{'action': 'START', 'reason_code': reason[0], 'message': reason[1]}] if reason else [])
+    if case.get('status') == 'Waiting' and case.get('decision') == 'ACCEPT_INCREASE':
+        disabled.append({'action': 'RESUME', 'reason_code': 'ACTION_NOT_ALLOWED',
+                         'message': '현재 재개 API는 추출 보류 업무의 재개만 지원합니다.'})
+    # Only extraction HOLD is supported here; approval/UNKNOWN and archive
+    # cannot be bypassed by resuming. The transaction rechecks all guards.
+    if case.get('processing_step') == 'ON_HOLD':
+        blocked = None
+        if case.get('archived_at') is not None:
+            blocked = ('CASE_ARCHIVED', '보관된 업무는 먼저 복원해야 합니다.')
+        elif case.get('status') != 'Pending' or case.get('decision') not in {None, 'HOLD'} or not case.get('current_batch_id'):
+            blocked = ('ACTION_NOT_ALLOWED', '현재 상태에서는 추출 보류 업무를 재개할 수 없습니다.')
+        else:
+            resume = resume_readiness or StartReadiness('RESUME_INTEGRATION_REQUIRED', '보류 업무의 재개 저장 기능이 아직 연결되지 않았습니다.')
+            unavailable = readiness if not readiness.available else resume
+            if unavailable.available:
+                actions.append('RESUME')
+            else:
+                blocked = (unavailable.code, unavailable.message)
+        if blocked:
+            disabled.append({'action': 'RESUME', 'reason_code': blocked[0], 'message': blocked[1]})
+    return actions, disabled

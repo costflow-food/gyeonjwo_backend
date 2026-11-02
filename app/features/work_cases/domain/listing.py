@@ -7,6 +7,8 @@ from decimal import Decimal, InvalidOperation
 
 from app.shared.domain.schemas import StrictModel
 
+from app.features.work_cases.domain.hold import HoldInfo
+
 QueueFilter = Literal['Waiting', 'Running', 'Complete']
 
 
@@ -52,6 +54,7 @@ class WorkCaseRow(StrictModel):
     item_name: str | None
     attachment_count: int = Field(ge=0)
     step_detail: StepDetail
+    hold: HoldInfo | None = None
     reply_summary: ReplySummary = Field(default_factory=ReplySummary)
     allowed_actions: list[str]
     disabled_actions: list[dict] = Field(default_factory=list)

@@ -32,13 +32,14 @@ class WorkCaseListService:
         self.extraction_enabled = extraction_enabled
         self.now = now or (lambda: datetime.now(timezone.utc))
 
-    def list(self, owner, *, status=None, archived=False, q='', limit=25, cursor=None, start_readiness=None):
+    def list(self, owner, *, status=None, archived=False, q='', limit=25, cursor=None, start_readiness=None, resume_readiness=None):
         readiness = start_readiness if start_readiness is not None else (StartReadiness()
             if self.extraction_enabled else StartReadiness('EXTRACTION_DISABLED', '서버의 검토 실행 설정이 꺼져 있습니다.'))
         query = q.strip().casefold()
         scope = self.codec.scope(owner, status, archived, query)
         snapshot, after = (self.codec.decode(cursor, scope) if cursor else (iso_z(self.now()), None))
         counts, filtered = QueueCounts(), []
+        page_cases = {}
         try:
             for case, mail in self.repo.rows(owner, snapshot, archived):
                 # Defensive checks also support alternative repositories without
@@ -61,7 +62,7 @@ class WorkCaseListService:
                 if after is not None and key >= after:
                     continue
                 archived_at = iso_z(utc_time(case['archived_at'])) if case['archived_at'] else None
-                actions, disabled = case_actions(case, readiness)
+                actions, disabled = case_actions(case, readiness, resume_readiness)
                 step = case['processing_step']
                 attachments = mail.get('attachments_jsonb') or []
                 if not isinstance(attachments, list):
@@ -73,11 +74,21 @@ class WorkCaseListService:
                     input_revision=case['input_revision'], archived_at=archived_at, item_name=case['item_name'],
                     attachment_count=len(attachments), step_detail={'code': step, 'message': STEP_MESSAGES.get(step, '처리 상태 확인')},
                     allowed_actions=actions, disabled_actions=disabled)
+                page_cases[str(row.case_id)] = case
                 filtered.append((key, row))
             filtered.sort(key=lambda item: item[0], reverse=True)
             page = filtered[:limit]
             summaries = self.repo.reply_summaries(owner, [str(row.case_id) for _, row in page])
+            held = [page_cases[str(row.case_id)] for _, row in page if row.processing_step == 'ON_HOLD']
+            hold_reasons = self.repo.hold_reasons(owner, held) if held else {}
+            resumable = [page_cases[str(row.case_id)] for _, row in page if 'RESUME' in row.allowed_actions]
+            resume_blocks = self.repo.resume_blocks(owner, resumable) if resumable else {}
             for _, row in page:
+                row.hold = hold_reasons.get(str(row.case_id))
+                if str(row.case_id) in resume_blocks:
+                    row.allowed_actions.remove('RESUME')
+                    code, message = resume_blocks[str(row.case_id)]
+                    row.disabled_actions.append({'action': 'RESUME', 'reason_code': code, 'message': message})
                 row.reply_summary = summaries[str(row.case_id)]
             next_cursor = (self.codec.encode(scope, snapshot, page[-1][0]) if len(filtered) > limit else None)
             return WorkCaseList(items=[row for _, row in page], next_cursor=next_cursor,

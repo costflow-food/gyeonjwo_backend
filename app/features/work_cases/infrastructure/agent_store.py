@@ -227,6 +227,9 @@ class AgentStore:
             raise ServiceError('ACTION_NOT_ALLOWED','실행 범위를 벗어났습니다.',409)
         # Never persist AgentRunner.partial_tool_calls: they contain raw mail.
         self.final_output=deepcopy(output) if status=='COMPLETED' else None
+        if isinstance(self.final_output, dict) and self.final_output.get('next_action') == 'HOLD':
+            from app.features.work_cases.domain.hold import from_agent_output
+            self.final_output['hold'] = from_agent_output(self.final_output).model_dump()
 
 
 class ScopedStore:

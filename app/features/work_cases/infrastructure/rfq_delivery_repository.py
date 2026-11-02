@@ -50,10 +50,14 @@ class RfqDeliveryRepository(RfqRepository):
         base_query = lambda: self.client.table('mail_send_settings').select(
             'id,configured,version_no,approval_required_by_purpose,allowed_recipients_jsonb,allowed_scope_jsonb,style_jsonb')\
             .eq('owner_user_id', str(owner)).eq('mailbox_ref', case['mailbox_ref']).lte('effective_at', now)
-        case_rows = self.data(base_query().eq('work_case_id', case['id']).order('version_no', desc=True).limit(1))
-        base_rows = self.data(base_query().is_('work_case_id', 'null').order('version_no', desc=True).limit(1))
+        case_rows = self.data(base_query().eq('work_case_id', case['id']).order('effective_at', desc=True)
+                              .order('version_no', desc=True).order('id', desc=True).limit(1))
+        base_rows = self.data(base_query().is_('work_case_id', 'null').order('effective_at', desc=True)
+                              .order('version_no', desc=True).order('id', desc=True).limit(1))
         override = case_rows[0] if case_rows else None
-        chosen = override if override and purpose in override['approval_required_by_purpose'] else (base_rows[0] if base_rows else None)
+        # Null is inheritance, never an explicit OFF or an override of the base.
+        chosen = (override if override and type(override['approval_required_by_purpose'].get(purpose)) is bool
+                  else (base_rows[0] if base_rows else None))
         if not chosen:
             return {'configured': False, 'auto_eligible': False}
         approval = chosen['approval_required_by_purpose'].get(purpose)
