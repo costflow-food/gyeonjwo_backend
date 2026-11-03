@@ -17,6 +17,14 @@ from app.features.supplier_crawl.infrastructure.network import (
 
 MAX_RESPONSE_BYTES = 2_000_000
 _KEY_PARAMS = re.compile(r'(?i)((?:service_?key|apikey|api_key|key)=)[^&#]+')
+_CREDENTIAL_HEADERS = {'authorization', 'proxy-authorization', 'cookie',
+    'x-ncp-apigw-api-key', 'x-ncp-apigw-api-key-id',
+    'x-naver-client-secret', 'x-naver-client-id'}
+
+
+def _origin(url: httpx.URL) -> tuple[str, str, int]:
+    port = url.port if url.port is not None else (443 if url.scheme == 'https' else 80)
+    return url.scheme, url.host, port
 
 
 class FetchError(Exception):
@@ -90,6 +98,11 @@ class Fetcher:
     def mask(self, url: str) -> str:
         return mask_url(url, self.secrets)
 
+    def _has_credentials(self, request: httpx.Request) -> bool:
+        return bool(_CREDENTIAL_HEADERS.intersection(request.headers)
+                    or any(self.mask(value) != value for value in request.headers.values())
+                    or self.mask(str(request.url)) != str(request.url))
+
     def preview(self, text: str, limit: int = 160) -> str:
         """오류 확인용 본문 앞부분. 인증키는 가린다."""
         return re.sub(r'\s+', ' ', self.mask(text or ''))[:limit]
@@ -108,6 +121,8 @@ class Fetcher:
         try:
             options = {'timeout': timeout} if timeout else {}
             request = self._client.build_request('GET', url, headers=headers, params=params, **options)
+            initial_origin = _origin(request.url)
+            initial_authenticated = self._has_credentials(request)
             for hop in range(4):
                 if not is_public_web_url(str(request.url)):
                     raise FetchError('URL_NOT_ALLOWED', '공개 웹 주소만 허용합니다.')
@@ -127,18 +142,16 @@ class Fetcher:
                         # and robots boundary, before DNS or destination I/O.
                         if redirect_allowed is not None and not redirect_allowed(str(target.url)):
                             raise FetchError('REDIRECT_NOT_ALLOWED', '수집 범위를 벗어나는 이동을 차단했습니다.')
-                        origin = lambda u: (u.scheme, u.host, u.port or (443 if u.scheme == 'https' else 80))
-                        if origin(target.url) != origin(request.url):
-                            # API credentials may live in nonstandard headers,
-                            # URL paths or queries. Never forward them cross-origin.
-                            credential_headers = {'authorization', 'proxy-authorization', 'cookie',
-                                'x-ncp-apigw-api-key', 'x-ncp-apigw-api-key-id',
-                                'x-naver-client-secret', 'x-naver-client-id'}
-                            if (credential_headers.intersection(request.headers)
-                                    or any(self.mask(value) != value for value in request.headers.values())
-                                    or self.mask(str(request.url)) != str(request.url)
-                                    or self.mask(str(target.url)) != str(target.url)):
-                                raise FetchError('AUTH_REDIRECT_BLOCKED', '인증 요청의 다른 origin 이동을 차단했습니다.')
+                        # Keep the initial credential boundary even if a same-origin
+                        # hop rewrites, percent-encodes or removes the credentials.
+                        leaves_authenticated_origin = (initial_authenticated
+                                                       and _origin(target.url) != initial_origin)
+                        # Also preserve checks for credentials introduced on later hops.
+                        if (leaves_authenticated_origin
+                                or (_origin(target.url) != _origin(request.url)
+                                    and (self._has_credentials(request)
+                                         or self.mask(str(target.url)) != str(target.url)))):
+                            raise FetchError('AUTH_REDIRECT_BLOCKED', '인증 요청의 다른 origin 이동을 차단했습니다.')
                         request = target
                         continue
                     chunks, size = [], 0
