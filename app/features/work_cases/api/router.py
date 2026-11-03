@@ -8,7 +8,7 @@ from pydantic import Field
 from app.shared.domain.schemas import StrictModel
 from app.core.errors import ServiceError
 from app.features.work_cases.application.actions import WorkCaseActions, validate_action_key
-from app.features.work_cases.infrastructure.runtime_repository import CaseRuntimeRepository
+from app.features.work_cases.infrastructure.graph_repository import runtime_repository
 from app.features.work_cases.domain.actions import DeletedCase, StartedCase
 
 from app.api.responses import Envelope, api_json
@@ -36,7 +36,7 @@ def resume_readiness(request, repo=None, *, fresh=False):
         if not fresh and cached is not None and now < cached[0]:
             return cached[1]
         try:
-            repository = repo or CaseRuntimeRepository(make_server_client(request.app.state.settings))
+            repository = repo or runtime_repository(make_server_client(request.app.state.settings), request.app.state.settings)
             result = (StartReadiness() if repository.resume_available() else
                       StartReadiness('RESUME_INTEGRATION_REQUIRED', '보류 업무의 재개 저장 기능이 아직 연결되지 않았습니다.'))
         except Exception:
@@ -47,7 +47,7 @@ def resume_readiness(request, repo=None, *, fresh=False):
 
 def extraction_readiness(request, repo=None, *, fresh=False):
     settings = request.app.state.settings
-    for probe in (lambda: configuration_readiness(settings), agent_readiness):
+    for probe in (lambda: configuration_readiness(settings), lambda: agent_readiness(settings.agent_graph_enabled)):
         result = probe()
         if not result.available:
             return result
@@ -58,7 +58,7 @@ def extraction_readiness(request, repo=None, *, fresh=False):
             result = cached[1]
         else:
             try:
-                repository = repo or CaseRuntimeRepository(make_server_client(settings))
+                repository = repo or runtime_repository(make_server_client(settings), settings)
                 result = database_readiness(repository)
             except Exception:
                 result = StartReadiness('PROCESSING_UNAVAILABLE', '검토 실행 저장소에 연결할 수 없습니다.')
@@ -145,7 +145,7 @@ def get_runtime_repository(request: Request):
     with request.app.state.service_lock:
         repo = getattr(request.app.state, 'case_runtime_repository', None)
         if repo is None:
-            repo = CaseRuntimeRepository(make_server_client(request.app.state.settings))
+            repo = runtime_repository(make_server_client(request.app.state.settings), request.app.state.settings)
             request.app.state.case_runtime_repository = repo
         return repo
 
@@ -281,6 +281,11 @@ def get_case(case_id: UUID, request: Request, principal=Depends(require_google_u
         if block:
             actions.remove('RESUME')
             disabled.append({'action': 'RESUME', 'reason_code': block[0], 'message': block[1]})
+    if row.get('processing_step') in {'CANDIDATES', 'SELECTING_CANDIDATES'}:
+        from app.features.work_cases.infrastructure.candidate_repository import CandidateRepository
+        from app.features.work_cases.application.candidates import apply_candidate_action
+        block = CandidateRepository(repo.client).blocks(principal.user_id, [row]).get(str(case_id))
+        apply_candidate_action(row, actions, disabled, block)
     batch_id = row.pop('current_batch_id')
     return api_json({'case_id': row.pop('id'), **row,
                     'batch_id': batch_id, 'progress_url': f'/api/v1/work-cases/{case_id}/progress',

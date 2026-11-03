@@ -1,21 +1,18 @@
 {
-  "contract_version": 2,
+  "contract_version": 3,
   "owner_split": {
     "agent_team": "Owns all app/agents sources, prompts, graphs, schemas and tool protocols. No agent source changes in this integration.",
-    "backend": "Implements CaseStore, QuoteStore and AgentRunStore in app/features/work_cases/infrastructure/agent_store.py and calls public AgentRunner from its own application/agent_boundary.py."
+    "backend": "Owns scoped store implementations, boundary adapters, durable workers and HTTP APIs under app/features/work_cases. Calls public agent entry points/protocols; never changes app/agents prompts, graph, schemas or role limits."
   },
-  "entrypoint": "app.features.work_cases.application.agent_boundary.run_extraction",
-  "execution": "Call AgentRunner(INFO_EXTRACTOR, ExtractionIn) directly. No graph option/override and no roles 2-5.",
+  "entrypoint": "app.features.work_cases.application.graph_boundary.run_graph -> public build_graph/run_case",
+  "execution": "Graph opt-in: START -> INFO_EXTRACTOR -> CANDIDATE -> user candidate selection and policy-controlled drafts; review opt-in: REPLY -> INFO_EXTRACTOR -> INFO_PRIORITY -> RESPONSE_PLAN -> COUNTER_OFFER and card staging, PLAN -> RESPONSE_PLAN -> COUNTER_OFFER and card staging. Graph owns branching/rechecks; backend owns persistence, scope, deadlines, approval and actual dispatch.",
   "persistence": {
-    "quote": "Full QuoteVersionRecord; pricing tiers, cost terms, tax checks, item notes, evidence, normalized mail and conditions retained.",
-    "atomic_quote_rpc": "store_case_agent_quote: quote + optional reference-price history + mail normalization + case conditions + workflow log in one transaction.",
-    "completion_rpc": "complete_case_agent_extraction: verify case/revision/batch/lease and stored quote IDs, then terminal run + case step + log.",
-    "partial_failure": "QuoteStore is a commit-on-tool contract. A quote already committed by a successful tool call remains immutable if later model/final-output validation fails. The job is then FAILED, never silently Complete.",
-    "json_mapping": "DB object-shaped cost_terms_jsonb/item_notes_jsonb store items arrays; pricing_terms_jsonb.agent_record retains the exact agent record for lossless readback.",
-    "decimal": "All scalar NUMERIC projections read as text; SQL rejects >6 meaningful decimal digits instead of rounding. MOQ and order increment are paired with units.",
-    "currency": "Base v3.6 allows KRW only. Foreign-currency records are rejected, never converted or relabeled.",
-    "role_output": "AgentRunner final next_action/reason/unknown_fields retained at agent_runs.output_jsonb top level. Raw partial tool-call payloads are discarded.",
-    "run_metadata_rpc": "begin_case_agent_run: records model/prompt and scoped input on existing job before model invocation; final role result remains top-level."
+    "START": "graph_start.json: scoped quote/run/document/private candidate-draft staging and graph completion",
+    "candidate_selection": "candidate_selection.json: per-case user selection, selected-only publication, preserved mailbox limits and retirement of unused proposals",
+    "REPLY_PLAN_CARD": "graph_review.json: review draft/card staging, guarded completion, pending outbound resolution and immutable review history",
+    "quote_record": "Full QuoteVersionRecord; pricing tiers, cost terms, tax checks, item notes, evidence, normalized mail and conditions retained.",
+    "privacy": "AgentRunner final next_action/reason/unknown_fields retained at agent_runs.output_jsonb top level. Raw partial tool-call payloads are discarded.",
+    "atomicity": "DB-owned transactional RPCs; no independent REST calls pretending to be one transaction. Stage a card before final commit so graph revision checks remain valid; never mark Complete with unresolved DRAFT/SENDING/UNKNOWN."
   },
   "run_scope": "Authenticated owner + durable job + revision + batch; ContextVar-scoped store proxy, not mutable per-user global stores.",
   "privacy": "Disable tracing; never persist AgentRunner raw partial_tool_calls or log mail/model payloads.",
@@ -25,5 +22,64 @@
     "Requested purchase quantity is not supplier available_quantity and is not invented from it. Company label uses verified registered supplier name.",
     "AgentRunner role-specific model/reasoning config is preserved. Provider retries disabled and per-request timeouts bounded by backend run deadline."
   ],
-  "status": "Connected and validated with 47 offline checks: real team AgentRunner/FakeModel + isolated PGlite SQL; real provider deployment remains unverified."
+  "status": "Backend graph/store/worker implementation and offline verification completed; DB-owned graph/candidate/review RPC deployment, frontend live wiring and real end-to-end validation remain. No app/agents changes in this PR.",
+  "public_interfaces": {
+    "graph": [
+      "build_graph(run_agent,current_revision,latest_quotes)",
+      "run_case(graph,RunCaseInput)"
+    ],
+    "runner": "AgentRunner(model,runs,role_models)",
+    "stores": [
+      "CaseStore",
+      "QuoteStore",
+      "CandidateStore",
+      "MailDraftStore",
+      "AgentRunStore",
+      "ComparisonStore",
+      "PriorityStore",
+      "CounterOfferStore",
+      "DocumentStore",
+      "ReviewCardStore"
+    ],
+    "rule": "Use existing public protocols only. Propose and agree interface changes with the agent team before modifying their sources; no new public agent interface introduced here."
+  },
+  "backend_implementations": {
+    "legacy": "infrastructure/agent_store.py and application/agent_boundary.py: extraction-only fallback",
+    "START": "infrastructure/graph_store.py: case/quote/candidate/draft/run/document stores",
+    "REPLY_PLAN": "infrastructure/review_graph_store.py: comparison/priority/counter-offer/card stores and owned historical evidence",
+    "worker": "application/graph_worker.py and infrastructure/graph_repository.py: guarded durable scheduling, lease/revision checks, final acknowledgement validation"
+  },
+  "legacy_extraction_only": {
+    "scope": "Used only when AGENT_GRAPH_ENABLED=false; not the new graph contract or a restriction on roles 2-5. Existing deployed legacy RPCs stay unchanged.",
+    "entrypoint": "app.features.work_cases.application.agent_boundary.run_extraction",
+    "execution": "Call AgentRunner(INFO_EXTRACTOR, ExtractionIn) directly. No graph option/override and no roles 2-5.",
+    "persistence": {
+      "quote": "Full QuoteVersionRecord; pricing tiers, cost terms, tax checks, item notes, evidence, normalized mail and conditions retained.",
+      "atomic_quote_rpc": "store_case_agent_quote: quote + optional reference-price history + mail normalization + case conditions + workflow log in one transaction.",
+      "completion_rpc": "complete_case_agent_extraction: verify case/revision/batch/lease and stored quote IDs, then terminal run + case step + log.",
+      "partial_failure": "QuoteStore is a commit-on-tool contract. A quote already committed by a successful tool call remains immutable if later model/final-output validation fails. The job is then FAILED, never silently Complete.",
+      "json_mapping": "DB object-shaped cost_terms_jsonb/item_notes_jsonb store items arrays; pricing_terms_jsonb.agent_record retains the exact agent record for lossless readback.",
+      "decimal": "All scalar NUMERIC projections read as text; SQL rejects >6 meaningful decimal digits instead of rounding. MOQ and order increment are paired with units.",
+      "currency": "Base v3.6 allows KRW only. Foreign-currency records are rejected, never converted or relabeled.",
+      "role_output": "AgentRunner final next_action/reason/unknown_fields retained at agent_runs.output_jsonb top level. Raw partial tool-call payloads are discarded.",
+      "run_metadata_rpc": "begin_case_agent_run: records model/prompt and scoped input on existing job before model invocation; final role result remains top-level."
+    },
+    "status": "Connected and validated with 47 offline checks: real team AgentRunner/FakeModel + isolated PGlite SQL; real provider deployment remains unverified."
+  },
+  "tool_limits": {
+    "authority": "Agent team feature/agents TOOL_CALL_LIMITS, not backend enforcement",
+    "target": {
+      "INFO_EXTRACTOR": 8,
+      "CANDIDATE": 8,
+      "INFO_PRIORITY": 10,
+      "RESPONSE_PLAN": 10,
+      "COUNTER_OFFER": 8
+    },
+    "note": "Agent sources remain identical to PR base. Agent team merges its TOOL_CALL_LIMITS implementation separately; backend adds no role-limit override."
+  },
+  "settings": {
+    "AGENT_GRAPH_ENABLED": "false by default selects legacy extraction-only mode; true needs graph_start.json functions",
+    "AGENT_GRAPH_REVIEW_ENABLED": "false by default; true additionally needs graph_review.json functions and graph mode",
+    "external_effects": "No enabling, live Gmail/LLM calls, schema migration or direct SQL installation in this integration."
+  }
 }

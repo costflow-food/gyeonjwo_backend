@@ -5,6 +5,7 @@ from app.core.idempotency import request_identity
 from app.core.request_context import current_request_id
 from app.features.work_cases.application.cursor import utc_time, iso_z
 from app.features.work_cases.domain.mail_drafts import DraftAccepted, snapshot_hash
+from app.features.work_cases.domain.candidates import selection_staged
 
 
 class MailDraftService:
@@ -12,7 +13,9 @@ class MailDraftService:
         self.repo, self.codec = repo, codec
 
     def present(self, owner, draft, case):
-        policy = self.repo.send_policy(owner, case, draft['recipient'], draft['purpose'])
+        if selection_staged(draft):
+            raise ServiceError('RESOURCE_NOT_FOUND', '메일 초안을 찾을 수 없습니다.', 404)
+        policy = self.repo.send_policy(owner, case, draft['recipient'], draft['purpose'], draft['supplier_id'])
         return {
             'draft_id': draft['id'], 'case_id': draft['work_case_id'], 'supplier_id': draft['supplier_id'],
             'purpose': draft['purpose'], 'recipient': draft['recipient'], 'subject': draft['subject'],
@@ -44,6 +47,8 @@ class MailDraftService:
         suffix = 'approve-and-send' if action == 'APPROVE_SEND' else 'reconcile'
         identity = request_identity(str(owner), 'POST', '/api/v1/mail-drafts/' + str(draft_id) + '/' + suffix,
                                     key, payload.model_dump(mode='json') if payload else {})
+        if selection_staged(self.repo.draft(owner, draft_id)):
+            raise ServiceError('RESOURCE_NOT_FOUND', '메일 초안을 찾을 수 없습니다.', 404)
         result = self.repo.submit_draft_action(owner, draft_id, action, payload, identity, current_request_id(), accepting)
         if isinstance(result, dict) and result.get('kind') == 'ERROR':
             code = result.get('code')

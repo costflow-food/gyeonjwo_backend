@@ -22,7 +22,7 @@ class RfqWorkflowWorker:
         self.repo.recover_server(owner)
         # A bounded, owner-filtered work scan. The deterministic persisted agent
         # run ID prevents two servers from preparing the same batch/revision.
-        query = (self.repo.client.table('work_cases').select('id,input_revision')
+        query = (self.repo.client.table('work_cases').select('id,input_revision,current_batch_id')
             .eq('owner_user_id', owner).eq('status', 'Running')
             .in_('processing_step', ['SELECTING_CANDIDATES', 'CANDIDATES']).is_('archived_at', 'null')
             .order('id').limit(50))
@@ -34,6 +34,10 @@ class RfqWorkflowWorker:
             if self.stop.is_set():
                 return
             try:
+                # All send hosts check the durable batch marker, independently
+                # of their local graph flag. This worker still dispatches drafts.
+                if self.repo.graph_owns_case(owner, row['id'], row.get('current_batch_id')):
+                    continue
                 self.preparation.prepare(owner, row['id'], row['input_revision'])
                 logger.info('rfq preparation_finished')
             except ServiceError as error:
@@ -57,7 +61,7 @@ class RfqWorkflowWorker:
             if self.stop.is_set():
                 break
             style = draft.get('style_snapshot_jsonb') or {}
-            if style.get('producer') != 'rfq-v1':
+            if style.get('producer') not in {'rfq-v1', 'graph-review-v1'}:
                 continue
             # ON-created drafts are not silently sent when policy changes to OFF.
             if not (style.get('auto_policy_eligible') is True
