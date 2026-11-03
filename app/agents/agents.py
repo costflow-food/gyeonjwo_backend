@@ -1,7 +1,7 @@
 """다섯 에이전트 (07 3절). 담당 팀원은 자기 역할의 PROMPTS 지시문과 tools.py 도구를 채운다.
 
 각 에이전트는 LangChain create_agent로 만든 도구 호출 루프다. 허용 도구만 받고(tools.ROLE_TOOLS),
-호출당 도구 MAX_TOOL_CALLS_PER_AGENT_CALL회를 넘으면 실패하며, 최종 답은 schemas의 역할별 *Out 모델로 검증된다.
+호출당 도구 한도(역할별 TOOL_CALL_LIMITS, 없으면 MAX_TOOL_CALLS_PER_AGENT_CALL)를 넘으면 실패하며, 최종 답은 schemas의 역할별 *Out 모델로 검증된다.
 입력은 schemas의 역할별 *In 모델(ID만)이고, 원문·정책은 도구로 조회한다.
 
 시스템 프롬프트 = 에이전트 공통 규칙(AGENT_POLICY) + 역할 이름 + PROMPTS[역할].
@@ -34,8 +34,8 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import ToolMessage
 from langchain_openai import ChatOpenAI
 
-from app.agents.schemas import (AGENT_IO, MAX_TOOL_CALLS_PER_AGENT_CALL, AgentInput, AgentOutput, AgentRole,
-                                RunContext)
+from app.agents.schemas import (AGENT_IO, MAX_TOOL_CALLS_PER_AGENT_CALL, TOOL_CALL_LIMITS, AgentInput, AgentOutput,
+                                AgentRole, RunContext)
 from app.agents.tools import EXTRACTION_FIELD_NAMES, candidate_summary, tools_for
 
 # 07 7절. 역할 지시문은 담당 팀원이 작성한다. 주석은 넣어야 할 내용과 고를 수 있는 next_action이다.
@@ -191,13 +191,14 @@ next_action:
 3. 업체마다 requirements에서 state가 CHECK인 항목은 stated(견적 값)가 required(업무 조건)를 충족하는지 판단한다.
    (예: 업무 "HACCP" · 견적 "식품안전관리인증(HACCP)" → 충족, 업무 "10kg 박스" · 견적 "5kg 박스" → 미충족)
    충족이 아니거나 판단할 수 없으면 그 field를 MUST_CONFIRM으로 묻는다.
-4. missing_required가 있으면 read_mail_evidence로 그 업체의 메일 원문을 다시 읽는다.
+4. missing_required나 unknown_costs가 있으면 read_mail_evidence로 그 업체의 메일 원문을 다시 읽는다.
    - 원문에 답이 있는데 견적에 빠졌으면 업체에 묻지 않는다. recheck에 {supplier_id, field, mail_id, source_text}를
-     넣고 RECHECK_SOURCE를 반환한다. source_text는 그 답이 적힌 원문 구절을 그대로 옮긴다(예: "월 1,000kg 공급 가능").
-     원문 구절을 옮길 수 없으면 원문에 답이 없는 것이다.
-   - 원문에도 답이 없으면 그 field를 MUST_CONFIRM으로 묻는다.
+     넣고 RECHECK_SOURCE를 반환한다. source_text는 그 답이 적힌 원문 구절을 그대로 옮긴다(예: "월 1,000kg 공급 가능",
+     "운송비 박스당 1,500원"). 원문 구절을 옮길 수 없으면 원문에 답이 없는 것이다.
+     비용은 금액이나 "무료"·"없음"이 적힌 구절만 답이다. "운송비 별도"처럼 금액이 없으면 원문에 답이 없는 것이다.
+   - 원문에도 답이 없는 필수 누락은 그 field를 MUST_CONFIRM으로 묻는다. 원문에도 금액이 없는 비용은 5번으로 판단한다.
    - 재추출할 항목이 있으면 질문·초안보다 먼저 RECHECK_SOURCE로 끝낸다. 다시 추출된 뒤 이 역할이 다시 실행되어 질문을 보낸다.
-5. unknown_costs가 있는 업체는 calculate_break_even(supplier_id)을 부른다.
+5. 원문에도 금액이 없는 unknown_costs가 있는 업체는 calculate_break_even(supplier_id)을 부른다.
    - can_change_choice가 true면 그 비용 field를 CAN_CHANGE_CHOICE로 묻는다.
    - proven_low_value가 true면 묻지 않는다. 그 비용 field를 LOW_VALUE로 questions에 남긴다(묻지 않은 근거 기록).
    - 둘 다 아니면(비교 불가·세금 기준 다름) 그 비용은 묻지 않고 unknown_fields에 남긴다.
@@ -353,7 +354,8 @@ def build_agent(role: AgentRole, model: BaseChatModel):
         model, tools_for(role), system_prompt=system_prompt(role),
         response_format=ToolStrategy(output),
         context_schema=RunContext,
-        middleware=[ToolCallLimitMiddleware(run_limit=MAX_TOOL_CALLS_PER_AGENT_CALL, exit_behavior='error')],
+        middleware=[ToolCallLimitMiddleware(run_limit=TOOL_CALL_LIMITS.get(role, MAX_TOOL_CALLS_PER_AGENT_CALL),
+                                            exit_behavior='error')],
         name=role.lower(),
     )
 

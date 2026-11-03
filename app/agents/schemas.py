@@ -249,6 +249,11 @@ class AgentRole(StrEnum):
     COUNTER_OFFER = 'COUNTER_OFFER'
 
 
+# 역할별 도구 호출 한도. 없는 역할은 MAX_TOOL_CALLS_PER_AGENT_CALL을 쓴다.
+# 확인 우선순위는 비용 누락도 원문을 다시 읽고, 대응안은 평균 5.5~6.2회를 써서 8회를 가끔 넘었다.
+TOOL_CALL_LIMITS = {AgentRole.INFO_PRIORITY: 10, AgentRole.RESPONSE_PLAN: 10}
+
+
 class AgentInput(StrictModel):
     case_id: UUID
     input_revision: int = Field(strict=True, ge=0)
