@@ -93,8 +93,8 @@
     "incompatibility": "Existing commit_review requires source_quote_ids/source_run_ids, review_outcome and matching closure fields inside completed role outputs; agent schemas omit those fields. A blind call fails. DB owner must implement a compatible transactional review commit with the same ownership/revision/outbound/immutable-history invariants, validating structured role outputs without silently modifying completed agent_runs. This code does not install or modify SQL.",
     "card_mapping": "Graph quote_version_ids retained and source_quote_ids added; source_run_ids are latest completed role runs for current batch; cards preserve plans/counter_offer, reference amounts, evidence. VALID plans yield COMPLETED unless counter HOLD; conditional plans or counter HOLD yield REVIEW_REQUIRED_CLOSED with fixed nonblank closure_reason. Empty plans are rejected, not mislabeled NO_VALID_PLAN without code proof."
   },
-  "stores": "ReviewGraphStore implements Comparison/Priority/CounterOffer/ReviewCardStore using owned immutable agent_record quotes. Older source mails are authorized by trusted evidence list plus owner/case reads, so RECHECK_SOURCE can reread initial mail. New quotes require actual inbound supplier link. Original suppliers never created.",
-  "delivery": "Shared sender supports graph-review-v1 CLARIFICATION and COUNTER_OFFER only with matching completed role, same case/input/batch, staged/public distinction, current policy and final DB claim. UNKNOWN remains unresent. Candidate selection and mailbox policy are never overridden.",
+  "stores": "ReviewGraphStore implements Comparison/Priority/CounterOffer/ReviewCardStore. Shared quote_snapshot decoder supports full agent_record and recognized legacy row/collection shapes. Agent snapshots must agree with canonical identity, version, unit, validity, currency, price and quantity; numeric equality uses Decimal without rounding. Historical evidence is bounded by trusted job IDs plus owner/case reads; new quotes require actual inbound supplier linkage.",
+  "delivery": "Shared sender supports graph-review-v1 CLARIFICATION and COUNTER_OFFER only with matching completed role, same case/input/batch, staged/public distinction, current policy and final DB claim. UNKNOWN remains unresent. Candidate selection and mailbox policy are never overridden. The authorized claim recipient/subject/body must exactly match the checked draft snapshot. Proven pre-provider mismatch is recorded FAILED/SEND_SNAPSHOT_CHANGED; provider has not been called, so it is not UNKNOWN.",
   "privacy": "No mail/attachment/model content, contacts or tokens in logs. Failure records discard raw partial tool calls. No actual Gmail/LLM/Supabase writes performed during verification.",
   "verification": {
     "actual_graph_scoped_store_and_mocked_validators_assertions": 21,
@@ -103,6 +103,7 @@
     "production_end_to_end_verified": false,
     "sql_created": false,
     "remote_schema_changed": false,
-    "test_files_retained": false
+    "test_files_retained": false,
+    "quote_integrity_and_send_snapshot_assertions": 33
   }
 }

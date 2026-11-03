@@ -52,6 +52,13 @@ class RfqDelivery:
         if not approved and claimed.settings_version != style['auto_settings_version']:
             self.repo.finish_send(owner, draft_id, 'FAILED', code='SETTINGS_CHANGED')
             return {'status': 'FAILED', 'sent_now': False}
+        if (claimed.recipient != draft['recipient'] or claimed.subject != draft['subject']
+                or claimed.body_text != draft['body_text']):
+            # Provider has not been called: this is a proven pre-send mismatch,
+            # never an uncertain send. Do not send newly changed content against
+            # the policy/preparation snapshot checked above.
+            self.repo.finish_send(owner, draft_id, 'FAILED', code='SEND_SNAPSHOT_CHANGED')
+            return {'status': 'FAILED', 'sent_now': False}
         # Everything beyond here may follow a persisted SENDING. Never release
         # it or retry the provider POST on timeouts/malformed acknowledgements.
         try:

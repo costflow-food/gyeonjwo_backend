@@ -70,24 +70,23 @@ class ReviewGraphStore(GraphStore):
         return super().list_case_mails(case_id)
 
     def get_quote_versions(self, case_id, ids):
-        from app.agents.tools import QuoteVersionRecord
         self.check(case_id)
         ids = list(dict.fromkeys(str(UUID(value)) for value in ids))
         if len(ids) > 100:
             raise ValueError('Comparison quote bound')
         if not ids:
             return []
-        rows = self.rows(self.repo.client.table('quote_versions').select(
-            'id,work_case_id,supplier_id,source_mail_id,pricing_terms_jsonb')
+        from app.features.work_cases.infrastructure.quote_snapshot import QUOTE_COLUMNS, decode_quote
+        rows = self.rows(self.repo.client.table('quote_versions').select(QUOTE_COLUMNS)
             .eq('owner_user_id', self.scope.owner).eq('work_case_id', str(case_id)).in_('id', ids))
         result = []
         for row in rows:
-            record = QuoteVersionRecord.model_validate((row.get('pricing_terms_jsonb') or {}).get('agent_record'))
+            quote_id, record = decode_quote(row)
             if (row['id'] not in ids or record.work_case_id != str(case_id)
                     or record.supplier_id != row['supplier_id'] or record.source_mail_id != row['source_mail_id']):
                 raise ValueError('Comparison quote scope mismatch')
-            self.records[row['id']] = record
-            result.append((row['id'], record))
+            self.records[quote_id] = record
+            result.append((quote_id, record))
         if {key for key, _ in result} != set(ids):
             raise ServiceError('QUOTE_CONTRACT_REQUIRED', '비교 견적의 저장 형식을 확인해야 합니다.', 503)
         return result
