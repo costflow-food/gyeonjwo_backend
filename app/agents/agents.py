@@ -498,7 +498,7 @@ def _grounded_caution(output: AgentOutput, candidate: dict) -> dict | None:
 
 def _check_candidates(output: AgentOutput, messages: list) -> AgentOutput:
     """②: 초안 ID는 이번 실행에서 DRAFTED로 받은 것만, 후보는 search_supplier_evidence 후보만 인정한다.
-    체크리스트·점수·근거·unknown_fields는 LLM이 옮긴 값 대신 도구 값으로 채운다.
+    체크리스트·점수·근거·잠정 여부·unknown_fields는 LLM이 옮긴 값 대신 도구 값으로 채운다.
     LLM이 정하는 것은 업체별 사유와 등록 비고에 근거한 주의 표시뿐이다."""
     searched = [r for r in _tool_results(messages, 'search_supplier_evidence') if r.get('status') == 'OK']
     found = {c['supplier_id']: c for c in (searched[-1]['candidates'] if searched else [])}
@@ -522,6 +522,7 @@ def _check_candidates(output: AgentOutput, messages: list) -> AgentOutput:
     candidates = [{'supplier_id': sid,
                    'reason': (reasons.get(sid) or candidate_summary(found[sid]['checklist']))[:300],
                    **{key: found[sid][key] for key in ('checklist', 'preference_score', 'evidence_refs')},
+                   'provisional': found[sid].get('provisional', False),
                    'caution': _grounded_caution(output, found[sid])}
                   for sid in suppliers if sid in found]
     unknown_fields = [f"{c['supplier_id']}.{check['condition']}" for c in candidates for check in c['checklist']
