@@ -18,7 +18,7 @@ from app.features.supplier_crawl.application.report import to_markdown
 from app.features.supplier_crawl.application.trial import SupplierCrawlTrial, TrialOptions
 from app.features.supplier_crawl.infrastructure.config import CrawlSettings
 from app.features.supplier_crawl.infrastructure.homepage import read_seed_file
-from app.features.supplier_crawl.infrastructure.http import Fetcher
+from app.features.supplier_crawl.infrastructure.http import Fetcher, mask_url
 
 SOURCES = ('public', 'haccp', 'homepage')
 
@@ -69,12 +69,12 @@ def main(argv=None, settings=None, transport=None):
     stem = args.out / f'{datetime.now():%Y%m%d_%H%M%S}_{options.keyword}'
     payload = report.model_dump(mode='json')
     text = json.dumps(payload, ensure_ascii=False, indent=2)
-    for secret in settings.secrets():
-        if secret in text:
-            print('리포트에 인증키가 포함되어 저장하지 않았습니다.', file=sys.stderr)
-            return 2
+    markdown = to_markdown(report)
+    if any(mask_url(content, settings.secrets()) != content for content in (text, markdown)):
+        print('리포트에 인증키가 포함되어 저장하지 않았습니다.', file=sys.stderr)
+        return 2
     stem.with_suffix('.json').write_text(text, encoding='utf-8')
-    stem.with_suffix('.md').write_text(to_markdown(report), encoding='utf-8')
+    stem.with_suffix('.md').write_text(markdown, encoding='utf-8')
     summary = {'candidates': len(report.candidates), 'issues': len(report.issues),
                'sources': {s.source_type: ('ran' if s.enabled else 'skipped') for s in report.sources},
                'saved': [str(stem.with_suffix('.json')), str(stem.with_suffix('.md'))]}

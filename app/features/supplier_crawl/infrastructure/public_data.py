@@ -35,12 +35,15 @@ class PublicDataClient:
         body = payload.get(service) if isinstance(payload, dict) else None
         if not isinstance(body, dict):
             result = payload.get('RESULT', {}) if isinstance(payload, dict) else {}
-            raise FetchError(result.get('CODE') or 'UNEXPECTED_SHAPE', result.get('MSG') or '응답 형식이 명세와 다릅니다.')
+            raise FetchError(self.fetcher.preview(str(result.get('CODE') or 'UNEXPECTED_SHAPE'), 80),
+                             self.fetcher.preview(str(result.get('MSG') or '응답 형식이 명세와 다릅니다.'), 300))
         code = (body.get('RESULT') or {}).get('CODE')
         if code in EMPTY_CODES:
             return [], []
         if code not in OK_CODES:
-            raise FetchError(code or 'UNKNOWN_RESULT', (body.get('RESULT') or {}).get('MSG') or '결과 코드를 확인할 수 없습니다.')
+            raise FetchError(self.fetcher.preview(str(code or 'UNKNOWN_RESULT'), 80),
+                             self.fetcher.preview(str((body.get('RESULT') or {}).get('MSG')
+                                                      or '결과 코드를 확인할 수 없습니다.'), 300))
         rows = [row for row in body.get('row') or [] if isinstance(row, dict)]
         return rows, sorted({key for row in rows for key in row})
 

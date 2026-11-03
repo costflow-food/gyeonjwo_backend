@@ -219,7 +219,8 @@ class HomepageCrawler:
         """4xx는 제한 없음, 5xx·접속 실패는 수집하지 않음(보수적)."""
         parser = RobotFileParser()
         try:
-            response = self.fetcher.get(urljoin(root, '/robots.txt'))
+            response = self.fetcher.get(urljoin(root, '/robots.txt'),
+                                        redirect_allowed=lambda target: _same_site(target, root))
         except FetchError:
             return None
         if response.status_code >= 500:
@@ -230,8 +231,8 @@ class HomepageCrawler:
             parser.parse(response.text.splitlines())
         return parser
 
-    def _page(self, url: str, keyword: str) -> tuple[PageEvidence, _PageParser] | None:
-        response = self.fetcher.get(url)
+    def _page(self, url: str, keyword: str, redirect_allowed=None) -> tuple[PageEvidence, _PageParser] | None:
+        response = self.fetcher.get(url, redirect_allowed=redirect_allowed)
         if response.status_code != 200 or 'html' not in response.headers.get('content-type', 'text/html'):
             raise FetchError(f'HTTP_{response.status_code}', '홈페이지 응답을 읽을 수 없습니다.')
         parser = _PageParser()
@@ -254,6 +255,7 @@ class HomepageCrawler:
             result.errors.append(('ROBOTS_UNAVAILABLE', root))
             return result
         agent = self.settings.crawl_user_agent
+        redirect_allowed = lambda target: _same_site(target, root) and robots.can_fetch(agent, target)
         queue, seen = [seed.url], set()
         while queue and len(result.pages) < self.settings.crawl_max_pages_per_site:
             url = queue.pop(0).split('#', 1)[0]
@@ -264,7 +266,7 @@ class HomepageCrawler:
                 result.blocked_by_robots.append(url)
                 continue
             try:
-                evidence, parser = self._page(url, keyword)
+                evidence, parser = self._page(url, keyword, redirect_allowed=redirect_allowed)
             except FetchError as error:
                 result.errors.append((error.code, url))
                 continue

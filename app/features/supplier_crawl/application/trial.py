@@ -39,7 +39,9 @@ class _Candidates:
         self.key_by_name: dict[str, str] = {}
 
     def get(self, name: str, license_no: str | None = None) -> CrawledSupplierCandidate:
-        key = ('license:' + license_no) if license_no else self.key_by_name.get(normalize_name(name))
+        license_no = (license_no or '').strip() or None
+        unique = self.find(name, None) if not license_no else None
+        key = ('license:' + license_no) if license_no else (unique.candidate_key if unique else None)
         key = key or ('name:' + normalize_name(name))
         candidate = self.by_key.get(key)
         if candidate is None:
@@ -49,10 +51,12 @@ class _Candidates:
         return candidate
 
     def find(self, name: str | None, license_no: str | None) -> CrawledSupplierCandidate | None:
-        if license_no and 'license:' + license_no in self.by_key:
-            return self.by_key['license:' + license_no]
-        key = self.key_by_name.get(normalize_name(name or '')) if name else None
-        return self.by_key.get(key) if key else None
+        license_no = (license_no or '').strip()
+        if license_no:
+            return self.by_key.get('license:' + license_no)
+        wanted = normalize_name(name)
+        matches = [c for c in self.by_key.values() if wanted and normalize_name(c.name) == wanted]
+        return matches[0] if len(matches) == 1 else None
 
 
 def _add_source(candidate, source_type):
@@ -78,7 +82,8 @@ class SupplierCrawlTrial:
         self.issues: list[SourceIssue] = []
 
     def _issue(self, source_type, code, message, target=None):
-        self.issues.append(SourceIssue(source_type=source_type, code=code, message=message[:300],
+        self.issues.append(SourceIssue(source_type=source_type, code=self.fetcher.preview(str(code), 80),
+                                       message=self.fetcher.preview(str(message), 300),
                                        target=self.fetcher.mask(target) if target else None))
 
     def _stats(self, source_type, run, enabled, skipped):

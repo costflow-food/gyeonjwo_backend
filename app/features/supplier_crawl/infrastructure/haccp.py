@@ -33,8 +33,8 @@ class HaccpClient:
         header, body = _header_body(payload)
         code = str(header.get('resultCode', '')).strip()
         if code and code not in OK_CODES:
-            detail = str(header.get('resultMsg') or '') or self.fetcher.preview(json.dumps(payload, ensure_ascii=False))
-            raise FetchError('HACCP_' + code, detail)
+            detail = str(header.get('resultMsg') or '') or json.dumps(payload, ensure_ascii=False)
+            raise FetchError(self.fetcher.preview('HACCP_' + code, 80), self.fetcher.preview(detail, 300))
         rows_out = _items(body)
         total = body.get('totalCount')
         total = int(total) if str(total or '').isdigit() else None
