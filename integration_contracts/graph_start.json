@@ -213,7 +213,7 @@
     "health_scope_redaction_checks": 14,
     "end_to_end_production_verified": false,
     "sql_files_created": false,
-    "agent_sources_changed": true,
+    "agent_sources_changed": false,
     "test_files_retained": false,
     "document_and_hold_checks": 5,
     "http_start_checks": 7,
@@ -225,17 +225,18 @@
   "diagram_alignment": {
     "source": "User-supplied 견줘 에이전트 그래프.html",
     "tool_limits": {
-      "INFO_EXTRACTOR": 10,
-      "CANDIDATE": 10,
-      "INFO_PRIORITY": 8,
-      "RESPONSE_PLAN": 8,
+      "INFO_EXTRACTOR": 8,
+      "CANDIDATE": 8,
+      "INFO_PRIORITY": 10,
+      "RESPONSE_PLAN": 10,
       "COUNTER_OFFER": 8
     },
     "role_calls_per_run": 6,
-    "unsupported_entry_guard": "run_graph rejects non-START jobs with GRAPH_ENTRYPOINT_NOT_CONNECTED rather than silently restarting START.",
+    "unsupported_entry_guard": "START is supported; REPLY/PLAN require GRAPH_REVIEW_V1, AGENT_GRAPH_REVIEW_ENABLED and deployed review storage/queue guards. Unsupported combinations fail closed.",
     "remaining_connection_gaps": [
       "Graph-review backend implemented, but guarded RPC deployment/integration validation is still required; see graph_review.json.",
       "Diagram still needs human candidate selection and explicit approval/dispatch boundary."
-    ]
+    ],
+    "tool_limit_authority": "feature/agents app/agents/schemas.py TOOL_CALL_LIMITS; verified 2026-11-03. These are the agent-team integration targets. This backend PR neither changes app/agents nor overrides its runtime limits; current base code may differ until the agent PR is merged."
   }
 }

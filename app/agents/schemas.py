@@ -26,8 +26,6 @@ from app.shared.domain.schemas import StrictModel
 # ─────────────────────────────────────────────
 MAX_ROLE_CALLS_PER_RUN = 6
 MAX_TOOL_CALLS_PER_AGENT_CALL = 8
-# Diagram contract: extraction/candidate need extra evidence and draft calls.
-MAX_EXTRACTION_CANDIDATE_TOOL_CALLS = 10
 READ_RETRY_LIMIT = 1
 
 DecimalStr = Annotated[str, Field(pattern=r'^-?\d+(\.\d+)?$')]
