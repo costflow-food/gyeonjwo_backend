@@ -163,31 +163,16 @@ class AgentStore:
         return list(latest.values())
 
     def latest_quote_version(self, case_id, supplier_id):
-        from app.agents.tools import QuoteVersionRecord
         self.check(case_id)
-        columns=('id,work_case_id,supplier_id,source_mail_id,version_no,supersedes_id,unit_price::text,unit,'
-                 'shipping_cost::text,available_quantity::text,effective_from,valid_until,checks_jsonb,'
-                 'pricing_terms_jsonb,cost_terms_jsonb,item_notes_jsonb,evidence_jsonb,extraction_status,currency')
-        rows=self.rows(self.repo.client.table('quote_versions').select(columns)
+        from app.features.work_cases.infrastructure.quote_snapshot import QUOTE_COLUMNS, decode_quote
+        rows=self.rows(self.repo.client.table('quote_versions').select(QUOTE_COLUMNS)
             .eq('owner_user_id',self.scope.owner).eq('work_case_id',str(case_id))
             .eq('supplier_id',str(supplier_id)).order('version_no',desc=True).limit(1))
         if not rows:
             return None
-        row=dict(rows[0]); qid=row.pop('id')
-        saved=row['pricing_terms_jsonb'].get('agent_record')
-        if saved is not None:
-            row=deepcopy(saved)
-        else:
-            # Legacy JSON objects retain all content in metadata; only known
-            # collection wrappers are interpreted as agent lists.
-            for key in ('cost_terms_jsonb','item_notes_jsonb'):
-                value=row[key]
-                if isinstance(value,dict):
-                    if value and 'items' not in value:
-                        raise ServiceError('QUOTE_CONTRACT_REQUIRED','기존 견적 저장 형식을 확인해야 합니다.',503)
-                    row[key]=value.get('items',[])
-            row.update(mail_normalized={},case_conditions=None)
-        record=QuoteVersionRecord.model_validate(row)
+        qid, record = decode_quote(rows[0])
+        if record.work_case_id != str(case_id) or record.supplier_id != str(supplier_id):
+            raise ServiceError('QUOTE_CONTRACT_REQUIRED', '견적 소유 범위를 확인해야 합니다.', 503)
         self.records[qid]=record
         return qid,record
 
@@ -227,6 +212,9 @@ class AgentStore:
             raise ServiceError('ACTION_NOT_ALLOWED','실행 범위를 벗어났습니다.',409)
         # Never persist AgentRunner.partial_tool_calls: they contain raw mail.
         self.final_output=deepcopy(output) if status=='COMPLETED' else None
+        if isinstance(self.final_output, dict) and self.final_output.get('next_action') == 'HOLD':
+            from app.features.work_cases.domain.hold import from_agent_output
+            self.final_output['hold'] = from_agent_output(self.final_output).model_dump()
 
 
 class ScopedStore:

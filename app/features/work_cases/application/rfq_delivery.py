@@ -3,6 +3,7 @@ import logging
 from app.core.errors import ServiceError
 from app.features.mailboxes.application.ingestion import message_metadata
 from app.features.work_cases.domain.rfq import AuthorizedMail
+from app.features.work_cases.domain.candidates import selected_for_dispatch
 
 logger = logging.getLogger('uvicorn.error.rfq_send')
 
@@ -17,19 +18,28 @@ class RfqDelivery:
             # No retry of SENDING/UNKNOWN/SENT, irrespective of caller keys.
             return {'status': draft['status'], 'sent_now': False}
         case = self.repo.case(owner, draft['work_case_id'])
+        if not selected_for_dispatch(draft, case):
+            return {'status': 'CANDIDATE_SELECTION_REQUIRED', 'sent_now': False}
         style = draft.get('style_snapshot_jsonb') or {}
         approved = draft.get('approved_by') == owner and bool(draft.get('approved_at'))
-        if draft.get('purpose') != 'RFQ' or style.get('producer') != 'rfq-v1':
+        review_roles = {'CLARIFICATION': 'INFO_PRIORITY', 'COUNTER_OFFER': 'COUNTER_OFFER'}
+        review = style.get('producer') == 'graph-review-v1' and draft.get('purpose') in review_roles
+        if not review and (draft.get('purpose') != 'RFQ' or style.get('producer') != 'rfq-v1'):
             raise ServiceError('ACTION_NOT_ALLOWED', '이 발송 노드의 RFQ 초안이 아닙니다.', 409)
         run = self.repo.candidate_run(owner, style.get('producer_run_id'))
-        if (run['status'] != 'COMPLETED' or run['agent_role'] != 'CANDIDATE'
+        if (run['status'] != 'COMPLETED' or run['agent_role'] != (review_roles[draft['purpose']] if review else 'CANDIDATE')
                 or run['work_case_id'] != draft['work_case_id'] or run['input_revision'] != draft['input_revision']
+                or (review and (str(case.get('current_batch_id')) != str(style.get('review_batch_id'))
+                                or str(run.get('review_batch_id')) != str(style.get('review_batch_id'))
+                                or style.get('input_revision') != case['input_revision']))
                 or (not approved and draft_id not in (run.get('output_jsonb') or {}).get('draft_ids', []))):
             return {'status': 'PREPARATION_NOT_READY', 'sent_now': False}
         if not approved:
+            if style.get('candidate_caution'):
+                return {'status': 'WAITING_APPROVAL', 'sent_now': False}
             if style.get('auto_policy_eligible') is not True:
                 return {'status': 'WAITING_APPROVAL', 'sent_now': False}
-            policy = self.repo.send_policy(owner, case, draft['recipient'])
+            policy = self.repo.send_policy(owner, case, draft['recipient'], draft['purpose'], draft['supplier_id'])
             if (not policy['auto_eligible'] or not style.get('auto_settings_version')
                     or policy.get('settings_version') != style['auto_settings_version']):
                 return {'status': 'SETTINGS_CHANGED', 'sent_now': False}
@@ -41,6 +51,13 @@ class RfqDelivery:
             return {'status': 'WAITING_APPROVAL', 'sent_now': False}
         if not approved and claimed.settings_version != style['auto_settings_version']:
             self.repo.finish_send(owner, draft_id, 'FAILED', code='SETTINGS_CHANGED')
+            return {'status': 'FAILED', 'sent_now': False}
+        if (claimed.recipient != draft['recipient'] or claimed.subject != draft['subject']
+                or claimed.body_text != draft['body_text']):
+            # Provider has not been called: this is a proven pre-send mismatch,
+            # never an uncertain send. Do not send newly changed content against
+            # the policy/preparation snapshot checked above.
+            self.repo.finish_send(owner, draft_id, 'FAILED', code='SEND_SNAPSHOT_CHANGED')
             return {'status': 'FAILED', 'sent_now': False}
         # Everything beyond here may follow a persisted SENDING. Never release
         # it or retry the provider POST on timeouts/malformed acknowledgements.

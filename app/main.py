@@ -25,6 +25,8 @@ from app.features.mailboxes.api.router import router as mailbox_router, make_mai
 from app.features.mailboxes.application.worker import ConnectedMailboxWorker
 from app.features.work_cases.api.router import router as work_cases_router
 from app.features.work_cases.api.mail_drafts import router as mail_drafts_router
+from app.features.work_cases.api.candidates import router as candidates_router
+from app.features.mail_management.api.router import router as mail_management_router
 from app.features.system.application.diagnostics import require_startup_configuration
 
 logger = logging.getLogger('gyeonjwo')
@@ -91,16 +93,21 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
                     app.state.mailbox_service, [str(x) for x in settings.rfq_metadata_owner_ids])
                 app.state.rfq_metadata_worker = rfq_worker
             if settings.agent_extraction_worker_enabled:
-                if not settings.agent_extraction_enabled or not settings.agent_stop_after_extraction:
+                if not settings.agent_extraction_enabled or (not settings.agent_graph_enabled and not settings.agent_stop_after_extraction):
                     raise RuntimeError('Enable extraction-only integration before starting its worker')
                 from app.features.work_cases.application.extraction_worker import ExtractionWorker
-                from app.features.work_cases.infrastructure.runtime_repository import CaseRuntimeRepository
+                from app.features.work_cases.infrastructure.graph_repository import runtime_repository
                 if app.state.mailbox_service is None:
                     app.state.mailbox_service = make_mailbox_service(settings)
-                repo = CaseRuntimeRepository(make_server_client(settings))
+                repo = runtime_repository(make_server_client(settings), settings)
                 if not repo.available():
                     raise RuntimeError('Extraction runtime DB contract is not ready')
-                extraction_worker = ExtractionWorker(settings, repo, app.state.mailbox_service)
+                if settings.agent_graph_enabled:
+                    from app.features.work_cases.application.graph_worker import GraphWorker
+                    extraction_worker = GraphWorker(settings, repo, app.state.mailbox_service,
+                        on_drafts_ready=rfq_workflow.wake.set if rfq_workflow else None)
+                else:
+                    extraction_worker = ExtractionWorker(settings, repo, app.state.mailbox_service)
                 app.state.extraction_worker = extraction_worker
             # Validate every dependency before any worker can process mail.
             # The sender starts last, after receiver/recovery startup succeeds.
@@ -211,6 +218,8 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     app.include_router(mailbox_router)
     app.include_router(work_cases_router)
     app.include_router(mail_drafts_router)
+    app.include_router(candidates_router)
+    app.include_router(mail_management_router)
     return app
 
 

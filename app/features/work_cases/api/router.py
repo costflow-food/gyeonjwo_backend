@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Request, Header
 from fastapi.responses import JSONResponse
@@ -8,7 +8,7 @@ from pydantic import Field
 from app.shared.domain.schemas import StrictModel
 from app.core.errors import ServiceError
 from app.features.work_cases.application.actions import WorkCaseActions, validate_action_key
-from app.features.work_cases.infrastructure.runtime_repository import CaseRuntimeRepository
+from app.features.work_cases.infrastructure.graph_repository import runtime_repository
 from app.features.work_cases.domain.actions import DeletedCase, StartedCase
 
 from app.api.responses import Envelope, api_json
@@ -26,9 +26,28 @@ from app.features.work_cases.application.case_actions import case_actions
 router = APIRouter(prefix='/api/v1/work-cases', tags=['Work cases'])
 
 
+def resume_readiness(request, repo=None, *, fresh=False):
+    readiness = extraction_readiness(request, repo, fresh=fresh)
+    if not readiness.available:
+        return readiness
+    with request.app.state.service_lock:
+        cached = getattr(request.app.state, 'resume_availability', None)
+        now = time.monotonic()
+        if not fresh and cached is not None and now < cached[0]:
+            return cached[1]
+        try:
+            repository = repo or runtime_repository(make_server_client(request.app.state.settings), request.app.state.settings)
+            result = (StartReadiness() if repository.resume_available() else
+                      StartReadiness('RESUME_INTEGRATION_REQUIRED', '보류 업무의 재개 저장 기능이 아직 연결되지 않았습니다.'))
+        except Exception:
+            result = StartReadiness('PROCESSING_UNAVAILABLE', '재개 저장소의 연결 상태를 확인할 수 없습니다.')
+        request.app.state.resume_availability = (now + 5, result)
+        return result
+
+
 def extraction_readiness(request, repo=None, *, fresh=False):
     settings = request.app.state.settings
-    for probe in (lambda: configuration_readiness(settings), agent_readiness):
+    for probe in (lambda: configuration_readiness(settings), lambda: agent_readiness(settings.agent_graph_enabled)):
         result = probe()
         if not result.available:
             return result
@@ -39,7 +58,7 @@ def extraction_readiness(request, repo=None, *, fresh=False):
             result = cached[1]
         else:
             try:
-                repository = repo or CaseRuntimeRepository(make_server_client(settings))
+                repository = repo or runtime_repository(make_server_client(settings), settings)
                 result = database_readiness(repository)
             except Exception:
                 result = StartReadiness('PROCESSING_UNAVAILABLE', '검토 실행 저장소에 연결할 수 없습니다.')
@@ -75,7 +94,7 @@ EXAMPLE = {
             'title': 'sales@example.com', 'sender': 'sales@example.com', 'sender_name': None, 'requester_name': None,
             'received_at': '2026-10-29T06:00:00.000000Z', 'status': 'Waiting',
             'processing_step': 'PENDING_START', 'input_revision': 1, 'archived_at': None,
-            'item_name': None, 'attachment_count': 1,
+            'item_name': None, 'attachment_count': 1, 'hold': None,
             'step_detail': {'code': 'PENDING_START', 'message': '원문 확인 후 검토 시작'},
             'reply_summary': {'requested_supplier_count': 0, 'responded_supplier_count': 0, 'reply_rate': None},
             'allowed_actions': ['VIEW_ORIGINAL', 'ACCEPT_INCREASE'],
@@ -110,7 +129,7 @@ def list_work_cases(
     replies in the current request round. Sidebar totals belong to the frontend.
     """
     result = service.list(principal.user_id, status=status, archived=archived, q=q, limit=limit, cursor=cursor,
-                          start_readiness=extraction_readiness(request))
+                          start_readiness=extraction_readiness(request), resume_readiness=resume_readiness(request))
     return api_json(result.model_dump(mode='json'), headers={'Cache-Control': 'private, no-store'})
 
 
@@ -118,11 +137,15 @@ class CaseActionRequest(StrictModel):
     expected_revision: int = Field(strict=True, ge=1)
 
 
+class ResumeRequest(CaseActionRequest):
+    reason: Literal['RETRY_FAILED', 'RESUME_HOLD', 'REOPEN_REVIEW', 'REOPEN_ACCEPTED']
+
+
 def get_runtime_repository(request: Request):
     with request.app.state.service_lock:
         repo = getattr(request.app.state, 'case_runtime_repository', None)
         if repo is None:
-            repo = CaseRuntimeRepository(make_server_client(request.app.state.settings))
+            repo = runtime_repository(make_server_client(request.app.state.settings), request.app.state.settings)
             request.app.state.case_runtime_repository = repo
         return repo
 
@@ -185,6 +208,39 @@ def start_case(case_id: UUID, payload: CaseActionRequest, request: Request,
     return action_response(request, principal, repo, case_id, payload, idempotency_key, 'START')
 
 
+@router.post('/{case_id}/resume', status_code=202, response_model=Envelope[StartedCase],
+             summary='추출 보류 업무 재개: EXTRACTING부터 백그라운드 실행')
+def resume_case(case_id: UUID, payload: ResumeRequest, request: Request,
+                principal=Depends(require_google_user), repo=Depends(get_runtime_repository),
+                idempotency_key: Annotated[str | None, Header(alias='Idempotency-Key')] = None):
+    """Only RESUME_HOLD is supported in this release; other defined reasons return 409.
+
+    The durable transaction replays before state/revision checks, then checks
+    ownership, latest extraction HOLD, unresolved sends and absence of live jobs.
+    No model invocation or mail sending occurs inside this HTTP request.
+    """
+    validate_action_key(idempotency_key)
+    # Resume never deletes its case: check visibility before inspecting storage
+    # readiness so foreign/missing resources consistently remain 404.
+    load_action_case(repo, principal.user_id, case_id)
+    if payload.reason != 'RESUME_HOLD':
+        raise ServiceError('ACTION_NOT_ALLOWED', '현재 재개 API는 추출 보류 업무의 재개만 지원합니다.', 409, retryable=False)
+    replay = repo.resume_receipt(principal.user_id, case_id, payload.expected_revision,
+                                 payload.reason, idempotency_key)
+    if replay is None:
+        # Visibility check is safe before readiness. Do not reject a retry on
+        # state/revision here: a concurrent transaction may already have accepted it.
+        resume_readiness(request, repo, fresh=True).require()
+    status, response = WorkCaseActions(repo, extraction_enabled=True).submit(
+        principal.user_id, case_id, payload.expected_revision, 'RESUME', idempotency_key,
+        replay_result=replay, reason=payload.reason)
+    worker = getattr(request.app.state, 'extraction_worker', None)
+    if worker is not None:
+        worker.wake.set()
+    return JSONResponse(response, status_code=status, headers={
+        'X-Request-ID': response['meta']['request_id'], 'Cache-Control': 'private, no-store'})
+
+
 @router.get('/{case_id}/progress', summary='저장된 검토 단계 조회')
 def case_progress(case_id: UUID, principal=Depends(require_google_user), repo=Depends(get_runtime_repository)):
     try:
@@ -205,7 +261,11 @@ def case_progress(case_id: UUID, principal=Depends(require_google_user), repo=De
         updated_at = iso_z(utc_time(row['updated_at'])) if row.get('updated_at') else None
     except (ValueError, AttributeError, TypeError):
         raise ServiceError('PROCESSING_UNAVAILABLE', '저장된 시각 형식을 확인할 수 없습니다.', 503) from None
+    from app.features.work_cases.infrastructure.hold_repository import HoldReasonRepository
+    hold = (HoldReasonRepository(repo.client).for_cases(principal.user_id, [row]).get(str(case_id))
+            if row['processing_step'] == 'ON_HOLD' else None)
     return api_json({'case_id': row['id'], 'status': row['status'], 'processing_step': row['processing_step'],
+                     'hold': hold.model_dump() if hold is not None else None,
                      'input_revision': row['input_revision'], 'updated_at': updated_at,
                      'batch_id': row.get('current_batch_id'), 'progress_url': f'/api/v1/work-cases/{case_id}/progress',
                      'error': {'code': code if isinstance(code, str) and code in safe_codes else 'EXTRACTION_FAILED'} if code else None})
@@ -214,7 +274,18 @@ def case_progress(case_id: UUID, principal=Depends(require_google_user), repo=De
 @router.get('/{case_id}', summary='업무의 저장 상태 조회: 실행 없음')
 def get_case(case_id: UUID, request: Request, principal=Depends(require_google_user), repo=Depends(get_runtime_repository)):
     row = load_action_case(repo, principal.user_id, case_id)
-    actions, disabled = case_actions(row, extraction_readiness(request, repo))
+    actions, disabled = case_actions(row, extraction_readiness(request, repo), resume_readiness(request, repo))
+    if 'RESUME' in actions:
+        from app.features.work_cases.infrastructure.resume_repository import ResumeEligibilityRepository
+        block = ResumeEligibilityRepository(repo.client).blocks(principal.user_id, [row]).get(str(case_id))
+        if block:
+            actions.remove('RESUME')
+            disabled.append({'action': 'RESUME', 'reason_code': block[0], 'message': block[1]})
+    if row.get('processing_step') in {'CANDIDATES', 'SELECTING_CANDIDATES'}:
+        from app.features.work_cases.infrastructure.candidate_repository import CandidateRepository
+        from app.features.work_cases.application.candidates import apply_candidate_action
+        block = CandidateRepository(repo.client).blocks(principal.user_id, [row]).get(str(case_id))
+        apply_candidate_action(row, actions, disabled, block)
     batch_id = row.pop('current_batch_id')
     return api_json({'case_id': row.pop('id'), **row,
                     'batch_id': batch_id, 'progress_url': f'/api/v1/work-cases/{case_id}/progress',

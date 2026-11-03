@@ -37,10 +37,12 @@ def ready(request: Request):
                 return JSONResponse({'status':'not_ready','mode':'google-mailbox','checks':checks},status_code=503)
             checks['gmail_worker']='running'
         checks['extraction'] = 'disabled'
+        checks['review_execution_mode'] = 'GRAPH_START' if settings.agent_graph_enabled else 'EXTRACTION_ONLY'
         if settings.agent_extraction_enabled:
             from app.features.work_cases.api.router import get_runtime_repository
             try:
-                if not settings.agent_stop_after_extraction or not get_runtime_repository(request).available():
+                if ((not settings.agent_graph_enabled and not settings.agent_stop_after_extraction)
+                        or not get_runtime_repository(request).available()):
                     raise RuntimeError('Extraction contract unavailable')
                 checks['extraction'] = 'ready'
                 if settings.agent_extraction_worker_enabled:

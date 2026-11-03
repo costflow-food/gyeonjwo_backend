@@ -20,6 +20,14 @@ class WorkCaseListRepository:
     def __init__(self, client, *, extraction_fields=True):
         self.client, self.extraction_fields = client, extraction_fields
 
+    def resume_blocks(self, owner, cases):
+        from app.features.work_cases.infrastructure.resume_repository import ResumeEligibilityRepository
+        return ResumeEligibilityRepository(self.client).blocks(owner, cases)
+
+    def candidate_blocks(self, owner, cases):
+        from app.features.work_cases.infrastructure.candidate_repository import CandidateRepository
+        return CandidateRepository(self.client).blocks(owner, cases)
+
     def rows(self, owner, snapshot, archived):
         cases, after = [], None
         try:
@@ -149,3 +157,7 @@ class WorkCaseListRepository:
             # Missing infrastructure is not a proven 0/0. No provider details or
             # contact information may escape through errors or logs.
             raise ServiceError('PROCESSING_UNAVAILABLE', '견적 회신 집계를 조회할 수 없습니다.', 503) from None
+
+    def hold_reasons(self, owner, cases):
+        from app.features.work_cases.infrastructure.hold_repository import HoldReasonRepository
+        return HoldReasonRepository(self.client).for_cases(owner, cases)

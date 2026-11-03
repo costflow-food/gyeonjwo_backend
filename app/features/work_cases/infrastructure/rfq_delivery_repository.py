@@ -7,6 +7,15 @@ from app.features.work_cases.infrastructure.rfq_repository import RfqRepository
 
 
 class RfqDeliveryRepository(RfqRepository):
+    def graph_owns_case(self, owner, case_id, batch_id):
+        if not batch_id:
+            return False
+        rows = self.data(self.client.table('agent_runs').select('id')
+            .eq('owner_user_id', str(owner)).eq('work_case_id', str(case_id))
+            .eq('review_batch_id', str(batch_id))
+            .contains('input_snapshot_jsonb', {'backend_execution_mode': 'GRAPH_START_V1'}).limit(1))
+        return bool(rows)
+
     def data(self, query):
         try:
             result = query.execute().data
@@ -45,22 +54,28 @@ class RfqDeliveryRepository(RfqRepository):
             selected.append({**row, 'contact_email': contact})
         return selected
 
-    def send_policy(self, owner, case, recipient, purpose='RFQ'):
+    def send_policy(self, owner, case, recipient, purpose='RFQ', supplier_id=None):
         now = datetime.now(timezone.utc).isoformat()
         base_query = lambda: self.client.table('mail_send_settings').select(
             'id,configured,version_no,approval_required_by_purpose,allowed_recipients_jsonb,allowed_scope_jsonb,style_jsonb')\
             .eq('owner_user_id', str(owner)).eq('mailbox_ref', case['mailbox_ref']).lte('effective_at', now)
-        case_rows = self.data(base_query().eq('work_case_id', case['id']).order('version_no', desc=True).limit(1))
-        base_rows = self.data(base_query().is_('work_case_id', 'null').order('version_no', desc=True).limit(1))
+        case_rows = self.data(base_query().eq('work_case_id', case['id']).order('effective_at', desc=True)
+                              .order('version_no', desc=True).order('id', desc=True).limit(1))
+        base_rows = self.data(base_query().is_('work_case_id', 'null').order('effective_at', desc=True)
+                              .order('version_no', desc=True).order('id', desc=True).limit(1))
         override = case_rows[0] if case_rows else None
-        chosen = override if override and purpose in override['approval_required_by_purpose'] else (base_rows[0] if base_rows else None)
+        # Null is inheritance, never an explicit OFF or an override of the base.
+        chosen = (override if override and type(override['approval_required_by_purpose'].get(purpose)) is bool
+                  else (base_rows[0] if base_rows else None))
         if not chosen:
             return {'configured': False, 'auto_eligible': False}
         approval = chosen['approval_required_by_purpose'].get(purpose)
         scope = chosen['allowed_scope_jsonb']
         configured = (chosen['configured'] is True and type(approval) is bool
             and recipient in chosen['allowed_recipients_jsonb']
-            and purpose in scope.get('purposes', []) and case['id'] in scope.get('work_case_ids', []))
+            and purpose in scope.get('purposes', []) and case['id'] in scope.get('work_case_ids', [])
+            and ('supplier_ids' not in scope or (isinstance(scope['supplier_ids'], list)
+                and supplier_id is not None and str(supplier_id) in scope['supplier_ids'])))
         return {'configured': configured, 'approval_required': approval,
                 'auto_eligible': configured and approval is False,
                 'style': chosen.get('style_jsonb') or {},
@@ -118,8 +133,14 @@ class RfqDeliveryRepository(RfqRepository):
         query = (self.client.table('mail_drafts').select('*').eq('owner_user_id', str(owner))
             .eq('work_case_id', str(case_id)).lte('created_at', snapshot)
             .order('created_at', desc=True).order('id', desc=True).limit(limit))
+        visible = ('and(or(style_snapshot_jsonb->>producer.is.null,and(style_snapshot_jsonb->>producer.neq.graph-staged-rfq-v1,style_snapshot_jsonb->>producer.neq.graph-staged-review-v1)),'
+            'or(style_snapshot_jsonb->>candidate_selection_required.is.null,style_snapshot_jsonb->>candidate_selection_required.neq.true,'
+            'and(style_snapshot_jsonb->>candidate_selection_required.eq.true,style_snapshot_jsonb->candidate_selection->>state.eq.SELECTED)))')
         if after is not None:
-            query = query.or_(f'created_at.lt.{after[0]},and(created_at.eq.{after[0]},id.lt.{after[1]})')
+            boundary = f'created_at.lt.{after[0]},and(created_at.eq.{after[0]},id.lt.{after[1]})'
+            query = query.or_(f'and({visible},or({boundary}))')
+        else:
+            query = query.or_(visible)
         return self.data(query)
 
     def submit_draft_action(self, owner, draft_id, action, payload, identity, request_id, accepting):
@@ -177,7 +198,7 @@ class RfqDeliveryRepository(RfqRepository):
                   p_revision=case['input_revision'], p_batch=case['current_batch_id'], p_step=step, p_error=error)
 
     def candidate_run(self, owner, run_id):
-        rows = self.data(self.client.table('agent_runs').select('id,work_case_id,input_revision,status,agent_role,output_jsonb')
+        rows = self.data(self.client.table('agent_runs').select('id,work_case_id,input_revision,review_batch_id,status,agent_role,output_jsonb')
             .eq('owner_user_id', str(owner)).eq('id', str(UUID(str(run_id)))).limit(1))
         if len(rows) != 1:
             raise ServiceError('PROCESSING_UNAVAILABLE', '후보 선정 실행 근거를 확인할 수 없습니다.', 503)
@@ -231,8 +252,9 @@ class RfqDeliveryRepository(RfqRepository):
     def pending(self, owner, limit=50, after=None):
         try:
             query = (self.client.table('mail_drafts').select('id,approved_by,approved_at,style_snapshot_jsonb')
-                .eq('owner_user_id', str(owner)).eq('purpose', 'RFQ').eq('status', 'DRAFT')
-                .contains('style_snapshot_jsonb', {'producer': 'rfq-v1'}).order('id').limit(limit))
+                .eq('owner_user_id', str(owner)).eq('status', 'DRAFT')
+                .or_('and(purpose.eq.RFQ,style_snapshot_jsonb->>producer.eq.rfq-v1),and(purpose.in.(CLARIFICATION,COUNTER_OFFER),style_snapshot_jsonb->>producer.eq.graph-review-v1)')
+                .order('id').limit(limit))
             if after is not None:
                 query = query.gt('id', str(UUID(str(after))))
             rows = query.execute().data

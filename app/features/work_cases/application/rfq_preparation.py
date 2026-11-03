@@ -126,7 +126,7 @@ class RfqPreparation:
                 fence()
                 row = suppliers[target['supplier_id']]
                 recipient = mailbox_address(row['contact_email'])
-                policy = self.repo.send_policy(owner, case, recipient)
+                policy = self.repo.send_policy(owner, case, recipient, 'RFQ', row['supplier_id'])
                 policies.append(policy)
                 subject, body = rfq_text(case, policy.get('style'))
                 drafts.append(self.repo.save_draft(owner, case, target, recipient, subject, body,
