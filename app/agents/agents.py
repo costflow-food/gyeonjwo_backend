@@ -1,7 +1,7 @@
 """다섯 에이전트 (07 3절). 담당 팀원은 자기 역할의 PROMPTS 지시문과 tools.py 도구를 채운다.
 
 각 에이전트는 LangChain create_agent로 만든 도구 호출 루프다. 허용 도구만 받고(tools.ROLE_TOOLS),
-호출당 도구 MAX_TOOL_CALLS_PER_AGENT_CALL회를 넘으면 실패하며, 최종 답은 schemas의 역할별 *Out 모델로 검증된다.
+호출당 도구는 추출·후보 10회, 나머지 역할 8회를 넘으면 실패하며, 최종 답은 schemas의 역할별 *Out 모델로 검증된다.
 입력은 schemas의 역할별 *In 모델(ID만)이고, 원문·정책은 도구로 조회한다.
 
 시스템 프롬프트 = 에이전트 공통 규칙(AGENT_POLICY) + 역할 이름 + PROMPTS[역할].
@@ -34,7 +34,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import ToolMessage
 from langchain_openai import ChatOpenAI
 
-from app.agents.schemas import (AGENT_IO, MAX_TOOL_CALLS_PER_AGENT_CALL, AgentInput, AgentOutput, AgentRole,
+from app.agents.schemas import (AGENT_IO, MAX_TOOL_CALLS_PER_AGENT_CALL, MAX_EXTRACTION_CANDIDATE_TOOL_CALLS, AgentInput, AgentOutput, AgentRole,
                                 RunContext)
 from app.agents.tools import EXTRACTION_FIELD_NAMES, candidate_summary, tools_for
 
@@ -347,13 +347,20 @@ def system_prompt(role: AgentRole) -> str:
     return AGENT_POLICY.format(output=AGENT_IO[role][1].__name__) + '\nRole: ' + role + '\n' + PROMPTS[role]
 
 
+def tool_call_limit(role: AgentRole) -> int:
+    role = AgentRole(role)
+    return (MAX_EXTRACTION_CANDIDATE_TOOL_CALLS
+            if role in {AgentRole.INFO_EXTRACTOR, AgentRole.CANDIDATE}
+            else MAX_TOOL_CALLS_PER_AGENT_CALL)
+
+
 def build_agent(role: AgentRole, model: BaseChatModel):
     _, output = AGENT_IO[role]
     return create_agent(
         model, tools_for(role), system_prompt=system_prompt(role),
         response_format=ToolStrategy(output),
         context_schema=RunContext,
-        middleware=[ToolCallLimitMiddleware(run_limit=MAX_TOOL_CALLS_PER_AGENT_CALL, exit_behavior='error')],
+        middleware=[ToolCallLimitMiddleware(run_limit=tool_call_limit(role), exit_behavior='error')],
         name=role.lower(),
     )
 

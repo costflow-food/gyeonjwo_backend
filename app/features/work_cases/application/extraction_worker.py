@@ -15,6 +15,9 @@ logger = logging.getLogger('uvicorn.error.case_extraction')
 
 
 class ExtractionWorker:
+    def load_adapter(self):
+        return load_extraction_adapter()
+
     def __init__(self, settings, repo, mailbox, *, runner_factory=None, attachment_repo=None):
         self.settings, self.repo, self.mailbox = settings, repo, mailbox
         self.runner_factory = runner_factory
@@ -72,7 +75,7 @@ class ExtractionWorker:
 
     def start(self):
         if not self.runner_factory:
-            self.adapter = load_extraction_adapter()
+            self.adapter = self.load_adapter()
         if not self.repo.available():
             raise ServiceError('EXTRACTION_SCHEMA_REQUIRED', '실행 DB 계약이 준비되지 않았습니다.', 503)
         self.repo.recover()  # Only expired durable leases -> FAILED, never Complete.

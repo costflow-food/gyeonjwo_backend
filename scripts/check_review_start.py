@@ -9,7 +9,7 @@ import json
 from app.core.config import get_settings
 from app.features.work_cases.application.start_readiness import (
     configuration_readiness, agent_readiness, database_readiness)
-from app.features.work_cases.infrastructure.runtime_repository import CaseRuntimeRepository
+from app.features.work_cases.infrastructure.graph_repository import runtime_repository
 from app.shared.infrastructure.db.client import make_server_client
 
 
@@ -18,14 +18,15 @@ def main():
     parser.add_argument('--db', action='store_true', help='Read-only DB health RPC; no migration or writes.')
     args = parser.parse_args()
     settings = get_settings()
-    stages = {'configuration': configuration_readiness(settings), 'agent': agent_readiness()}
+    stages = {'configuration': configuration_readiness(settings), 'agent': agent_readiness(settings.agent_graph_enabled)}
     if args.db:
         try:
-            stages['database'] = database_readiness(CaseRuntimeRepository(make_server_client(settings)))
+            stages['database'] = database_readiness(runtime_repository(make_server_client(settings), settings))
         except Exception:
             from app.features.work_cases.application.start_readiness import StartReadiness
             stages['database'] = StartReadiness('PROCESSING_UNAVAILABLE', 'DB 연결 설정을 확인해 주세요.')
-    report = {'scope': 'prerequisites_only', 'checks': {
+    report = {'scope': 'prerequisites_only',
+        'execution_mode': 'GRAPH_START' if settings.agent_graph_enabled else 'EXTRACTION_ONLY', 'checks': {
         key: {'ready': value.available, 'code': value.code, 'fields': list(value.fields)}
         for key, value in stages.items()},
         'worker_setting_enabled': settings.agent_extraction_worker_enabled,

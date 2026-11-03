@@ -158,5 +158,6 @@
     "Service-role-only RPCs; never accept owner/batch/recipient lists outside validated server scope.",
     "Never log bodies, tokens, filenames, contact details, model prompts or responses. Errors expose fixed safe codes/messages only.",
     "No Gmail/LLM calls or mail sending performed during development verification."
-  ]
+  ],
+  "candidate_selection_policy": "Per-case API-12 determines targets. API-22 allowed_supplier_ids remains an independent existing permission restriction pending explicit team agreement; selection never widens settings. See candidate_selection.json."
 }
