@@ -30,7 +30,7 @@
 | store_structured_mail     | ①     | 필드·단가 구간·비용·품목 비고·근거 → 견적 버전 ID               | 서버 검증 후 저장, 임의 SQL 불가  |
 | search_supplier_items     | ②     | 검색어 → 품목명에 검색어가 든 등록 품목(업체·품목·규격)          | 가격 없음, 결과 상한              |
 | search_supplier_evidence  | ②     | 같은 품목으로 고른 등록 품목 → 취급 근거·후보                   | 과거 단가를 현재 가격으로 안 줌   |
-| crawl_supplier_candidates | ②     | 허용 출처·조건 → 잠정 후보·연락처·출처 시점 (Should)            | 잠정 후보, 회신으로 확인          |
+| crawl_supplier_candidates | 미노출 | 허용 출처·조건 → 잠정 후보·연락처·출처 시점 (Should)            | 잠정 후보, 회신으로 확인          |
 | check_comparability       | ③④⑤   | 견적 버전·정책 → 누락·불일치·비교 범위                          | 필수·가중 조건 구분               |
 | calculate_break_even      | ③     | 확인된 비용·제약 → 역전 기준 금액·산식                          | 미확인 금액을 0원으로 보지 않음   |
 | build_plan_candidates     | ④     | 견적·정책 → 유지·전환·분산(최대 2곳) 안                          | 단가 구간·MOQ·납기·비용 중복 검사 |
@@ -42,12 +42,32 @@
 | create_counter_offer_draft| ⑤     | 목표 단가·조건·비교한 대안 → 다시 검증 후 역제안 초안 ID          | 내부 저장만, 발송은 백엔드        |
 """
 import dataclasses
+import ipaddress
+import select
+import socket
+import ssl
+import time
+from contextlib import closing
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from html.parser import HTMLParser
+from typing import Callable
+from urllib.parse import quote, quote_plus, urljoin, urlsplit, urlunsplit
+from urllib.robotparser import RobotFileParser
+
+import httpcore
+import httpx
+from pydantic import SecretStr, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.config import ROOT
+
 import hashlib
 import json
 import re
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Literal, Protocol
+from typing import Annotated, Literal, Protocol
 
 from langchain.tools import ToolRuntime
 from langchain_core.tools import BaseTool, tool
@@ -63,7 +83,7 @@ _READ = ('get_case_context', 'read_mail_evidence')
 
 ROLE_TOOLS = {
     AgentRole.INFO_EXTRACTOR: _READ + ('store_structured_mail',),
-    AgentRole.CANDIDATE: _READ + ('search_supplier_items', 'search_supplier_evidence', 'crawl_supplier_candidates',
+    AgentRole.CANDIDATE: _READ + ('search_supplier_items', 'search_supplier_evidence',
                                   'create_rfq_draft'),
     AgentRole.INFO_PRIORITY: _READ + ('check_comparability', 'calculate_break_even', 'create_clarification_draft'),
     AgentRole.RESPONSE_PLAN: _READ + ('check_comparability', 'build_plan_candidates', 'validate_purchase_plan'),
@@ -2405,3 +2425,1288 @@ def revalidate_counter_offer(store: CounterOfferStore, case_id: str, input_revis
     checked = check_counter_target(store, context, target['target_unit_price'], alternative)
     return {'check': 'PASS' if checked['status'] == 'VALID' else 'FIX',
             'reason': None if checked['status'] == 'VALID' else json.dumps(checked['violations'], ensure_ascii=False)}
+
+
+# PR #33 collection only. Deliberately @tool without @register or ROLE_TOOLS access.
+# ---- PR #33: domain/names.py ----
+_COMPANY_MARKS = re.compile(r'\(주\)|㈜|\(유\)|\(농\)|주식회사|유한회사|농업회사법인|영농조합법인|농업법인|협동조합')
+
+
+def normalize_name(name: str | None) -> str:
+    text = _COMPANY_MARKS.sub('', name or '')
+    return re.sub(r'[\s\W_]+', '', text).lower()
+
+
+def normalize_item_type(value: str | None) -> str:
+    """품목유형 표기 차이(과·채가공품 / 과.채가공품 / 과 채가공품)를 없앤다."""
+    return re.sub(r'[\s.·ㆍ\-]+', '', value or '')
+
+
+def region_of(address: str | None) -> str | None:
+    """소재지에서 시·군·구 이름 하나를 꺼낸다(검색어 보조용)."""
+    for token in (address or '').split()[1:3]:
+        if token.endswith(('시', '군', '구')):
+            return token
+    return None
+
+
+# ---- PR #33: domain/schemas.py ----
+CrawlSourceType = Literal['PUBLIC_DATA', 'HACCP', 'HOMEPAGE']
+CrawlContactType = Literal['PHONE', 'EMAIL', 'HOMEPAGE']
+
+
+
+
+class CrawlSourceRef(StrictModel):
+    """값 하나의 출처. source_url에는 인증키가 남지 않도록 마스킹한 주소만 담는다."""
+    source_type: CrawlSourceType
+    source_url: str
+    fetched_at: datetime
+    record_ref: str | None = None  # 인허가번호·품목제조보고번호·페이지 경로 등 원문 대조용 키
+    snippet: str | None = Field(default=None, max_length=300)
+
+
+class CrawlContact(StrictModel):
+    contact_type: CrawlContactType
+    value: str
+    evidence: CrawlSourceRef
+
+
+class CrawlHandledItem(StrictModel):
+    item_name: str
+    item_type: str | None = None
+    evidence: CrawlSourceRef
+
+
+class CrawlCertification(StrictModel):
+    """웹·공공데이터의 인증 표시. 필수 인증 충족 판단은 체크리스트 회신으로 한다."""
+    certification_type: Literal['HACCP']
+    certification_no: str | None = None
+    item_type: str | None = None
+    valid_from: str | None = None
+    valid_until: str | None = None
+    evidence: CrawlSourceRef
+
+
+class CrawlCandidate(StrictModel):
+    candidate_key: str
+    name: str
+    license_no: str | None = None
+    location: str | None = None
+    contacts: list[CrawlContact] = Field(default_factory=list)
+    handled_items: list[CrawlHandledItem] = Field(default_factory=list)
+    certifications: list[CrawlCertification] = Field(default_factory=list)
+    source_types: list[CrawlSourceType] = Field(default_factory=list)
+    checklist_status: Literal['UNCONFIRMED'] = 'UNCONFIRMED'
+    verified_supplier_id: None = None
+
+
+class CrawlSourceIssue(StrictModel):
+    source_type: CrawlSourceType
+    code: str
+    message: str
+    target: str | None = None
+
+
+class CrawlSourceStats(StrictModel):
+    source_type: CrawlSourceType
+    enabled: bool
+    skipped_reason: str | None = None
+    requests: int = 0
+    failed_requests: int = 0
+    records: int = 0
+    candidates: int = 0
+    elapsed_seconds: float = 0.0
+
+
+class CrawlReport(StrictModel):
+    keyword: str
+    started_at: datetime
+    finished_at: datetime
+    sources: list[CrawlSourceStats]
+    candidates: list[CrawlCandidate]
+    fill_rates: dict[str, str]
+    issues: list[CrawlSourceIssue]
+
+
+# ---- PR #33: infrastructure/config.py ----
+class CrawlSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=ROOT / '.env', extra='ignore')
+    # 식품안전나라 Open API 인증키 (품목제조보고·식품제조가공업 인허가)
+    food_safety_api_key: SecretStr | None = None
+    # 공공데이터포털 인증키 (한국식품안전관리인증원 HACCP 업체 정보)
+    data_go_kr_service_key: SecretStr | None = None
+    # 활용가이드 요청 예제 기준 오퍼레이션 경로 (상세기능 표의 getFoodCompanyListService와 다르면 .env로 바꾼다)
+    haccp_api_url: str = 'https://apis.data.go.kr/B553748/FoodCompanyListService/getFoodCompanyList'
+    # 네이버 지역 검색 API — NAVER API HUB 키(업체 홈페이지 주소 찾기). 없으면 시드 파일만 사용한다.
+    naver_local_url: str = 'https://naverapihub.apigw.ntruss.com/search/v1/local'
+    naver_webkr_url: str = 'https://naverapihub.apigw.ntruss.com/search/v1/webkr'
+    naver_client_id: str = ''
+    naver_client_secret: SecretStr | None = None
+    crawl_user_agent: str = 'GyeonjwoSupplierTrial/0.1'
+    crawl_delay_seconds: float = Field(default=1.0, ge=0.5, le=10)
+    crawl_timeout_seconds: float = Field(default=10, ge=3, le=30)
+    crawl_max_pages_per_site: int = Field(default=4, ge=1, le=10)
+
+    @field_validator('food_safety_api_key', 'data_go_kr_service_key', 'naver_client_secret', mode='before')
+    @classmethod
+    def empty_secret(cls, value):
+        return None if isinstance(value, str) and not value.strip() else value
+
+    def secrets(self) -> list[str]:
+        values = [self.food_safety_api_key, self.data_go_kr_service_key, self.naver_client_secret]
+        return [value.get_secret_value() for value in values if value and value.get_secret_value()]
+
+
+# ---- PR #33: infrastructure/network.py ----
+class UnsafeAddress(ValueError):
+    pass
+
+
+def public_address(value: str) -> bool:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    if not address.is_global or address.is_multicast or address.is_reserved:
+        return False
+    if isinstance(address, ipaddress.IPv6Address):
+        # Do not let transition/mapped forms disguise IPv4 destinations.
+        if address.ipv4_mapped or address.sixtofour or address.teredo or address.is_site_local:
+            return False
+        if address in ipaddress.ip_network('64:ff9b::/96'):
+            return False
+    return True
+
+
+def resolve_public(host: str, port: int) -> list[str]:
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if not public_address(host):
+            raise UnsafeAddress('Non-public address')
+        return [str(literal)]
+    try:
+        answers = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
+    except OSError:
+        raise httpcore.ConnectError('DNS lookup failed') from None
+    addresses = []
+    for family, _, _, _, sockaddr in answers:
+        if family not in (socket.AF_INET, socket.AF_INET6) or not public_address(sockaddr[0]):
+            raise UnsafeAddress('Non-public DNS answer')
+        if sockaddr[0] not in addresses:
+            addresses.append(sockaddr[0])
+    if not addresses:
+        raise UnsafeAddress('Empty DNS answer')
+    return addresses
+
+
+class _SocketStream(httpcore.NetworkStream):
+    def __init__(self, sock):
+        self.sock = sock
+
+    def read(self, max_bytes, timeout=None):
+        try:
+            self.sock.settimeout(timeout)
+            return self.sock.recv(max_bytes)
+        except socket.timeout:
+            raise httpcore.ReadTimeout('Read timed out') from None
+        except OSError:
+            raise httpcore.ReadError('Read failed') from None
+
+    def write(self, buffer, timeout=None):
+        try:
+            self.sock.settimeout(timeout)
+            self.sock.sendall(buffer)
+        except socket.timeout:
+            raise httpcore.WriteTimeout('Write timed out') from None
+        except OSError:
+            raise httpcore.WriteError('Write failed') from None
+
+    def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        try:
+            self.sock.settimeout(timeout)
+            return _SocketStream(ssl_context.wrap_socket(self.sock, server_hostname=server_hostname))
+        except socket.timeout:
+            self.close()
+            raise httpcore.ConnectTimeout('TLS handshake timed out') from None
+        except OSError:
+            self.close()
+            raise httpcore.ConnectError('TLS handshake failed') from None
+
+    def get_extra_info(self, info):
+        if info == 'ssl_object' and isinstance(self.sock, ssl.SSLSocket):
+            return self.sock
+        if info == 'server_addr':
+            return self.sock.getpeername()
+        if info == 'client_addr':
+            return self.sock.getsockname()
+        if info == 'socket':
+            return self.sock
+        if info == 'is_readable':
+            return bool(select.select([self.sock], [], [], 0)[0])
+        return None
+
+    def close(self):
+        self.sock.close()
+
+
+class _PublicBackend(httpcore.NetworkBackend):
+    def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        addresses = resolve_public(host, port)
+        last_error = None
+        for address in addresses:
+            sock = None
+            try:
+                family = socket.AF_INET6 if ipaddress.ip_address(address).version == 6 else socket.AF_INET
+                sock = socket.socket(family, socket.SOCK_STREAM)
+                sock.settimeout(timeout)
+                for option in socket_options or ():
+                    sock.setsockopt(*option)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                if local_address is not None:
+                    sock.bind((local_address, 0))
+                # Canonical numeric sockaddr: no create_connection/getaddrinfo
+                # on the hostname is permitted between validation and connect.
+                sock.connect((address, port))
+                peer = sock.getpeername()
+                if (not peer or not public_address(peer[0])
+                        or ipaddress.ip_address(peer[0]) != ipaddress.ip_address(address)
+                        or peer[1] != port):
+                    raise UnsafeAddress('Connected peer does not match validated address')
+                return _SocketStream(sock)
+            except (socket.timeout, OSError) as error:
+                last_error = (httpcore.ConnectTimeout('Connection timed out') if isinstance(error, socket.timeout)
+                              else httpcore.ConnectError('Connection failed'))
+                if sock is not None:
+                    sock.close()
+            except BaseException:
+                if sock is not None:
+                    sock.close()
+                raise
+        raise last_error or httpcore.ConnectError('No public address available')
+
+
+class _ResponseStream(httpx.SyncByteStream):
+    def __init__(self, stream):
+        self.stream = stream
+
+    def __iter__(self):
+        yield from self.stream
+
+    def close(self):
+        self.stream.close()
+
+
+class PublicHTTPTransport(httpx.BaseTransport):
+    def __init__(self):
+        self.pool = httpcore.ConnectionPool(ssl_context=ssl.create_default_context(),
+                                           network_backend=_PublicBackend(), retries=0)
+
+    def handle_request(self, request):
+        # Keep origin/Host/SNI intact; pinning belongs to the TCP backend only.
+        response = self.pool.handle_request(httpcore.Request(
+            method=request.method,
+            url=httpcore.URL(scheme=request.url.raw_scheme, host=request.url.raw_host,
+                             port=request.url.port, target=request.url.raw_path),
+            headers=request.headers.raw, content=request.stream, extensions=request.extensions))
+        return httpx.Response(response.status, headers=response.headers,
+                              stream=_ResponseStream(response.stream), extensions=response.extensions)
+
+    def close(self):
+        self.pool.close()
+
+
+# ---- PR #33: infrastructure/http.py ----
+MAX_RESPONSE_BYTES = 2_000_000
+_KEY_PARAMS = re.compile(r'(?i)((?:service_?key|apikey|api_key|key)=)[^&#]+')
+_CREDENTIAL_HEADERS = {'authorization', 'proxy-authorization', 'cookie',
+    'x-ncp-apigw-api-key', 'x-ncp-apigw-api-key-id',
+    'x-naver-client-secret', 'x-naver-client-id'}
+
+
+def _origin(url: httpx.URL) -> tuple[str, str, int]:
+    port = url.port if url.port is not None else (443 if url.scheme == 'https' else 80)
+    return url.scheme, url.host, port
+
+
+class FetchError(Exception):
+    def __init__(self, code: str, message: str):
+        self.code, self.message = code, message
+        super().__init__(code)
+
+
+def now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def mask_url(url: str, secrets: list[str]) -> str:
+    masked = _KEY_PARAMS.sub(r'\1***', url)
+    for secret in secrets:
+        if secret:
+            forms = {secret, quote(secret, safe=''), quote_plus(secret, safe='')}
+            forms |= {json.dumps(form, ensure_ascii=ascii_only)[1:-1]
+                      for form in tuple(forms) for ascii_only in (False, True)}
+            for form in sorted(forms, key=len, reverse=True):
+                # Percent escapes are case-insensitive; secret text is not.
+                pattern = ''.join('%' + ''.join(f'[{c.lower()}{c.upper()}]' if c.isalpha() else c
+                                                for c in token[1:])
+                                  if re.fullmatch(r'%[0-9A-Fa-f]{2}', token) else re.escape(token)
+                                  for token in re.findall(r'%[0-9A-Fa-f]{2}|.', form, re.DOTALL))
+                masked = re.sub(pattern, lambda _: '***', masked)
+    return masked
+
+
+def is_public_web_url(url: str) -> bool:
+    """URL 형식·리터럴 주소 검사. DNS와 연결 IP 검사는 Fetcher와 TCP backend에서 한다."""
+    try:
+        parts = urlsplit(url)
+        parts.port  # Reject malformed/out-of-range ports without raising to callers.
+    except ValueError:
+        return False
+    if parts.scheme not in ('http', 'https') or not parts.hostname:
+        return False
+    if parts.username is not None or parts.password is not None:
+        return False
+    host = parts.hostname.lower().rstrip('.')
+    if host == 'localhost' or host.endswith('.localhost') or host.endswith('.local'):
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return '.' in host and '%' not in host
+    return public_address(str(address))
+
+
+class Fetcher:
+    """요청 수·실패 수를 세고, 같은 호스트에는 crawl_delay_seconds 간격을 지킨다."""
+
+    def __init__(self, settings, transport=None, sleep=time.sleep, clock=time.monotonic):
+        self.settings = settings
+        self.secrets = settings.secrets()
+        self.requests = 0
+        self.failed = 0
+        self._sleep, self._clock = sleep, clock
+        self._last_by_host: dict[str, float] = {}
+        self._client = httpx.Client(timeout=settings.crawl_timeout_seconds,
+                                    transport=transport if transport is not None else PublicHTTPTransport(),
+                                    follow_redirects=False, trust_env=False,
+                                    headers={'User-Agent': settings.crawl_user_agent,
+                                             # 일부 공공 API가 압축 헤더와 실제 본문이 달라 해제 오류가 난다. 압축 없이 받는다.
+                                             'Accept-Encoding': 'identity'})
+
+    def close(self):
+        self._client.close()
+
+    def mask(self, url: str) -> str:
+        return mask_url(url, self.secrets)
+
+    def _has_credentials(self, request: httpx.Request) -> bool:
+        return bool(_CREDENTIAL_HEADERS.intersection(request.headers)
+                    or any(self.mask(value) != value for value in request.headers.values())
+                    or self.mask(str(request.url)) != str(request.url))
+
+    def preview(self, text: str, limit: int = 160) -> str:
+        """오류 확인용 본문 앞부분. 인증키는 가린다."""
+        return re.sub(r'\s+', ' ', self.mask(text or ''))[:limit]
+
+    def _wait(self, host: str):
+        last = self._last_by_host.get(host)
+        if last is not None:
+            remaining = self.settings.crawl_delay_seconds - (self._clock() - last)
+            if remaining > 0:
+                self._sleep(remaining)
+        self._last_by_host[host] = self._clock()
+
+    def get(self, url: str, *, headers: dict | None = None, params: dict | None = None,
+            timeout: float | None = None,
+            redirect_allowed: Callable[[str], bool] | None = None) -> httpx.Response:
+        try:
+            options = {'timeout': timeout} if timeout else {}
+            request = self._client.build_request('GET', url, headers=headers, params=params, **options)
+            initial_origin = _origin(request.url)
+            initial_authenticated = self._has_credentials(request)
+            for hop in range(4):
+                if not is_public_web_url(str(request.url)):
+                    raise FetchError('URL_NOT_ALLOWED', '공개 웹 주소만 허용합니다.')
+                # This guards every hop, including injected offline transports.
+                # The default backend independently validates and pins at connect.
+                resolve_public(request.url.host, request.url.port or (443 if request.url.scheme == 'https' else 80))
+                self._wait(request.url.host)
+                self.requests += 1
+                with closing(self._client.send(request, stream=True)) as response:
+                    if response.has_redirect_location:
+                        if hop == 3:
+                            raise FetchError('REDIRECT_LIMIT', '리다이렉트 한도를 초과했습니다.')
+                        target = response.next_request
+                        if target is None:
+                            raise FetchError('INVALID_REDIRECT', '리다이렉트 주소가 없습니다.')
+                        # Callers such as HomepageCrawler impose a narrower site
+                        # and robots boundary, before DNS or destination I/O.
+                        if redirect_allowed is not None and not redirect_allowed(str(target.url)):
+                            raise FetchError('REDIRECT_NOT_ALLOWED', '수집 범위를 벗어나는 이동을 차단했습니다.')
+                        # Keep the initial credential boundary even if a same-origin
+                        # hop rewrites, percent-encodes or removes the credentials.
+                        leaves_authenticated_origin = (initial_authenticated
+                                                       and _origin(target.url) != initial_origin)
+                        # Also preserve checks for credentials introduced on later hops.
+                        if (leaves_authenticated_origin
+                                or (_origin(target.url) != _origin(request.url)
+                                    and (self._has_credentials(request)
+                                         or self.mask(str(target.url)) != str(target.url)))):
+                            raise FetchError('AUTH_REDIRECT_BLOCKED', '인증 요청의 다른 origin 이동을 차단했습니다.')
+                        request = target
+                        continue
+                    chunks, size = [], 0
+                    for chunk in response.iter_bytes():
+                        size += len(chunk)
+                        if size > MAX_RESPONSE_BYTES:
+                            raise FetchError('RESPONSE_TOO_LARGE', '응답이 수집 한도보다 큽니다.')
+                        chunks.append(chunk)
+                    return httpx.Response(response.status_code, headers=response.headers, content=b''.join(chunks),
+                                          request=response.request)
+        except UnsafeAddress:
+            self.failed += 1
+            raise FetchError('URL_NOT_ALLOWED', '공개 인터넷 주소만 허용합니다.') from None
+        except FetchError:
+            self.failed += 1
+            raise
+        except (httpx.TimeoutException, httpcore.TimeoutException):
+            self.failed += 1
+            raise FetchError('TIMEOUT', '응답 시간이 초과됐습니다.') from None
+        except httpx.DecodingError:
+            self.failed += 1
+            raise FetchError('DECODING_ERROR', '응답 본문 압축을 풀 수 없습니다.') from None
+        except (httpx.HTTPError, httpcore.NetworkError, httpcore.ProtocolError) as error:
+            self.failed += 1
+            raise FetchError('NETWORK_ERROR', type(error).__name__) from None
+
+    def get_json(self, url: str, *, headers: dict | None = None, params: dict | None = None,
+                 timeout: float | None = None):
+        response = self.get(url, headers=headers, params=params, timeout=timeout)
+        if response.status_code != 200:
+            self.failed += 1
+            raise FetchError(f'HTTP_{response.status_code}', '정상 응답이 아닙니다. 본문 앞부분: ' + self.preview(response.text))
+        try:
+            return response.json()
+        except ValueError:
+            self.failed += 1
+            code, message = _xml_error(self.mask(response.text))
+            if code == 'NOT_JSON':
+                message += ' 본문 앞부분: ' + self.preview(response.text)
+            raise FetchError(self.preview(code, 80), self.preview(message, 300)) from None
+
+
+def _xml_error(text: str) -> tuple[str, str]:
+    """공공데이터포털은 인증 오류를 JSON 요청에도 XML로 돌려준다. 코드·메시지만 꺼낸다."""
+    def tag(name):
+        found = re.search(rf'<{name}>([^<]{{1,200}})</{name}>', text or '')
+        return found.group(1).strip() if found else None
+    code = tag('returnReasonCode') or tag('resultCode')
+    message = tag('returnAuthMsg') or tag('resultMsg') or tag('errMsg')
+    if code or message:
+        return 'API_' + (code or 'ERROR'), message or '오류 응답'
+    return 'NOT_JSON', 'JSON 응답이 아닙니다. 인증키·주소·응답 형식을 확인하세요.'
+
+
+# ---- PR #33: infrastructure/public_data.py ----
+BASE_URL = 'https://openapi.foodsafetykorea.go.kr/api'
+ITEM_REPORT_SERVICE = 'I1250'   # 식품(첨가물)품목제조보고
+BUSINESS_SERVICE = 'I1220'      # 식품제조가공업 인허가
+MAX_ROWS_PER_CALL = 1000
+_PUBLIC_OK_CODES = {'INFO-000'}
+EMPTY_CODES = {'INFO-200'}
+
+# 업체 단위 항목만 읽는다. 대표자명 등 개인 이름 필드는 읽지 않는다.
+ITEM_FIELDS = {'license_no': 'LCNS_NO', 'name': 'BSSH_NM', 'report_no': 'PRDLST_REPORT_NO',
+               'item_name': 'PRDLST_NM', 'item_type': 'PRDLST_DCNM', 'reported_on': 'PRMS_DT',
+               'production_ended': 'PRODUCTION'}
+# I1220 실제 응답(공개 샘플 2026-11-02 확인): 소재지는 LOCP_ADDR, 업종은 INDUTY_NM. TELNO는 빈 값이 많다.
+BUSINESS_FIELDS = {'license_no': 'LCNS_NO', 'name': 'BSSH_NM', 'phone': 'TELNO', 'address': 'LOCP_ADDR',
+                   'business_type': 'INDUTY_NM'}
+
+
+class PublicDataClient:
+    def __init__(self, fetcher: Fetcher, api_key: str):
+        self.fetcher, self.api_key = fetcher, api_key
+
+    def _url(self, service: str, start: int, end: int, param: str, value: str) -> str:
+        return f'{BASE_URL}/{quote(self.api_key, safe="")}/{service}/json/{start}/{end}/{param}={quote(value, safe="")}'
+
+    def _rows(self, service: str, url: str) -> tuple[list[dict], list[str]]:
+        payload = self.fetcher.get_json(url)
+        body = payload.get(service) if isinstance(payload, dict) else None
+        if not isinstance(body, dict):
+            result = payload.get('RESULT', {}) if isinstance(payload, dict) else {}
+            raise FetchError(self.fetcher.preview(str(result.get('CODE') or 'UNEXPECTED_SHAPE'), 80),
+                             self.fetcher.preview(str(result.get('MSG') or '응답 형식이 명세와 다릅니다.'), 300))
+        code = (body.get('RESULT') or {}).get('CODE')
+        if code in EMPTY_CODES:
+            return [], []
+        if code not in _PUBLIC_OK_CODES:
+            raise FetchError(self.fetcher.preview(str(code or 'UNKNOWN_RESULT'), 80),
+                             self.fetcher.preview(str((body.get('RESULT') or {}).get('MSG')
+                                                      or '결과 코드를 확인할 수 없습니다.'), 300))
+        rows = [row for row in body.get('row') or [] if isinstance(row, dict)]
+        return rows, sorted({key for row in rows for key in row})
+
+    def item_reports(self, keyword: str, limit: int) -> tuple[list[dict], str, list[str]]:
+        """품목명에 keyword가 든 품목제조보고. (매핑한 행, 마스킹한 출처 URL, 응답 필드 이름)"""
+        url = self._url(ITEM_REPORT_SERVICE, 1, min(limit, MAX_ROWS_PER_CALL), 'PRDLST_NM', keyword)
+        rows, fields = self._rows(ITEM_REPORT_SERVICE, url)
+        return [_public_pick(row, ITEM_FIELDS) for row in rows], self.fetcher.mask(url), fields
+
+    def business(self, license_no: str) -> tuple[dict | None, str, list[str]]:
+        url = self._url(BUSINESS_SERVICE, 1, 5, 'LCNS_NO', license_no)
+        rows, fields = self._rows(BUSINESS_SERVICE, url)
+        exact = [row for row in rows if str(row.get('LCNS_NO', '')).strip() == license_no]
+        return (_public_pick(exact[0], BUSINESS_FIELDS) if exact else None), self.fetcher.mask(url), fields
+
+
+def _public_pick(row: dict, mapping: dict) -> dict:
+    picked = {}
+    for name, field in mapping.items():
+        value = row.get(field)
+        picked[name] = str(value).strip() if value not in (None, '') else None
+    return picked
+
+
+def missing_fields(seen: list[str], mapping: dict) -> list[str]:
+    """명세상 필드 중 실제 응답에 없는 이름. 첫 시험에서 필드명 확인용."""
+    return [field for field in mapping.values() if seen and field not in seen]
+
+
+# ---- PR #33: infrastructure/haccp.py ----
+FIELDS = {'license_no': 'licenseno', 'certification_no': 'appointno', 'name': 'company',
+          'business_type': 'businessnm', 'item_type': 'species', 'sido': 'sido', 'sgg': 'sgg',
+          'valid_from': 'issuedate', 'valid_until': 'issueenddate'}
+_HACCP_OK_CODES = {'00', '0', '0000', 'OK', 'INFO-000'}  # 실제 성공 응답은 'OK'(2026-11-02 시험)
+MAX_ROWS = 100  # 1000건 요청은 결과 코드 13으로 거절됐다(2026-11-02 시험).
+TIMEOUT_SECONDS = 30  # 100건 응답이 10초를 넘긴 적이 있다(2026-11-02 시험). 시간 초과는 한 번 다시 시도한다.
+
+
+class HaccpClient:
+    def __init__(self, fetcher: Fetcher, service_key: str, url: str):
+        self.fetcher, self.service_key, self.url = fetcher, service_key, url.rstrip('/')
+
+    def page(self, page_no: int, rows: int) -> tuple[list[dict], int | None, str, list[str]]:
+        # 활용가이드 표기는 retunType이지만 실제로는 returnType에만 JSON으로 답한다(2026-11-02 시험). 둘 다 보낸다.
+        params = {'ServiceKey': self.service_key, 'returnType': 'json', 'retunType': 'json',
+                  'pageNo': str(page_no), 'numOfRows': str(min(rows, MAX_ROWS))}
+        try:
+            payload = self.fetcher.get_json(self.url, params=params, timeout=TIMEOUT_SECONDS)
+        except FetchError as error:
+            if error.code != 'TIMEOUT':
+                raise
+            payload = self.fetcher.get_json(self.url, params=params, timeout=TIMEOUT_SECONDS)
+        masked = self.fetcher.mask(self.url + '?pageNo=' + str(page_no) + '&numOfRows=' + str(rows))
+        header, body = _header_body(payload)
+        code = str(header.get('resultCode', '')).strip()
+        if code and code not in _HACCP_OK_CODES:
+            detail = str(header.get('resultMsg') or '') or json.dumps(payload, ensure_ascii=False)
+            raise FetchError(self.fetcher.preview('HACCP_' + code, 80), self.fetcher.preview(detail, 300))
+        rows_out = _items(body)
+        total = body.get('totalCount')
+        total = int(total) if str(total or '').isdigit() else None
+        fields = sorted({key for row in rows_out for key in row})
+        return [_haccp_pick(row) for row in rows_out], total, masked, fields
+
+
+def _header_body(payload) -> tuple[dict, dict]:
+    if not isinstance(payload, dict):
+        raise FetchError('UNEXPECTED_SHAPE', '응답 형식이 명세와 다릅니다.')
+    root = payload.get('response', payload)
+    header = root.get('header') or {}
+    body = root.get('body') or {}
+    if not isinstance(body, dict):
+        raise FetchError('UNEXPECTED_SHAPE', '응답 body를 찾을 수 없습니다.')
+    return header, body
+
+
+def _items(body: dict) -> list[dict]:
+    items = body.get('items')
+    if isinstance(items, dict):
+        items = items.get('item', [])
+    if isinstance(items, dict):
+        items = [items]
+    # 실제 응답은 items가 [{"item": {...}}, ...] 형태다(2026-11-02 시험). 가이드 예제 형태도 함께 받는다.
+    rows = []
+    for row in items or []:
+        if isinstance(row, dict) and isinstance(row.get('item'), dict):
+            rows.append(row['item'])
+        elif isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _haccp_pick(row: dict) -> dict:
+    return {name: (str(row[field]).strip() if row.get(field) not in (None, '') else None)
+            for name, field in FIELDS.items()}
+
+
+# ---- PR #33: infrastructure/homepage.py ----
+# NAVER API HUB(네이버 클라우드) 지역 검색. 개발자센터 신규 등록이 끝나 HUB 키 기준으로 부른다.
+# 예전 개발자센터 키를 쓰면 NAVER_LOCAL_URL을 https://openapi.naver.com/v1/search/local.json 으로 바꾼다.
+CONTACT_HINTS = ('contact', 'about', 'company', 'cs', 'customer', 'inquiry', 'qna', 'location', 'map',
+                 '연락', '문의', '고객', '회사소개', '기업소개', '오시는', '찾아오시는', '회사정보', '인사말')
+EMAIL = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')
+PHONE = re.compile(r'(?<!\d)(0\d{1,2}[-.)\s]\d{3,4}[-.\s]\d{4}|1[5-9]\d{2}-\d{4})(?!\d)')
+IGNORED_EMAIL_SUFFIXES = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg')
+PLACEHOLDER_DOMAINS = ('example.com', 'domain.com', 'email.com', 'yourdomain', 'sentry.io')
+TAG = re.compile(r'<[^>]+>')
+# 지역 검색 링크가 업체 홈페이지가 아니라 플랫폼 계정인 경우(2026-11-02 시험: 유튜브 채널에서 유튜브 지원 메일을 수집함).
+# 이런 링크는 업체 연락처 근거가 아니므로 크롤링하지 않고 건너뛴 수만 남긴다.
+PLATFORM_DOMAINS = ('youtube.com', 'youtu.be', 'smartstore.naver.com', 'blog.naver.com', 'cafe.naver.com',
+                    'm.blog.naver.com', 'instagram.com', 'facebook.com', 'band.us', 'pf.kakao.com', 'linktr.ee',
+                    'coupang.com', '11st.co.kr', 'gmarket.co.kr')
+
+
+# 업체 공식 사이트가 아닌 채용·기업정보·목록·백과 사이트. 웹문서 검색 결과에서 홈페이지로 채택하지 않는다.
+DIRECTORY_DOMAINS = ('jobploy.kr', 'saramin.co.kr', 'jobkorea.co.kr', 'wanted.co.kr', 'catch.co.kr', 'teamblind.com',
+                     'albamon.com', 'jobplanet.co.kr', 'incruit.com', 'thevc.kr', 'nextunicorn.kr', 'ifactoryhub.com',
+                     'tridge.com', 'namu.wiki', 'wikipedia.org', 'kisline.com', 'bizno.net', 'kreport.co.kr',
+                     'foodsafetykorea.go.kr', 'data.go.kr', 'naver.com', 'daum.net', 'kakao.com', 'google.com',
+                     'tistory.com', 'brunch.co.kr', 'alibaba.com', 'amazon.com', 'auction.co.kr', 'ssg.com',
+                     'kurly.com', 'oasis.co.kr', 'tmon.co.kr', 'wemakeprice.com', 'findcompany.kr', 'moneypin.biz',
+                     'marketbz.com', 'grandculture.net', 'verb.run', 'catchapp.co.kr', 'saramin.kr')
+# 정부·공공기관·학교 도메인은 업체 사이트가 아니다(2026-11-02 측정에서 군청·시청 사이트가 잘못 채택됨).
+PUBLIC_SECTOR_SUFFIXES = ('.go.kr', '.or.kr', '.re.kr', '.ac.kr', '.mil.kr', '.kr.gov')
+
+
+def _matches(host: str, domains) -> bool:
+    return any(host == d or host.endswith('.' + d) for d in domains)
+
+
+def is_directory_url(url: str) -> bool:
+    host = (urlsplit(url).hostname or '').lower().removeprefix('www.')
+    return _matches(host, DIRECTORY_DOMAINS) or host.endswith(PUBLIC_SECTOR_SUFFIXES)
+
+
+def is_platform_url(url: str) -> bool:
+    host = (urlsplit(url).hostname or '').lower().removeprefix('www.')
+    return any(host == domain or host.endswith('.' + domain) for domain in PLATFORM_DOMAINS)
+
+
+@dataclass
+class SiteSeed:
+    url: str
+    name: str | None = None
+    phone: str | None = None
+    address: str | None = None
+    found_by: str = 'SEED'
+
+
+@dataclass
+class PageEvidence:
+    url: str
+    emails: list[str] = field(default_factory=list)
+    phones: list[str] = field(default_factory=list)
+    keyword_snippet: str | None = None
+
+
+@dataclass
+class SiteResult:
+    seed: SiteSeed
+    title: str | None = None
+    pages: list[PageEvidence] = field(default_factory=list)
+    blocked_by_robots: list[str] = field(default_factory=list)
+    errors: list[tuple[str, str]] = field(default_factory=list)
+    name_verified: bool = False  # 첫 화면 제목·본문에 업체명이 있는지(업체 사이트 확인)
+
+
+class _PageParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.links: list[tuple[str, str]] = []
+        self.mailtos: list[str] = []
+        self.title = ''
+        self._text: list[str] = []
+        self._skip = 0
+        self._in_title = False
+        self._href: str | None = None
+        self._link_text: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ('script', 'style', 'noscript', 'svg'):
+            self._skip += 1
+        elif tag == 'title':
+            self._in_title = True
+        elif tag == 'a':
+            href = dict(attrs).get('href') or ''
+            if href.lower().startswith('mailto:'):
+                self.mailtos.append(href[7:].split('?', 1)[0])
+            self._href, self._link_text = href, []
+
+    def handle_endtag(self, tag):
+        if tag in ('script', 'style', 'noscript', 'svg') and self._skip:
+            self._skip -= 1
+        elif tag == 'title':
+            self._in_title = False
+        elif tag == 'a' and self._href is not None:
+            self.links.append((self._href, ' '.join(self._link_text).strip()))
+            self._href = None
+
+    def handle_data(self, data):
+        if self._skip:
+            return
+        if self._in_title:
+            self.title += data
+        text = data.strip()
+        if text:
+            self._text.append(text)
+            if self._href is not None:
+                self._link_text.append(text)
+
+    @property
+    def text(self) -> str:
+        return ' '.join(self._text)
+
+
+def clean_emails(values: list[str]) -> list[str]:
+    found = []
+    for value in values:
+        email = value.strip().strip('.').lower()
+        if not EMAIL.fullmatch(email) or email.endswith(IGNORED_EMAIL_SUFFIXES):
+            continue
+        if any(domain in email.split('@', 1)[1] for domain in PLACEHOLDER_DOMAINS):
+            continue
+        if email not in found:
+            found.append(email)
+    return found
+
+
+def normalize_phone(value: str) -> str:
+    return re.sub(r'[.)\s]', '-', value.strip())
+
+
+def keyword_snippet(text: str, keyword: str, width: int = 60) -> str | None:
+    index = text.find(keyword)
+    if index < 0:
+        return None
+    start, end = max(0, index - width), index + len(keyword) + width
+    return re.sub(r'\s+', ' ', text[start:end]).strip()
+
+
+def _site_root(url: str) -> str:
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, '/', '', ''))
+
+
+def _same_site(url: str, root: str) -> bool:
+    return urlsplit(url).netloc.lower().removeprefix('www.') == urlsplit(root).netloc.lower().removeprefix('www.')
+
+
+class HomepageCrawler:
+    def __init__(self, fetcher: Fetcher, settings):
+        self.fetcher, self.settings = fetcher, settings
+
+    def _naver_headers(self, url: str) -> dict:
+        secret = self.settings.naver_client_secret.get_secret_value()
+        if urlsplit(url).hostname == 'openapi.naver.com':
+            return {'X-Naver-Client-Id': self.settings.naver_client_id, 'X-Naver-Client-Secret': secret}
+        return {'X-NCP-APIGW-API-KEY-ID': self.settings.naver_client_id, 'X-NCP-APIGW-API-KEY': secret}
+
+    def find_homepage(self, company: str, query: str) -> str | None:
+        """웹문서 검색으로 업체 공식 홈페이지 첫 화면 주소를 찾는다.
+        채택 조건: 공개 웹 주소이고, 플랫폼·채용·기업정보 사이트가 아니며, 제목·요약에 업체명이 들어 있는 결과."""
+        if not hasattr(self, 'web_stats'):
+            self.web_stats = {'skipped': 0, 'unmatched': 0}
+        url = self.settings.naver_webkr_url
+        payload = self.fetcher.get_json(url, headers=self._naver_headers(url), params={'query': query, 'display': '10'})
+        wanted = normalize_name(company)
+        for item in payload.get('items') or []:
+            link = (item.get('link') or '').strip()
+            if not link or not is_public_web_url(link) or is_platform_url(link) or is_directory_url(link):
+                self.web_stats['skipped'] += 1
+                continue
+            text = normalize_name(TAG.sub('', (item.get('title') or '') + ' ' + (item.get('description') or '')))
+            if wanted and len(wanted) >= 2 and wanted in text:
+                return _site_root(link)
+            self.web_stats['unmatched'] += 1
+        return None
+
+    def discover_naver(self, query: str, limit: int) -> list[SiteSeed]:
+        """네이버 지역 검색 결과 중 홈페이지 링크가 있는 업체. 검색 결과 자체는 잠정 근거다."""
+        url = self.settings.naver_local_url
+        payload = self.fetcher.get_json(url, headers=self._naver_headers(url),
+                                        params={'query': query, 'display': str(min(limit, 5)), 'sort': 'random'})
+        seeds, self.naver_stats = [], {'results': 0, 'no_link': 0, 'platform': 0}
+        for item in payload.get('items') or []:
+            self.naver_stats['results'] += 1
+            link = (item.get('link') or '').strip()
+            if not link or not is_public_web_url(link):
+                self.naver_stats['no_link'] += 1
+                continue
+            if is_platform_url(link):
+                self.naver_stats['platform'] += 1
+                continue
+            seeds.append(SiteSeed(url=link, name=TAG.sub('', item.get('title') or '').strip() or None,
+                                  phone=(item.get('telephone') or '').strip() or None,
+                                  address=(item.get('roadAddress') or item.get('address') or '').strip() or None,
+                                  found_by='NAVER_LOCAL'))
+        return seeds
+
+    def _robots(self, root: str) -> RobotFileParser | None:
+        """4xx는 제한 없음, 5xx·접속 실패는 수집하지 않음(보수적)."""
+        parser = RobotFileParser()
+        try:
+            response = self.fetcher.get(urljoin(root, '/robots.txt'),
+                                        redirect_allowed=lambda target: _same_site(target, root))
+        except FetchError:
+            return None
+        if response.status_code >= 500:
+            return None
+        if response.status_code >= 400:
+            parser.parse([])
+        else:
+            parser.parse(response.text.splitlines())
+        return parser
+
+    def _page(self, url: str, keyword: str, redirect_allowed=None) -> tuple[PageEvidence, _PageParser] | None:
+        response = self.fetcher.get(url, redirect_allowed=redirect_allowed)
+        if response.status_code != 200 or 'html' not in response.headers.get('content-type', 'text/html'):
+            raise FetchError(f'HTTP_{response.status_code}', '홈페이지 응답을 읽을 수 없습니다.')
+        parser = _PageParser()
+        parser.feed(response.text)
+        text = parser.text
+        evidence = PageEvidence(url=str(response.url),
+                                emails=clean_emails(parser.mailtos + EMAIL.findall(text)),
+                                phones=list(dict.fromkeys(normalize_phone(p) for p in PHONE.findall(text))),
+                                keyword_snippet=keyword_snippet(text, keyword))
+        return evidence, parser
+
+    def crawl(self, seed: SiteSeed, keyword: str) -> SiteResult:
+        result = SiteResult(seed=seed)
+        if not is_public_web_url(seed.url):
+            result.errors.append(('URL_NOT_ALLOWED', seed.url))
+            return result
+        root = _site_root(seed.url)
+        robots = self._robots(root)
+        if robots is None:
+            result.errors.append(('ROBOTS_UNAVAILABLE', root))
+            return result
+        agent = self.settings.crawl_user_agent
+        redirect_allowed = lambda target: _same_site(target, root) and robots.can_fetch(agent, target)
+        queue, seen = [seed.url], set()
+        while queue and len(result.pages) < self.settings.crawl_max_pages_per_site:
+            url = queue.pop(0).split('#', 1)[0]
+            if url in seen:
+                continue
+            seen.add(url)
+            if not robots.can_fetch(agent, url):
+                result.blocked_by_robots.append(url)
+                continue
+            try:
+                evidence, parser = self._page(url, keyword, redirect_allowed=redirect_allowed)
+            except FetchError as error:
+                result.errors.append((error.code, url))
+                continue
+            result.pages.append(evidence)
+            if result.title is None and parser.title.strip():
+                result.title = re.sub(r'\s+', ' ', parser.title).strip()[:100]
+            wanted = normalize_name(seed.name)
+            if wanted and len(wanted) >= 2 and wanted in normalize_name(parser.title + ' ' + parser.text):
+                result.name_verified = True
+            if len(result.pages) == 1:
+                queue.extend(_contact_links(parser.links, url, root))
+        return result
+
+
+def _contact_links(links: list[tuple[str, str]], base: str, root: str) -> list[str]:
+    picked = []
+    for href, text in links:
+        target = urljoin(base, href)
+        label = (href + ' ' + text).lower()
+        if (target.startswith(('http://', 'https://')) and _same_site(target, root)
+                and any(hint in label for hint in CONTACT_HINTS) and target not in picked):
+            picked.append(target)
+    return picked[:8]
+
+
+def read_seed_file(path) -> list[SiteSeed]:
+    """한 줄에 '주소' 또는 '주소,업체명'. #으로 시작하는 줄은 무시한다."""
+    seeds = []
+    for line in open(path, encoding='utf-8'):
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        url, _, name = line.partition(',')
+        seeds.append(SiteSeed(url=url.strip(), name=name.strip() or None))
+    return seeds
+
+
+# ---- PR #33: application/trial.py ----
+@dataclass
+class TrialOptions:
+    keyword: str
+    sources: Annotated[tuple[Literal['public', 'haccp', 'homepage'], ...], Field(min_length=1)] = ('public', 'haccp', 'homepage')
+    item_limit: Annotated[int, Field(ge=1, le=1000)] = 30
+    business_limit: Annotated[int, Field(ge=1, le=50)] = 10
+    haccp_pages: Annotated[int, Field(ge=1, le=200)] = 3
+    haccp_rows: Annotated[int, Field(ge=1, le=1000)] = 100  # 서비스 한도 100
+    haccp_item_type: str | None = None
+    site_limit: Annotated[int, Field(ge=1, le=50)] = 5
+    naver_query: str | None = None
+    seeds: tuple[SiteSeed, ...] = ()
+    item_types: tuple[str, ...] = ()        # 품목유형 필터 (예: 과·채가공품). 비우면 거르지 않음
+    include_ended: bool = False             # 생산 종료 품목 포함 여부
+
+
+class _Candidates:
+    candidate_type = CrawlCandidate
+
+    def __init__(self):
+        self.by_key: dict[str, CrawlCandidate] = {}
+        self.key_by_name: dict[str, str] = {}
+
+    def get(self, name: str, license_no: str | None = None) -> CrawlCandidate:
+        license_no = (license_no or '').strip() or None
+        unique = self.find(name, None) if not license_no else None
+        key = ('license:' + license_no) if license_no else (unique.candidate_key if unique else None)
+        key = key or ('name:' + normalize_name(name))
+        candidate = self.by_key.get(key)
+        if candidate is None:
+            candidate = self.candidate_type(candidate_key=key, name=name, license_no=license_no)
+            self.by_key[key] = candidate
+        self.key_by_name.setdefault(normalize_name(name), key)
+        return candidate
+
+    def find(self, name: str | None, license_no: str | None) -> CrawlCandidate | None:
+        license_no = (license_no or '').strip()
+        if license_no:
+            return self.by_key.get('license:' + license_no)
+        wanted = normalize_name(name)
+        matches = [c for c in self.by_key.values() if wanted and normalize_name(c.name) == wanted]
+        return matches[0] if len(matches) == 1 else None
+
+
+def _add_source(candidate, source_type):
+    if source_type not in candidate.source_types:
+        candidate.source_types.append(source_type)
+
+
+def _same_domain(email: str, host: str) -> bool:
+    domain = email.rsplit('@', 1)[-1].lower()
+    host = host.lower().removeprefix('www.')
+    return bool(host) and (domain == host or host.endswith('.' + domain) or domain.endswith('.' + host))
+
+
+def _add_contact(candidate, contact_type, value, evidence):
+    if value and not any(c.contact_type == contact_type and c.value == value for c in candidate.contacts):
+        candidate.contacts.append(CrawlContact(contact_type=contact_type, value=value, evidence=evidence))
+
+
+class SupplierCrawlTrial:
+    homepage_item_type = CrawlHandledItem
+    candidate_collection = _Candidates
+    report_type = CrawlReport
+
+    def _item_exists(self, candidate, row):
+        return any(i.item_name == row['item_name'] for i in candidate.handled_items)
+
+    def _make_item(self, row, evidence):
+        return CrawlHandledItem(item_name=row['item_name'], item_type=row['item_type'], evidence=evidence)
+
+    def _make_certification(self, row, evidence):
+        return CrawlCertification(certification_type='HACCP', certification_no=row['certification_no'],
+                                  item_type=row['item_type'], valid_from=row['valid_from'],
+                                  valid_until=row['valid_until'], evidence=evidence)
+
+    def _observe(self, kind, candidate, row, url, fetched_at):
+        """Optional provenance extension; base collection never registers suppliers."""
+
+    def __init__(self, settings, fetcher: Fetcher):
+        self.settings, self.fetcher = settings, fetcher
+        self.candidates = self.candidate_collection()
+        self.issues: list[CrawlSourceIssue] = []
+
+    def _issue(self, source_type, code, message, target=None):
+        self.issues.append(CrawlSourceIssue(source_type=source_type, code=self.fetcher.preview(str(code), 80),
+                                       message=self.fetcher.preview(str(message), 300),
+                                       target=self.fetcher.mask(target) if target else None))
+
+    def _stats(self, source_type, run, enabled, skipped):
+        if not enabled:
+            return CrawlSourceStats(source_type=source_type, enabled=False, skipped_reason=skipped)
+        requests, failed = self.fetcher.requests, self.fetcher.failed
+        started = time.monotonic()
+        records = run()
+        touched = [c for c in self.candidates.by_key.values() if source_type in c.source_types]
+        return CrawlSourceStats(source_type=source_type, enabled=True, requests=self.fetcher.requests - requests,
+                           failed_requests=self.fetcher.failed - failed, records=records,
+                           candidates=len(touched), elapsed_seconds=round(time.monotonic() - started, 2))
+
+    # 1) 공공데이터: 품목제조보고 → 업소별 묶음 → 식품제조가공업 인허가로 연락처·소재지 보강
+    def _public(self, options: TrialOptions) -> int:
+        client = PublicDataClient(self.fetcher, self.settings.food_safety_api_key.get_secret_value())
+        try:
+            rows, url, fields = client.item_reports(options.keyword, options.item_limit)
+        except FetchError as error:
+            self._issue('PUBLIC_DATA', error.code, error.message, 'I1250')
+            return 0
+        missing = missing_fields(fields, ITEM_FIELDS)
+        if missing:
+            self._issue('PUBLIC_DATA', 'FIELD_NAME_MISMATCH', 'I1250 응답에 없는 필드: ' + ', '.join(missing))
+        fetched_at, licenses, skipped_type, skipped_ended = now(), [], 0, 0
+        wanted_types = [normalize_item_type(t) for t in options.item_types if t.strip()]
+        for row in rows:
+            if not row['name']:
+                continue
+            if wanted_types and not any(t in normalize_item_type(row['item_type']) for t in wanted_types):
+                skipped_type += 1
+                continue
+            if not options.include_ended and (row['production_ended'] or '').strip() in ('예', 'Y', 'y'):
+                skipped_ended += 1
+                continue
+            candidate = self.candidates.get(row['name'], row['license_no'])
+            _add_source(candidate, 'PUBLIC_DATA')
+            if row['item_name']:
+                ref = CrawlSourceRef(source_type='PUBLIC_DATA', source_url=url, fetched_at=fetched_at,
+                                record_ref='품목제조보고 ' + (row['report_no'] or '-'),
+                                snippet=' / '.join(v for v in (row['item_name'], row['item_type'], row['reported_on'],
+                                                              '생산종료 ' + row['production_ended'] if row['production_ended'] else None) if v))
+                if not self._item_exists(candidate, row):
+                    candidate.handled_items.append(self._make_item(row, ref))
+            self._observe('PUBLIC_ITEM', candidate, row, url, fetched_at)
+            if row['license_no'] and row['license_no'] not in licenses:
+                licenses.append(row['license_no'])
+        for license_no in licenses[:options.business_limit]:
+            try:
+                business, url, fields = client.business(license_no)
+            except FetchError as error:
+                self._issue('PUBLIC_DATA', error.code, error.message, 'I1220 ' + license_no)
+                continue
+            missing = missing_fields(fields, BUSINESS_FIELDS)
+            if missing and not any(i.code == 'FIELD_NAME_MISMATCH' and 'I1220' in i.message for i in self.issues):
+                self._issue('PUBLIC_DATA', 'FIELD_NAME_MISMATCH', 'I1220 응답에 없는 필드: ' + ', '.join(missing))
+            if business is None:
+                self._issue('PUBLIC_DATA', 'BUSINESS_NOT_FOUND', '식품제조가공업 인허가에 같은 인허가번호가 없습니다.', license_no)
+                continue
+            candidate = self.candidates.get(business['name'] or license_no, license_no)
+            ref = CrawlSourceRef(source_type='PUBLIC_DATA', source_url=url, fetched_at=now(), record_ref='인허가 ' + license_no,
+                            snippet=business['business_type'])
+            _add_contact(candidate, 'PHONE', business['phone'], ref)
+            candidate.location = candidate.location or business['address']
+            self._observe('PUBLIC_BUSINESS', candidate, business, url, now())
+        if skipped_type or skipped_ended:
+            self._issue('PUBLIC_DATA', 'ITEM_FILTERED',
+                        f'품목유형이 맞지 않는 {skipped_type}건, 생산 종료 {skipped_ended}건을 제외했습니다.')
+        if len(licenses) > options.business_limit:
+            self._issue('PUBLIC_DATA', 'BUSINESS_LIMIT', f'업소 {len(licenses)}곳 중 {options.business_limit}곳만 연락처를 보강했습니다.')
+        return len(rows)
+
+    # 2) HACCP: 인허가번호로 기존 후보에 인증 근거를 붙이고, 품목 유형 필터가 있으면 새 후보도 만든다.
+    def _haccp(self, options: TrialOptions) -> int:
+        client = HaccpClient(self.fetcher, self.settings.data_go_kr_service_key.get_secret_value(), self.settings.haccp_api_url)
+        count, item_type, page_rows = 0, (options.haccp_item_type or '').strip(), min(options.haccp_rows, 100)
+        for page_no in range(1, options.haccp_pages + 1):
+            try:
+                rows, total, url, _ = client.page(page_no, page_rows)
+            except FetchError as error:
+                self._issue('HACCP', error.code, error.message, f'page {page_no} rows {page_rows}')
+                if page_no == 1 and page_rows > 100:
+                    # 한 쪽 결과 수 한도를 넘으면 오류가 나는 서비스가 있어 100건으로 한 번 다시 시도한다.
+                    page_rows = 100
+                    try:
+                        rows, total, url, _ = client.page(page_no, page_rows)
+                    except FetchError as retry_error:
+                        self._issue('HACCP', retry_error.code, retry_error.message, f'page {page_no} rows {page_rows}')
+                        break
+                else:
+                    break
+            count += len(rows)
+            fetched_at = now()
+            for row in rows:
+                candidate = self.candidates.find(row['name'], row['license_no'])
+                if candidate is None and item_type and row['name'] and item_type in (row['item_type'] or ''):
+                    candidate = self.candidates.get(row['name'], row['license_no'])
+                    candidate.location = ' '.join(v for v in (row['sido'], row['sgg']) if v) or None
+                if candidate is None:
+                    continue
+                _add_source(candidate, 'HACCP')
+                ref = CrawlSourceRef(source_type='HACCP', source_url=url, fetched_at=fetched_at,
+                                record_ref='HACCP ' + (row['certification_no'] or '-'), snippet=row['item_type'])
+                if not any(c.certification_no == row['certification_no'] for c in candidate.certifications):
+                    candidate.certifications.append(self._make_certification(row, ref))
+                self._observe('HACCP', candidate, row, url, fetched_at)
+            if not rows or (total is not None and page_no * page_rows >= total):
+                break
+        else:
+            self._issue('HACCP', 'PAGE_LIMIT', f'{options.haccp_pages}쪽까지만 읽었습니다. 전체 대조는 다음 단계에서 정합니다.')
+        return count
+
+    # 3) 홈페이지: 네이버 지역 검색·시드 주소 → robots 허용 범위의 연락처 페이지
+    def _homepage(self, options: TrialOptions) -> int:
+        crawler = HomepageCrawler(self.fetcher, self.settings)
+        seeds = list(options.seeds)
+        has_naver = bool(self.settings.naver_client_id and self.settings.naver_client_secret)
+        # 공공데이터로 찾은 업체는 '업체명 + 시군구' 웹문서 검색으로 공식 홈페이지를 찾는다.
+        public_candidates = [c for c in self.candidates.by_key.values() if 'PUBLIC_DATA' in c.source_types]
+        if has_naver and public_candidates:
+            found = 0
+            for candidate in public_candidates[:options.site_limit]:
+                query = ' '.join(v for v in (candidate.name, region_of(candidate.location)) if v)
+                try:
+                    url = crawler.find_homepage(candidate.name, query)
+                except FetchError as error:
+                    self._issue('HOMEPAGE', error.code, '네이버 웹문서 검색: ' + error.message, query)
+                    continue
+                if url:
+                    found += 1
+                    seeds.append(SiteSeed(url=url, name=candidate.name, found_by='NAVER_WEB'))
+            stats = crawler.web_stats
+            self._issue('HOMEPAGE', 'NAVER_WEB_RESULT',
+                        f'업체 {min(len(public_candidates), options.site_limit)}곳 검색 → 홈페이지 {found}곳 확인. '
+                        f'검색 결과 중 채용·기업정보·쇼핑 등 {stats["skipped"]}건, 업체명 불일치 {stats["unmatched"]}건 제외.')
+        if has_naver and options.naver_query:
+            query = options.naver_query
+            try:
+                seeds += crawler.discover_naver(query, options.site_limit)
+                stats = crawler.naver_stats
+                self._issue('HOMEPAGE', 'NAVER_LOCAL_RESULT',
+                            f'지역 검색 {stats["results"]}건 중 홈페이지 링크 없음 {stats["no_link"]}건, '
+                            f'플랫폼 계정(유튜브·스마트스토어 등) {stats["platform"]}건은 건너뛰었습니다.', query)
+            except FetchError as error:
+                self._issue('HOMEPAGE', error.code, '네이버 지역 검색: ' + error.message)
+        if not seeds:
+            self._issue('HOMEPAGE', 'NO_SEEDS', '찾은 홈페이지가 없습니다(네이버 키·공공데이터 후보·--seeds 확인).')
+        unique, roots = [], set()
+        for seed in seeds:
+            root = urlsplit(seed.url).netloc.lower().removeprefix('www.')
+            if root and root not in roots:
+                roots.add(root)
+                unique.append(seed)
+        pages = 0
+        for seed in unique:
+            site = crawler.crawl(seed, options.keyword)
+            for code, target in site.errors:
+                self._issue('HOMEPAGE', code, '홈페이지 수집 오류', target)
+            if site.blocked_by_robots:
+                self._issue('HOMEPAGE', 'ROBOTS_DISALLOWED', f'robots.txt로 {len(site.blocked_by_robots)}쪽을 건너뛰었습니다.',
+                            site.blocked_by_robots[0])
+            if not site.pages:
+                continue
+            pages += len(site.pages)
+            if seed.found_by == 'NAVER_WEB' and not site.name_verified:
+                # 검색 결과가 업체를 '언급한' 페이지였을 뿐, 사이트 자체에는 업체명이 없다 → 업체 사이트로 보지 않는다.
+                self._issue('HOMEPAGE', 'SITE_NOT_VERIFIED', f'{seed.name}: 사이트 첫 화면에 업체명이 없어 제외했습니다.', seed.url)
+                continue
+            name = seed.name or site.title or seed.url
+            candidate = self.candidates.find(name, None) or self.candidates.get(name)
+            _add_source(candidate, 'HOMEPAGE')
+            fetched_at = now()
+            if seed.found_by == 'NAVER_LOCAL':
+                ref = CrawlSourceRef(source_type='HOMEPAGE', source_url='naver-local:' + (seed.name or ''), fetched_at=fetched_at,
+                                record_ref='네이버 지역 검색', snippet=seed.address)
+                _add_contact(candidate, 'PHONE', seed.phone, ref)
+                candidate.location = candidate.location or seed.address
+            _add_contact(candidate, 'HOMEPAGE', site.pages[0].url,
+                         CrawlSourceRef(source_type='HOMEPAGE', source_url=site.pages[0].url, fetched_at=fetched_at,
+                                   snippet=site.title))
+            site_domain = urlsplit(site.pages[0].url).hostname or ''
+            for page in site.pages:
+                ref = CrawlSourceRef(source_type='HOMEPAGE', source_url=page.url, fetched_at=fetched_at)
+                for email in page.emails:
+                    same = _same_domain(email, site_domain)
+                    _add_contact(candidate, 'EMAIL', email, ref.model_copy(update={
+                        'snippet': '업체 도메인 메일' if same else '외부 메일 주소(담당자 확인 필요)'}))
+                for phone in page.phones[:3]:
+                    _add_contact(candidate, 'PHONE', phone, ref)
+                if page.keyword_snippet and not any(i.evidence.source_type == 'HOMEPAGE' for i in candidate.handled_items):
+                    candidate.handled_items.append(self.homepage_item_type(
+                        item_name=options.keyword, evidence=CrawlSourceRef(source_type='HOMEPAGE', source_url=page.url,
+                                                                      fetched_at=fetched_at, snippet=page.keyword_snippet)))
+        return pages
+
+    def run(self, options: TrialOptions) -> CrawlReport:
+        started = now()
+        public_on = 'public' in options.sources and bool(self.settings.food_safety_api_key)
+        haccp_on = 'haccp' in options.sources and bool(self.settings.data_go_kr_service_key)
+        homepage_on = 'homepage' in options.sources
+        excluded = '이번 시험 대상에서 제외'
+        stats = [
+            self._stats('PUBLIC_DATA', lambda: self._public(options), public_on,
+                        excluded if 'public' not in options.sources else '.env에 FOOD_SAFETY_API_KEY 필요'),
+            self._stats('HACCP', lambda: self._haccp(options), haccp_on,
+                        excluded if 'haccp' not in options.sources else '.env에 DATA_GO_KR_SERVICE_KEY 필요'),
+            self._stats('HOMEPAGE', lambda: self._homepage(options), homepage_on, excluded),
+        ]
+        candidates = list(self.candidates.by_key.values())
+        return self.report_type(keyword=options.keyword, started_at=started, finished_at=now(), sources=stats,
+                           candidates=candidates, fill_rates=fill_rates(candidates), issues=self.issues)
+
+
+def fill_rates(candidates: list[CrawlCandidate]) -> dict[str, str]:
+    total = len(candidates)
+    checks = {
+        '업체명': lambda c: bool(c.name),
+        '인허가번호': lambda c: bool(c.license_no),
+        '소재지': lambda c: bool(c.location),
+        '전화': lambda c: any(x.contact_type == 'PHONE' for x in c.contacts),
+        '이메일': lambda c: any(x.contact_type == 'EMAIL' for x in c.contacts),
+        '업체 도메인 메일': lambda c: any(x.contact_type == 'EMAIL' and x.evidence.snippet == '업체 도메인 메일'
+                                     for x in c.contacts),
+        '홈페이지': lambda c: any(x.contact_type == 'HOMEPAGE' for x in c.contacts),
+        '취급 품목': lambda c: bool(c.handled_items),
+        'HACCP 표시': lambda c: bool(c.certifications),
+    }
+    return {name: (f'{sum(map(check, candidates))}/{total} ({round(100 * sum(map(check, candidates)) / total)}%)'
+                   if total else '0/0') for name, check in checks.items()}
+
+
+# ---- PR #33: application/report.py ----
+SOURCE_LABELS = {'PUBLIC_DATA': '공공데이터(품목제조보고·인허가)', 'HACCP': 'HACCP 업체 정보', 'HOMEPAGE': '업체 홈페이지'}
+
+
+def _cell(value) -> str:
+    return str(value or '-').replace('|', '/').replace('\n', ' ')
+
+
+def to_markdown(report: CrawlReport, candidate_limit: int = 30) -> str:
+    lines = [f'# 크롤링 시험 결과 — {report.keyword}', '',
+             f'- 수집 시각: {report.started_at:%Y-%m-%d %H:%M} ~ {report.finished_at:%H:%M} (UTC)',
+             f'- 잠정 후보: {len(report.candidates)}곳 · 모든 값은 RFQ 회신·체크리스트로 확인 전 상태', '',
+             '## 출처별 결과', '', '| 출처 | 실행 | 요청 | 실패 | 레코드 | 후보 | 소요(초) |',
+             '| --- | --- | --- | --- | --- | --- | --- |']
+    for s in report.sources:
+        run = '실행' if s.enabled else '건너뜀: ' + _cell(s.skipped_reason)
+        lines.append(f'| {SOURCE_LABELS[s.source_type]} | {run} | {s.requests} | {s.failed_requests} | {s.records} '
+                     f'| {s.candidates} | {s.elapsed_seconds} |')
+    lines += ['', '## 필드 채움률', '', '| 항목 | 채움 |', '| --- | --- |']
+    lines += [f'| {name} | {rate} |' for name, rate in report.fill_rates.items()]
+    lines += ['', '## 후보 샘플', '', '| 업체 | 출처 | 소재지 | 전화 | 이메일 | 취급 품목(근거) | HACCP |',
+              '| --- | --- | --- | --- | --- | --- | --- |']
+    for c in report.candidates[:candidate_limit]:
+        phones = ', '.join(x.value for x in c.contacts if x.contact_type == 'PHONE')
+        emails = ', '.join(x.value for x in c.contacts if x.contact_type == 'EMAIL')
+        items = '; '.join(f'{i.item_name}({i.evidence.source_type})' for i in c.handled_items[:3])
+        if len(c.handled_items) > 3:
+            items += f' 외 {len(c.handled_items) - 3}'
+        haccp = ', '.join(_cell(x.item_type) for x in c.certifications)
+        lines.append(f'| {_cell(c.name)} | {", ".join(c.source_types)} | {_cell(c.location)} | {_cell(phones)} '
+                     f'| {_cell(emails)} | {_cell(items)} | {_cell(haccp)} |')
+    if len(report.candidates) > candidate_limit:
+        lines.append(f'\n외 {len(report.candidates) - candidate_limit}곳은 JSON 결과에 있습니다.')
+    lines += ['', '## 발생한 오류·확인 사항', '']
+    if report.issues:
+        lines += ['| 출처 | 코드 | 내용 | 대상 |', '| --- | --- | --- | --- |']
+        lines += [f'| {SOURCE_LABELS[i.source_type]} | {i.code} | {_cell(i.message)} | {_cell(i.target)} |'
+                  for i in report.issues]
+    else:
+        lines.append('없음')
+    lines += ['', '## 다음 구현 사항', '', '- (시험 결과를 보고 팀이 작성)', '']
+    return '\n'.join(lines)
+
+
+@tool
+def crawl_supplier_candidates(options: TrialOptions) -> dict:
+    """허용 출처에서 잠정 업체 후보와 출처 근거만 소량 수집한다.
+
+    역할에 등록되지 않은 수동 수집 도구다. DB 등록·RFQ·메일 발송을 수행하지 않는다.
+    가격·공급 가능 여부·인증 충족을 확정하지 않는다. CLI와 동일한 보안 수집기를 사용한다.
+    """
+    settings = CrawlSettings()
+    with closing(Fetcher(settings)) as fetcher:
+        return SupplierCrawlTrial(settings, fetcher).run(options).model_dump(mode='json')
