@@ -878,6 +878,10 @@ def use_candidate_store(store: CandidateStore | None) -> None:
     _candidate_store = store
 
 
+# suppliers.source_type: 웹에서 수집해 등록한 업체 (등록 거래처는 REGISTERED)
+WEB_SOURCE_TYPE = 'VERIFIED_WEB'
+
+
 def _key(text) -> str:
     return re.sub(r'\s+', '', str(text)).casefold()
 
@@ -906,16 +910,20 @@ def _check(condition: str, required: bool, state: str, refs: list[str]) -> dict:
     return {'condition': condition, 'required': required, 'state': state, 'evidence_refs': refs}
 
 
-def _required_checks(case: dict, item: dict) -> list[dict]:
+def _required_checks(case: dict, item: dict, web: bool = False) -> list[dict]:
+    """품목 한 행의 필수 조건 체크(규격·필수 인증). web이면 웹 수집 업체의 품목이다.
+    웹 수집 인증은 공개 자료의 표시라 확인 전이고, 인증 정보 없이 저장된 품목도 []로 읽힌다(컬럼 기본값).
+    그래서 웹 품목의 필수 인증은 PASS·FAIL로 정하지 않고 UNKNOWN으로 두어 RFQ로 묻는다."""
     ref = [f"supplier_items:{item['id']}"]
     checks = []
     if case.get('specification'):
         checks.append(_check(f"규격 {case['specification']}", True, _spec_state(case['specification'],
                                                                                item.get('specification')), ref))
     certifications = item.get('certifications_jsonb')
-    owned = {_key(name) for name in certifications or []}
+    unconfirmed = web or certifications is None
+    owned = set() if unconfirmed else {_key(name) for name in certifications}
     for name in _required_names(case.get('mandatory_conditions')):
-        state = 'UNKNOWN' if certifications is None else 'PASS' if _key(name) in owned else 'FAIL'
+        state = 'UNKNOWN' if unconfirmed else 'PASS' if _key(name) in owned else 'FAIL'
         checks.append(_check(name, True, state, ref))
     # 수량·납기는 업체 쪽에 비교할 값이 없어 판정하지 않는다. RFQ 고정 질문으로 묻는다
     return checks
@@ -1050,12 +1058,13 @@ def evaluate_candidates(store: CandidateStore, context: RunContext, supplier_ite
                       key=lambda row: str(row.get('transaction_date') or '')):
         purchases[row['supplier_id']] = row
 
+    web = {sid for sid, supplier in suppliers.items() if supplier.get('source_type') == WEB_SOURCE_TYPE}
     excluded, best = [], {}
     for item in items:
         supplier_id = item['supplier_id']
         if supplier_id in incumbents:
             continue
-        checks = _required_checks(case, item)
+        checks = _required_checks(case, item, web=supplier_id in web)
         rank = (sum(c['state'] == 'FAIL' for c in checks), -sum(c['state'] == 'PASS' for c in checks))
         if supplier_id not in best or rank < best[supplier_id][0]:      # 업체의 품목 행 중 가장 잘 맞는 행
             best[supplier_id] = (rank, item, checks)
@@ -1082,6 +1091,7 @@ def evaluate_candidates(store: CandidateStore, context: RunContext, supplier_ite
             'supplier_id': supplier_id, 'supplier_name': supplier.get('name'),
             'has_contact': bool((supplier.get('contact_email') or '').strip()),
             'checklist': checklist, 'preference_score': _score_text(score), 'evidence_refs': refs,
+            'provisional': supplier_id in web,      # 웹 수집 업체: 잠정 후보, 회신으로 확인
             'origin': item.get('origin'),
             # 후보 업체 자신의 등록 비고. LLM이 주의 표시 근거로만 쓴다. 제외·점수 근거가 아니다(BR-15)
             'notes': notes, 'notes_ref': f"supplier_items:{item['id']}.notes" if notes else None,
