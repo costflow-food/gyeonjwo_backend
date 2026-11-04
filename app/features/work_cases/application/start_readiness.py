@@ -38,7 +38,7 @@ def configuration_readiness(settings):
 def agent_readiness():
     try:
         from app.features.work_cases.application.graph_boundary import graph_contract
-        graph_contract(review_enabled=True)
+        graph_contract()
         return StartReadiness()
     except Exception:
         return StartReadiness('AGENT_INTEGRATION_REQUIRED', '에이전트 그래프 공개 인터페이스를 확인해야 합니다.')

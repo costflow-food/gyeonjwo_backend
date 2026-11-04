@@ -54,7 +54,7 @@ class GraphStore(AgentStore):
     def start_agent_run(self, case_id, role, input_revision, input_snapshot, model_id, prompt_version):
         self.check(case_id)
         if input_revision != self.scope.revision:
-            raise ServiceError('ACTION_NOT_ALLOWED', '이 그래프 작업은 START 역할만 지원합니다.', 409)
+            raise ServiceError('REVISION_CONFLICT', '역할 실행 중 업무 입력이 변경됐습니다.', 409)
         result = self.rpc('begin_case_graph_agent_run', p_role=str(role), p_input=input_snapshot,
                           p_model=model_id, p_prompt_version=prompt_version)
         run_id = str(UUID(result['agent_run_id']))

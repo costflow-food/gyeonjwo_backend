@@ -184,8 +184,10 @@
   },
   "compatibility": "Without optional receipt lookup, ready-server replay is handled by submit_work_case_start; if runtime is unavailable return 503 without creating a duplicate job.",
   "runtime_policy_override": {
-    "source": "2026-11-04 explicit user request",
-    "policy": "Graph-only automatic API runtime. Removed all five AGENT enable/stop switches and duplicate backend role allowlists. Old opt-in/disabled-default guidance below is historical. START and REPLY/PLAN job identities, storage protocol, authentication/revision/lease checks and approval/reply/send gates remain.",
-    "deployment": "Full graph/review DB capabilities required before startup. Old env keys are ignored by Settings; never bypass failed health. Actual mail sending retains its independent setting."
+    "source": "2026-11-04 PR41 review correction; supersedes previous runtime override",
+    "policy": "No temporary AGENT switches and no duplicate backend role lists. Graph START worker is optional: unavailable config/interfaces/DB/startup leaves API and mail receiver running. START follows the public graph through role2; no extraction-only fallback.",
+    "claim": "Only claim_case_graph_run(p_start_from=START). Unified START/REPLY/PLAN claim and review scheduling deferred until DB owner agreement; not called by this runtime.",
+    "steps": "Canonical agent steps SELECTING_CANDIDATES and BUILDING_PLANS. Read compatibility CANDIDATES only for persisted legacy boundary; no new writes under that alias. GENERATING_PLANS removed.",
+    "deployment": "After DB functions are deployed restart server to attach graph worker; missing graph does not prevent mail/API startup. API START still requires readiness/live worker. /ready reports mail readiness and degraded review separately."
   }
 }

@@ -36,19 +36,20 @@ def ready(request: Request):
             if not worker or not worker.running:
                 return JSONResponse({'status':'not_ready','mode':'google-mailbox','checks':checks},status_code=503)
             checks['gmail_worker']='running'
-        checks['review_execution_mode'] = 'GRAPH'
+        checks['review_execution_mode'] = 'GRAPH_START'
+        checks['review_claim'] = 'awaiting_db_contract'
         from app.features.work_cases.api.router import get_runtime_repository
         try:
-            if not get_runtime_repository(request).available():
-                raise RuntimeError('Graph contract unavailable')
             worker = request.app.state.extraction_worker
             if not worker or not worker.running:
                 raise RuntimeError('Graph worker unavailable')
+            if not get_runtime_repository(request).available():
+                raise RuntimeError('Graph contract unavailable')
             checks['extraction'] = 'running'
         except Exception:
             checks['extraction'] = 'not_ready'
-            return JSONResponse({'status':'not_ready','mode':'google-mailbox','checks':checks},status_code=503)
-        return {'status':'ready','mode':'google-mailbox','checks':checks}
+        return {'status':'ready','mode':'google-mailbox','checks':checks,
+                'degraded_features': ['review'] if checks['extraction'] == 'not_ready' else []}
     settings = request.app.state.settings
     try:
         settings.require_server()

@@ -18,7 +18,7 @@ class GraphWorker(ExtractionWorker):
         self.on_drafts_ready = on_drafts_ready
 
     def load_adapter(self):
-        graph_contract(review_enabled=True)
+        graph_contract()
         return run_graph
 
     def process_once(self):
