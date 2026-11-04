@@ -111,13 +111,14 @@ class MailManagementRepository:
     def drafts(self, owner, case_id):
         if case_id is None:
             return []
-        rows = self.rows(self.client.table('mail_drafts').select('id,replaces_id,supplier_id,purpose,recipient,status,input_revision')
+        rows = self.rows(self.client.table('mail_drafts').select('id,replaces_id,supplier_id,purpose,recipient,status,input_revision,style_snapshot_jsonb')
                          .eq('owner_user_id', str(owner)).eq('work_case_id', str(case_id))
                          .order('created_at', desc=True).order('id', desc=True).limit(1000))
         if len(rows) >= 1000:
             raise ServiceError('PROCESSING_UNAVAILABLE', '초안 설정 목록의 조회 범위를 확인해야 합니다.', 503)
         replaced = {row['replaces_id'] for row in rows if row.get('replaces_id')}
-        return [row for row in rows if row['id'] not in replaced]
+        from app.features.work_cases.domain.candidates import selection_staged
+        return [row for row in rows if row['id'] not in replaced and not selection_staged(row)]
 
     def call(self, name, params, integration_code):
         try:

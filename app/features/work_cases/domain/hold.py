@@ -81,6 +81,8 @@ def from_agent_output(output):
     # Precise old supplier errors precede generic missing-information wording.
     if re.search(r'등록.{0,30}(?:거래처|업체|공급사).{0,35}(?:찾지\s*못|없|연결.{0,10}(?:않|없)|일치.{0,10}없)', reason, re.S):
         return hold_info('SUPPLIER_NOT_MATCHED')
+    if re.search(r'후보.{0,40}' + _ABSENT, reason, re.S):
+        return hold_info('NO_SUITABLE_CANDIDATES')
     field = _field(reason)
     if field is not None:
         return hold_info('MISSING_FIELD', field)

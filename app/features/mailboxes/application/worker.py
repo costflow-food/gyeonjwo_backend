@@ -26,7 +26,7 @@ class ClassificationNode:
     def __call__(self, message):
         result = classify_or_raise(JsonAgent(self.settings), message['subject'][:500], message['body_text'])
         return {'status': {'TRUE': 'BUSINESS', 'FALSE': 'NON_BUSINESS', 'PENDING': 'UNCERTAIN'}[result.status],
-                'reason': result.reason}
+                'reason': result.reason, 'source': result.source}
 
 
 class ConnectedMailboxWorker:

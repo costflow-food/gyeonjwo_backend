@@ -1,0 +1,109 @@
+{
+  "contract_version": 1,
+  "date": "2026-11-03",
+  "status": "BACKEND_IMPLEMENTED_RPC_NOT_DEPLOYED",
+  "settings": {
+    "AGENT_GRAPH_ENABLED": true,
+    "AGENT_GRAPH_REVIEW_ENABLED": false,
+    "AGENT_GRAPH_REVIEW_TIMEOUT_SECONDS": 300,
+    "rule": "Enable review only after required guarded functions/health caps are deployed. START-only and legacy defaults remain unchanged. No real .env modified."
+  },
+  "flow": "Verified public run_case(REPLY): preprocess -> extractor -> priority -> plans -> code validation -> counter offer -> price validation -> stage card. PLAN begins at plans. NEEDS_EVIDENCE/RECHECK_SOURCE and role limit remain public graph routing. No app/agents changes in this task.",
+  "jobs": {
+    "consumer": "claim_case_graph_review_run() may claim START GRAPH_START_V1 plus REPLY/PLAN GRAPH_REVIEW_V1 atomically. Existing START claim remains used when flag false.",
+    "shape": "owner_user_id,case_id,input_revision,batch_id,job_id,claim_token,mail_ids,start_from,execution_mode; review jobs additionally evidence_mail_ids (unique owned linked mail UUIDs, <=500, includes initial mail and triggering replies). REPLY has 1..100 trigger mail IDs; PLAN none. START remains exactly initial mail.",
+    "scheduling": "schedule_case_graph_replies(p_limit=25) scans safely persisted linked inbound mail/ingestion receipts every recovery tick (10 seconds); enqueue atomically and idempotently with source-event receipt, case revision, current RFQ link evidence, batch/lease and ownership. No queue only in memory and no reliance on a post-ingest callback. Do not duplicate legacy extraction/candidate jobs. Do not advance source receipt before durable job.",
+    "guards": "Only active Running/Complete cases eligible for a fresh review batch; never auto-start Waiting/Confirm/Pending/accepted/archived or unresolved approval/UNKNOWN. Complete with new validated input may become Running and invalidate selection atomically. Coalesce triggering evidence under current input revision and serialize case jobs. Input/RFQ-round proof must reject old/ambiguous replies. PLAN requires explicit authorized recalculation event; do not schedule arbitrary work."
+  },
+  "health_capabilities": [
+    "REPLY",
+    "PLAN",
+    "REVIEW_STORES",
+    "REVIEW_CARD_STAGE",
+    "REVIEW_CARD_COMMIT",
+    "REVIEW_OUTBOUND_GUARD"
+  ],
+  "rpc_required": {
+    "claim_case_graph_review_run": {
+      "args": {},
+      "returns": "job object above or null"
+    },
+    "schedule_case_graph_replies": {
+      "args": {
+        "p_limit": "int"
+      },
+      "returns": "integer 0..limit"
+    },
+    "stage_case_graph_review_draft": {
+      "args": [
+        "p_job",
+        "p_token",
+        "p_revision",
+        "p_run",
+        "p_record"
+      ],
+      "returns": "{kind:STAGED,draft_id,record:exact original MailDraftRecord} or STALE",
+      "rule": "Private graph-staged-review-v1 DRAFT; no public API visibility/send claim before successful graph commit. Scope source role to INFO_PRIORITY/CLARIFICATION or COUNTER_OFFER/COUNTER_OFFER. Existing current RFQ round/selection and initial incumbent evidence authorize supplier intent, not model target IDs. Trusted producer and parent run/batch/revision metadata separate from model style. Current effective policy/allowlist applies."
+    },
+    "stage_case_graph_review_card": {
+      "args": [
+        "p_job",
+        "p_token",
+        "p_revision",
+        "p_batch",
+        "p_card"
+      ],
+      "returns": "{kind:STAGED,card_id:uuid} or STALE",
+      "rule": "Durably stage immutable card on current job/run; no Complete status transition here. Check latest quote IDs, last completed role IDs, numeric plan/price validation, owner/revision/batch/lease. Idempotent same payload returns same ID, differing snapshot conflicts."
+    },
+    "complete_case_graph_review": {
+      "args": [
+        "p_job",
+        "p_token",
+        "p_revision",
+        "p_batch",
+        "p_output"
+      ],
+      "returns": "STORED for HOLD or wait; COMPLETE needs {kind:STORED,card_id,review_revision:positive int,input_revision,status:Complete}; unresolved outbound uses {kind:WAITING_OUTBOUND,card_id}; STALE discards newer revision results.",
+      "transaction": [
+        "Verify trusted graph job/lease/revision and exact staged draft/card IDs; reject forged source references and unsupported status",
+        "For WAITING_REPLY: publish only validated CLARIFICATION drafts with graph-review-v1, producer_run_id,review_batch_id,input_revision,auto_policy_eligible and current opaque auto_settings_version; preserve ON approval and OFF scope. Never report Gmail SENT from graph stop.",
+        "For COMPLETE: verify last completed RESPONSE_PLAN/COUNTER_OFFER and latest quotes; derive allowed closure from validated card/role outcomes. Intermediate failed/rechecked runs never become closure evidence.",
+        "Publish validated staged COUNTER_OFFER drafts under current policy; unresolved terminal DRAFT/SENDING/UNKNOWN means do NOT commit Complete. Store a pending immutable card with approval/wait/unknown state and preserved source revision; no fake approval or provider result. Retire unused same-run proposals without sending.",
+        "When outbound is resolved and no active clarification/unresolved request remains, atomically save immutable REVIEW_CREATED snapshot, monotonic review_revision, latest_review_jsonb, run references, status Complete/REVIEW_READY, clear superseded selection and mark job completed. Repeat acknowledgements reuse result."
+      ]
+    },
+    "finalize_case_graph_reviews": {
+      "args": {
+        "p_limit": "int"
+      },
+      "returns": "integer 0..limit",
+      "rule": "Periodic bounded recovery finalizes pending staged cards only after proven outbound resolution and unchanged owner/input/batch/evidence. No timed UNKNOWN->FAILED or resend; no Complete with active clarification. Old revisions become STALE. Use persisted provider/send evidence; never infer delivery from a graph result."
+    },
+    "schedule_case_graph_recalculations": {
+      "args": {
+        "p_limit": "int"
+      },
+      "returns": "integer 0..limit",
+      "rule": "Read durable explicitly authorized input-correction/conditions-change events and atomically enqueue PLAN only for active eligible reviewed cases with latest revision/quote proof. Idempotent by source event, never silently consume Waiting/Confirm/Pending/archived/accepted, unfinished approval or UNKNOWN. Normal validated reply events go to REPLY. Do not manufacture events or auto-execute on GET."
+    }
+  },
+  "existing_sql_boundary": {
+    "source": "User Downloads/01_gyeonjwo_setup_v3.6.sql commit_review(p_owner,p_case,p_input,p_batch,p_card)",
+    "incompatibility": "Existing commit_review requires source_quote_ids/source_run_ids, review_outcome and matching closure fields inside completed role outputs; agent schemas omit those fields. A blind call fails. DB owner must implement a compatible transactional review commit with the same ownership/revision/outbound/immutable-history invariants, validating structured role outputs without silently modifying completed agent_runs. This code does not install or modify SQL.",
+    "card_mapping": "Graph quote_version_ids retained and source_quote_ids added; source_run_ids are latest completed role runs for current batch; cards preserve plans/counter_offer, reference amounts, evidence. VALID plans yield COMPLETED unless counter HOLD; conditional plans or counter HOLD yield REVIEW_REQUIRED_CLOSED with fixed nonblank closure_reason. Empty plans are rejected, not mislabeled NO_VALID_PLAN without code proof."
+  },
+  "stores": "ReviewGraphStore implements Comparison/Priority/CounterOffer/ReviewCardStore. Shared quote_snapshot decoder supports full agent_record and recognized legacy row/collection shapes. Agent snapshots must agree with canonical identity, version, unit, validity, currency, price and quantity; numeric equality uses Decimal without rounding. Historical evidence is bounded by trusted job IDs plus owner/case reads; new quotes require actual inbound supplier linkage.",
+  "delivery": "Shared sender supports graph-review-v1 CLARIFICATION and COUNTER_OFFER only with matching completed role, same case/input/batch, staged/public distinction, current policy and final DB claim. UNKNOWN remains unresent. Candidate selection and mailbox policy are never overridden. The authorized claim recipient/subject/body must exactly match the checked draft snapshot. Proven pre-provider mismatch is recorded FAILED/SEND_SNAPSHOT_CHANGED; provider has not been called, so it is not UNKNOWN.",
+  "privacy": "No mail/attachment/model content, contacts or tokens in logs. Failure records discard raw partial tool calls. No actual Gmail/LLM/Supabase writes performed during verification.",
+  "verification": {
+    "actual_graph_scoped_store_and_mocked_validators_assertions": 21,
+    "including_delivery_rollout_and_recovery_assertions": 47,
+    "monetary_calculation_note": "Code validators were stubbed in orchestration tests; not a new numerical accuracy or live integration certification.",
+    "production_end_to_end_verified": false,
+    "sql_created": false,
+    "remote_schema_changed": false,
+    "test_files_retained": false,
+    "quote_integrity_and_send_snapshot_assertions": 33
+  }
+}

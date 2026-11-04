@@ -24,6 +24,10 @@ class WorkCaseListRepository:
         from app.features.work_cases.infrastructure.resume_repository import ResumeEligibilityRepository
         return ResumeEligibilityRepository(self.client).blocks(owner, cases)
 
+    def candidate_blocks(self, owner, cases):
+        from app.features.work_cases.infrastructure.candidate_repository import CandidateRepository
+        return CandidateRepository(self.client).blocks(owner, cases)
+
     def rows(self, owner, snapshot, archived):
         cases, after = [], None
         try:

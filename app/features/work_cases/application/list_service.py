@@ -83,6 +83,9 @@ class WorkCaseListService:
             hold_reasons = self.repo.hold_reasons(owner, held) if held else {}
             resumable = [page_cases[str(row.case_id)] for _, row in page if 'RESUME' in row.allowed_actions]
             resume_blocks = self.repo.resume_blocks(owner, resumable) if resumable else {}
+            candidate_cases = [page_cases[str(row.case_id)] for _, row in page
+                               if row.processing_step in {'CANDIDATES', 'SELECTING_CANDIDATES'}]
+            candidate_blocks = self.repo.candidate_blocks(owner, candidate_cases) if candidate_cases else {}
             for _, row in page:
                 row.hold = hold_reasons.get(str(row.case_id))
                 if str(row.case_id) in resume_blocks:
@@ -90,6 +93,10 @@ class WorkCaseListService:
                     code, message = resume_blocks[str(row.case_id)]
                     row.disabled_actions.append({'action': 'RESUME', 'reason_code': code, 'message': message})
                 row.reply_summary = summaries[str(row.case_id)]
+                if str(row.case_id) in candidate_blocks:
+                    from app.features.work_cases.application.candidates import apply_candidate_action
+                    apply_candidate_action(page_cases[str(row.case_id)], row.allowed_actions, row.disabled_actions,
+                                           candidate_blocks[str(row.case_id)])
             next_cursor = (self.codec.encode(scope, snapshot, page[-1][0]) if len(filtered) > limit else None)
             return WorkCaseList(items=[row for _, row in page], next_cursor=next_cursor,
                                 counts=counts, intake_pending=self.repo.intake_pending(owner))
