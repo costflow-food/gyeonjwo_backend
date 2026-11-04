@@ -2147,7 +2147,8 @@ def validate_purchase_plan(plan_type: Literal['KEEP', 'SWITCH', 'SPLIT'], alloca
 def revalidate_plans(store: ComparisonStore, case_id: str, plans: list[dict]) -> dict:
     """구매안 검증 노드: 안마다 최신 견적으로 총액·위반을 다시 계산한다(07 "코드 계산·조건 검증").
     반환: {check: PASS·FIX·NEED_INFO, violations: [{plan, code, supplier_id, expected, actual}]}
-    견적이 최신이 아니면 NEED_INFO(③부터 다시), 위반·총액 차이가 있으면 FIX(④가 고친다)."""
+    견적이 최신이 아니면 NEED_INFO(③부터 다시), 위반·총액 차이가 있으면 FIX(④가 고친다).
+    기존 업체의 총액을 계산할 수 있는데 유지안이 없으면 KEEP_MISSING으로 FIX한다(검토 카드의 비교 기준)."""
     case = _read(lambda: store.get_work_case(case_id))
     latest = set(case.get('latest_quote_version_ids') or [])
     records = dict(_read(lambda: store.get_quote_versions(case_id, sorted(latest))))
@@ -2167,7 +2168,20 @@ def revalidate_plans(store: ComparisonStore, case_id: str, plans: list[dict]) ->
         if expected != (_amount_text(_amount(plan.get('total_amount'))) if plan.get('total_amount') else None):
             violations.append({'plan': index, 'code': 'TOTAL_MISMATCH', 'supplier_id': None,
                                'expected': expected, 'actual': plan.get('total_amount')})
+    violations += _missing_keep(store, case_id, case, records, plans)
     return {'check': 'NEED_INFO' if need_info else 'FIX' if violations else 'PASS', 'violations': violations}
+
+
+def _missing_keep(store: ComparisonStore, case_id: str, case: dict, records: dict, plans: list[dict]) -> list[dict]:
+    """유지안이 빠졌는지. 기존 업체의 총액을 계산할 수 있으면 build_plan_candidates가 유지안을 만드므로 카드에 있어야 한다."""
+    if any(plan['plan_type'] == 'KEEP' for plan in plans):
+        return []
+    incumbents = {mail['supplier_id'] for mail in _read(lambda: store.list_case_mails(case_id))
+                  if mail.get('message_role') == 'INITIAL' and mail.get('supplier_id')}
+    return [{'plan': None, 'code': 'KEEP_MISSING', 'supplier_id': record.supplier_id,
+             'hint': '기존 업체 유지안(KEEP)을 validate_purchase_plan으로 확인해 plans에 넣는다.'}
+            for quote_id, record in records.items()
+            if record.supplier_id in incumbents and not cost_sheet(quote_id, record, case['quantity'], case['unit']).blocked]
 
 
 
