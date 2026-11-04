@@ -1,0 +1,85 @@
+{
+  "contract_version": 1,
+  "ticket": "KAN-109",
+  "source": "User-supplied KAN-109_API_연결_계약.md; migration 20261103080639_web_supplier_ac_registration reported applied by DB owner, not independently inspected.",
+  "status": "IMPLEMENTED_LOCALLY_NOT_DEPLOYED",
+  "http": {
+    "method": "GET",
+    "path": "/api/v1/work-cases/{case_id}/contact-candidates",
+    "authentication": "Same Supabase JWT dependency as mailbox connect; owner is the verified principal, never request data.",
+    "query": {
+      "expected_revision": "Optional positive integer; if omitted read current owned work_cases.input_revision. RPC rechecks the exact revision."
+    },
+    "response": {
+      "data": {
+        "case_id": "UUID",
+        "revision": "positive integer",
+        "items": "C candidate objects from the documented RPC array, validated before exposure"
+      },
+      "meta": {
+        "request_id": "request ID"
+      }
+    },
+    "headers": {
+      "Cache-Control": "private, no-store"
+    },
+    "frontend_contract": "This path/envelope is the backend implementation proposal based on the supplied review path. Frontend wiring and deployment still require joint verification."
+  },
+  "rpc": {
+    "name": "list_web_contact_candidates",
+    "arguments": [
+      "p_owner",
+      "p_case",
+      "p_expected_revision"
+    ],
+    "return": "Raw array, [] when empty. No wrapper, license_no or observed_at is invented. service_role server client only."
+  },
+  "c_policy": {
+    "identity": "candidate_id is separate from supplier_id; supplier_id/contact_email must be null.",
+    "selectable": false,
+    "rfq_eligible": false,
+    "reason_code": "CONTACT_REQUIRED",
+    "phone_present": "전화로 업무 이메일 확인 필요",
+    "phone_absent": "연락처 미확보",
+    "storage": "No direct reads/writes to web_contact_candidates; deployed RPC owns revision and promoted-A exclusion. No phone workflow added."
+  },
+  "rfq": {
+    "selection": "Fresh API-12 requests require an existing owned REGISTERED/VERIFIED_WEB supplier with matching current business email plus actual owned supplier_items referenced by the saved candidate. Guard precedes policy lookup and mutation; durable replay skips fresh checks.",
+    "registered_mapping": "LINKED_REGISTERED alone and empty supplier_item_ids do not qualify. Agent catalog tools already read supplier_items with owner filter; candidate snapshots require item evidence. Missing or wrong-supplier mappings block selection.",
+    "approval": "No domain-specific approval and no web_supplier_rfq_approval_required call. Existing settings, mailbox scope limits, caution semantics and user selection gate are preserved.",
+    "concurrency": "DB selection transaction, send claim and RFQ contact trigger must enforce authoritative mutable facts; Python read checks are not a transaction or sending authorization."
+  },
+  "error_mapping": {
+    "P0002 / RESOURCE_NOT_FOUND": "404 RESOURCE_NOT_FOUND; missing/foreign alike",
+    "40001 / REVISION_CONFLICT": "409 REVISION_CONFLICT, retryable=false",
+    "42501 or PGRST202": "503 CONTACT_CANDIDATES_INTEGRATION_REQUIRED; server-admin action, not user 403",
+    "55000 / RFQ_CONTACT_REQUIRED": "409 RFQ_CONTACT_REQUIRED in selection/RFQ adapters",
+    "unknown_SQLSTATE_or_invalid_RPC_shape": "503 PROCESSING_UNAVAILABLE; provider messages/details/hints are not returned or logged"
+  },
+  "scope": {
+    "registration": "upsert_web_supplier five-argument registration and crawl-to-registration mapping remain the collector owner responsibility; full registration JSON contract was not supplied here. No registration HTTP endpoint invented.",
+    "schema_changes": false,
+    "agent_source_changes": false,
+    "sql_files_created": false,
+    "B_status_branch": "Separate; no B rollout changes in this branch."
+  },
+  "verification": {
+    "python_ast": "passed",
+    "openapi": "contact-candidates route/query/schema checked in isolated FastAPI app",
+    "pip_check": "passed",
+    "http_network_transport": "Not exercised; route function and serialization tested directly.",
+    "real_supabase_calls": 0,
+    "real_gmail_sends": 0,
+    "real_llm_calls": 0,
+    "permanent_test_files_created": false,
+    "isolated_contract_assertions": 61,
+    "selection_flow": "Passed: guard before policy/write, existing approval settings, immutable replay",
+    "additional_review_assertions": 54,
+    "additional_review": "Contact trigger rejection remains 409 without draft recovery lookup; lost-ack recovery and immutable snapshot checks retained; contact service reuses app-scoped client."
+  },
+  "remaining": [
+    "Frontend must consume the separate data.items contacts list and retain both false flags.",
+    "Verify against actual deployed RPC with owned/no-result/foreign/stale-revision cases after deployment; no live verification claimed.",
+    "A promotion, duplicate suppression and REGISTERED no-update behavior are DB/collector responsibilities and need end-to-end verification with the owning teammate."
+  ]
+}

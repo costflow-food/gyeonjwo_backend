@@ -1,6 +1,6 @@
 from typing import Annotated
 from uuid import UUID
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from app.api.responses import Envelope, api_json
 from app.features.mailboxes.api.router import require_google_user
@@ -8,9 +8,34 @@ from app.features.work_cases.application.candidates import CandidateService
 from app.features.work_cases.infrastructure.candidate_repository import CandidateRepository
 from app.features.work_cases.domain.candidates import CandidatesResponse, CandidateSelectionRequest, CandidateSelectionResponse
 from app.shared.infrastructure.db.client import make_server_client
+from app.features.work_cases.application.contact_candidates import ContactCandidateService
+from app.features.work_cases.infrastructure.contact_candidate_repository import ContactCandidateRepository
+from app.features.work_cases.domain.contact_candidates import ContactCandidatesResponse
 
 router = APIRouter(prefix='/api/v1/work-cases', tags=['Case candidates'])
 PRIVATE = {'Cache-Control': 'private, no-store'}
+
+
+def get_contact_candidate_service(request: Request):
+    with request.app.state.service_lock:
+        service = getattr(request.app.state, 'contact_candidate_service', None)
+        if service is None:
+            service = ContactCandidateService(ContactCandidateRepository(make_server_client(request.app.state.settings)))
+            request.app.state.contact_candidate_service = service
+        return service
+
+
+@router.get('/{case_id}/contact-candidates', response_model=Envelope[ContactCandidatesResponse],
+            summary='KAN-109: 업무 이메일 미확보 후보 별도 조회')
+def contact_candidates(case_id: UUID,
+                       expected_revision: Annotated[int | None, Query(ge=1)] = None,
+                       principal=Depends(require_google_user), service=Depends(get_contact_candidate_service)):
+    """Read only. C IDs never identify suppliers; both RFQ selection flags are false.
+
+    If expected_revision is omitted, the server reads the current owned revision.
+    The RPC rechecks it, including concurrent changes after the initial read.
+    """
+    return api_json(service.get(principal.user_id, case_id, expected_revision).model_dump(mode='json'), headers=PRIVATE)
 
 
 def get_candidate_service(request: Request):

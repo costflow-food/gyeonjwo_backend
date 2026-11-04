@@ -26,6 +26,9 @@ class RfqRepository:
             if code == '40001':
                 raise ServiceError('REVISION_CONFLICT', '업무 또는 작업 소유권이 변경됐습니다.', 409, retryable=False) from None
             if code == '55000':
+                if getattr(error, 'message', None) == 'RFQ_CONTACT_REQUIRED':
+                    raise ServiceError('RFQ_CONTACT_REQUIRED', '현재 거래처의 업무 이메일과 수신자를 확인해 주세요.',
+                                       409, retryable=False, next_action='REFRESH_CASE') from None
                 raise ServiceError('ACTION_NOT_ALLOWED', '현재 상태에서는 RFQ 작업을 진행할 수 없습니다.', 409, retryable=False) from None
             raise ServiceError('PROCESSING_UNAVAILABLE', 'RFQ 저장소를 확인할 수 없습니다.', 503) from None
 

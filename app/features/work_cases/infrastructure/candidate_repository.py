@@ -92,6 +92,40 @@ class CandidateRepository:
         except Exception:
             raise ServiceError('PROCESSING_UNAVAILABLE', '후보 선택 이력을 확인할 수 없습니다.', 503) from None
 
+    def require_rfq_supplier(self, owner, candidate):
+        """Validate persisted supplier and mapped items, never a C candidate ID.
+
+        LINKED_REGISTERED with empty item mappings is not RFQ authorization.
+        No email-domain rule or separate web-supplier approval is introduced.
+        The submit transaction/send trigger must recheck mutable contact facts.
+        """
+        from app.features.work_cases.domain.rfq import mailbox_address
+        rows = self.rows(self.client.table('suppliers').select('id,contact_email,source_type')
+            .eq('owner_user_id', str(owner)).eq('id', str(candidate.supplier_id))
+            .in_('source_type', ['REGISTERED', 'VERIFIED_WEB']).limit(1))
+        try:
+            valid = (len(rows) == 1 and str(rows[0]['id']) == str(candidate.supplier_id)
+                     and rows[0]['source_type'] in {'REGISTERED', 'VERIFIED_WEB'}
+                     and mailbox_address(rows[0]['contact_email']) == mailbox_address(candidate.contact_email))
+        except (ValueError, TypeError, KeyError):
+            valid = False
+        if not valid:
+            raise ServiceError('RFQ_CONTACT_REQUIRED', '현재 거래처의 업무 이메일을 확인해 주세요.',
+                               409, retryable=False, next_action='REFRESH_CASE')
+        try:
+            item_ids = {str(UUID(ref.split(':', 1)[1])) for ref in candidate.evidence_refs
+                        if ref.startswith('supplier_items:')}
+        except (ValueError, TypeError):
+            item_ids = set()
+        if not item_ids:
+            raise ServiceError('INVALID_CANDIDATE_SELECTION', '거래처의 취급 품목 연결을 확인해 주세요.', 422, retryable=False)
+        items = self.rows(self.client.table('supplier_items').select('id,supplier_id')
+            .eq('owner_user_id', str(owner)).eq('supplier_id', str(candidate.supplier_id))
+            .in_('id', sorted(item_ids)).limit(len(item_ids) + 1))
+        if (len(items) != len(item_ids) or {str(row.get('id')) for row in items} != item_ids
+                or any(str(row.get('supplier_id')) != str(candidate.supplier_id) for row in items)):
+            raise ServiceError('INVALID_CANDIDATE_SELECTION', '거래처의 취급 품목 연결을 확인해 주세요.', 422, retryable=False)
+
     def ready(self):
         try:
             result = self.client.rpc('candidate_selection_health', {}).execute().data
@@ -136,6 +170,9 @@ class CandidateRepository:
         try:
             result = self.client.rpc(name, params).execute().data
         except Exception as error:
+            if getattr(error, 'code', None) == '55000' and getattr(error, 'message', None) == 'RFQ_CONTACT_REQUIRED':
+                raise ServiceError('RFQ_CONTACT_REQUIRED', '현재 거래처의 업무 이메일과 수신자를 확인해 주세요.',
+                                   409, retryable=False, next_action='REFRESH_CASE') from None
             if getattr(error, 'code', None) == 'PGRST202':
                 raise ServiceError('CANDIDATE_SELECTION_INTEGRATION_REQUIRED', '후보 선택 저장 함수를 확인해야 합니다.',
                                    503, retryable=False, next_action='CONTACT_SERVER_ADMIN') from None
@@ -145,6 +182,7 @@ class CandidateRepository:
             statuses = {'RESOURCE_NOT_FOUND': 404, 'REVISION_CONFLICT': 409, 'CANDIDATES_CHANGED': 409,
                 'ACTION_NOT_ALLOWED': 409, 'REQUEST_IN_PROGRESS': 409, 'IDEMPOTENCY_KEY_REUSED': 409,
                 'SEND_RESULT_UNKNOWN': 409, 'INVALID_CANDIDATE_SELECTION': 422, 'SEND_SCOPE_REQUIRED': 422,
+                'RFQ_CONTACT_REQUIRED': 409,
                 'PROCESSING_UNAVAILABLE': 503}
             if code in statuses:
                 raise ServiceError(code, '최신 후보·업무·발송 설정을 확인해 주세요.', statuses[code])

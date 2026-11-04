@@ -217,7 +217,12 @@ class RfqDeliveryRepository(RfqRepository):
                                   'mail_style': style or {}})
         try:
             self.client.table('mail_drafts').insert(row).execute()
-        except Exception:
+        except Exception as error:
+            # A known trigger rejection did not create a draft. It must not
+            # become a misleading 404 via the lost-acknowledgement recovery.
+            if getattr(error, 'code', None) == '55000' and getattr(error, 'message', None) == 'RFQ_CONTACT_REQUIRED':
+                raise ServiceError('RFQ_CONTACT_REQUIRED', '현재 거래처의 업무 이메일과 수신자를 확인해 주세요.',
+                                   409, retryable=False, next_action='REFRESH_CASE') from None
             # Do not retry INSERT blindly, replace a draft, or mint a new intent.
             existing = self.draft(owner, draft_id)
             for key in ('work_case_id', 'supplier_id', 'intent_id', 'purpose', 'recipient', 'input_revision', 'subject', 'body_text'):
