@@ -106,7 +106,7 @@ class ReviewGraphStore(GraphStore):
 
     def start_agent_run(self, case_id, role, input_revision, input_snapshot, model_id, prompt_version):
         self.check(case_id)
-        if str(role) not in {'INFO_EXTRACTOR', 'INFO_PRIORITY', 'RESPONSE_PLAN', 'COUNTER_OFFER'} or input_revision != self.scope.revision:
+        if input_revision != self.scope.revision:
             raise ServiceError('ACTION_NOT_ALLOWED', '회신 검토 역할 범위를 벗어났습니다.', 409)
         result = self.rpc('begin_case_graph_agent_run', p_role=str(role), p_input=input_snapshot,
                           p_model=model_id, p_prompt_version=prompt_version)

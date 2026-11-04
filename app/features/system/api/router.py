@@ -36,23 +36,18 @@ def ready(request: Request):
             if not worker or not worker.running:
                 return JSONResponse({'status':'not_ready','mode':'google-mailbox','checks':checks},status_code=503)
             checks['gmail_worker']='running'
-        checks['extraction'] = 'disabled'
-        checks['review_execution_mode'] = 'GRAPH_START' if settings.agent_graph_enabled else 'EXTRACTION_ONLY'
-        if settings.agent_extraction_enabled:
-            from app.features.work_cases.api.router import get_runtime_repository
-            try:
-                if ((not settings.agent_graph_enabled and not settings.agent_stop_after_extraction)
-                        or not get_runtime_repository(request).available()):
-                    raise RuntimeError('Extraction contract unavailable')
-                checks['extraction'] = 'ready'
-                if settings.agent_extraction_worker_enabled:
-                    worker = request.app.state.extraction_worker
-                    if not worker or not worker.running:
-                        raise RuntimeError('Extraction worker unavailable')
-                    checks['extraction'] = 'running'
-            except Exception:
-                checks['extraction'] = 'not_ready'
-                return JSONResponse({'status':'not_ready','mode':'google-mailbox','checks':checks},status_code=503)
+        checks['review_execution_mode'] = 'GRAPH'
+        from app.features.work_cases.api.router import get_runtime_repository
+        try:
+            if not get_runtime_repository(request).available():
+                raise RuntimeError('Graph contract unavailable')
+            worker = request.app.state.extraction_worker
+            if not worker or not worker.running:
+                raise RuntimeError('Graph worker unavailable')
+            checks['extraction'] = 'running'
+        except Exception:
+            checks['extraction'] = 'not_ready'
+            return JSONResponse({'status':'not_ready','mode':'google-mailbox','checks':checks},status_code=503)
         return {'status':'ready','mode':'google-mailbox','checks':checks}
     settings = request.app.state.settings
     try:

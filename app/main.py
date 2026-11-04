@@ -92,23 +92,19 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
                 rfq_worker = RfqMetadataWorker(metadata_repo,
                     app.state.mailbox_service, [str(x) for x in settings.rfq_metadata_owner_ids])
                 app.state.rfq_metadata_worker = rfq_worker
-            if settings.agent_extraction_worker_enabled:
-                if not settings.agent_extraction_enabled or (not settings.agent_graph_enabled and not settings.agent_stop_after_extraction):
-                    raise RuntimeError('Enable extraction-only integration before starting its worker')
-                from app.features.work_cases.application.extraction_worker import ExtractionWorker
-                from app.features.work_cases.infrastructure.graph_repository import runtime_repository
-                if app.state.mailbox_service is None:
-                    app.state.mailbox_service = make_mailbox_service(settings)
-                repo = runtime_repository(make_server_client(settings), settings)
-                if not repo.available():
-                    raise RuntimeError('Extraction runtime DB contract is not ready')
-                if settings.agent_graph_enabled:
-                    from app.features.work_cases.application.graph_worker import GraphWorker
-                    extraction_worker = GraphWorker(settings, repo, app.state.mailbox_service,
-                        on_drafts_ready=rfq_workflow.wake.set if rfq_workflow else None)
-                else:
-                    extraction_worker = ExtractionWorker(settings, repo, app.state.mailbox_service)
-                app.state.extraction_worker = extraction_worker
+            # The public graph is the only agent runtime. DB/credentials must
+            # be ready; temporary per-stage feature switches are not consulted.
+            settings.require_llm()
+            from app.features.work_cases.infrastructure.graph_repository import runtime_repository
+            from app.features.work_cases.application.graph_worker import GraphWorker
+            if app.state.mailbox_service is None:
+                app.state.mailbox_service = make_mailbox_service(settings)
+            repo = runtime_repository(make_server_client(settings), settings)
+            if not repo.available():
+                raise RuntimeError('Graph runtime DB contract is not ready')
+            extraction_worker = GraphWorker(settings, repo, app.state.mailbox_service,
+                on_drafts_ready=rfq_workflow.wake.set if rfq_workflow else None)
+            app.state.extraction_worker = extraction_worker
             # Validate every dependency before any worker can process mail.
             # The sender starts last, after receiver/recovery startup succeeds.
             for prepared_worker in (extraction_worker, worker, connected_worker, rfq_worker, rfq_workflow):

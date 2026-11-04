@@ -1,19 +1,25 @@
 """Backend-owned START adapter; later entry points need their own storage contract."""
 import inspect
+import logging
 from contextlib import ExitStack
 import httpx
 from app.core.errors import ServiceError
 from app.features.work_cases.infrastructure.agent_store import ScopedStore
 from app.features.work_cases.infrastructure.graph_store import GraphStore
 
+logger = logging.getLogger('uvicorn.error.case_graph')
 
-def graph_contract():
+
+def graph_contract(*, review_enabled=False):
     try:
         from app.agents import agents, graph, nodes, schemas, tools
         for obj, names in ((tools, ('use_case_store', 'use_quote_store', 'use_candidate_store', 'use_draft_store')),
                            (nodes, ('use_document_store',)), (graph, ('build_graph', 'run_case'))):
             if any(not callable(getattr(obj, name, None)) for name in names):
                 raise ValueError('Missing graph protocol')
+        if review_enabled and (not callable(getattr(tools, 'use_priority_store', None))
+                               or not callable(getattr(nodes, 'use_card_store', None))):
+            raise ValueError('Missing review graph stores')
         if not {'model', 'runs', 'role_models'} <= set(inspect.signature(agents.AgentRunner).parameters):
             raise ValueError('Incompatible runner')
         if not {'run_agent', 'current_revision', 'latest_quotes'} <= set(inspect.signature(graph.build_graph).parameters):
@@ -27,12 +33,11 @@ def graph_contract():
 def run_graph(*, settings, scope, runner_factory=None, store_factory=GraphStore):
     mode = (scope.job or {}).get('start_from')
     review = (scope.job or {}).get('execution_mode') == 'GRAPH_REVIEW_V1'
-    if mode not in {'START', 'REPLY', 'PLAN'} or (mode != 'START' and not (
-            review and settings.agent_graph_review_enabled)) or (mode == 'START' and review):
+    if mode not in {'START', 'REPLY', 'PLAN'} or (mode != 'START' and not review) or (mode == 'START' and review):
         raise ServiceError('GRAPH_ENTRYPOINT_NOT_CONNECTED',
                            '이 검토 재개 경로의 서버 연결이 아직 준비되지 않았습니다.',
                            503, retryable=False, next_action='CONTACT_SERVER_ADMIN')
-    agents, graph, nodes, schemas, tools = graph_contract()
+    agents, graph, nodes, schemas, tools = graph_contract(review_enabled=review)
     if review and store_factory is GraphStore:
         from app.features.work_cases.infrastructure.review_graph_store import ReviewGraphStore
         store = ReviewGraphStore(scope, scope.job)
@@ -68,18 +73,22 @@ def run_graph(*, settings, scope, runner_factory=None, store_factory=GraphStore)
                 result.client = result.root_client.chat.completions
                 result.max_retries = 0
                 return result
-            roles = tuple(role for role in schemas.AgentRole if role != schemas.AgentRole.CANDIDATE) if review else (schemas.AgentRole.INFO_EXTRACTOR, schemas.AgentRole.CANDIDATE)
+            roles = tuple(schemas.AgentRole)
             runner = agents.AgentRunner(model(), runs=store, role_models={role: model(role) for role in roles})
 
         def run_role(role, data):
-            scope.check(str(data.case_id), data.input_revision)
-            allowed = ({schemas.AgentRole.INFO_EXTRACTOR, schemas.AgentRole.INFO_PRIORITY, schemas.AgentRole.RESPONSE_PLAN,
-                        schemas.AgentRole.COUNTER_OFFER} if review else {schemas.AgentRole.INFO_EXTRACTOR, schemas.AgentRole.CANDIDATE})
-            if role not in allowed:
-                raise ServiceError('ACTION_NOT_ALLOWED', '이 검토 작업에서 지원하지 않는 역할입니다.', 409)
-            result = runner(role, data)
-            scope.check(scope.case_id, scope.revision)
-            return result
+            try:
+                scope.check(str(data.case_id), data.input_revision)
+                result = runner(role, data)
+                scope.check(scope.case_id, scope.revision)
+                return result
+            except ServiceError as error:
+                # Agent graph converts exceptions to FAILED. Keep a safe reason
+                # for a host operator without mail/model content or raw errors.
+                safe = error.code if error.code in {'ACTION_NOT_ALLOWED', 'REVISION_CONFLICT',
+                    'EXTRACTION_TIME_LIMIT', 'EXTRACTION_LEASE_LOST', 'PROCESSING_UNAVAILABLE'} else 'GRAPH_ROLE_FAILED'
+                logger.warning('graph role_failed role=%s code=%s', str(role), safe)
+                raise
 
         app_graph = graph.build_graph(run_agent=run_role, current_revision=store.current_input_revision,
                                       latest_quotes=store.latest_ids)

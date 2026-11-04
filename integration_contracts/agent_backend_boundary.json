@@ -81,5 +81,10 @@
     "AGENT_GRAPH_ENABLED": "false by default selects legacy extraction-only mode; true needs graph_start.json functions",
     "AGENT_GRAPH_REVIEW_ENABLED": "false by default; true additionally needs graph_review.json functions and graph mode",
     "external_effects": "No enabling, live Gmail/LLM calls, schema migration or direct SQL installation in this integration."
+  },
+  "runtime_policy_override": {
+    "source": "2026-11-04 explicit user request",
+    "policy": "Graph-only automatic API runtime. Removed all five AGENT enable/stop switches and duplicate backend role allowlists. Old opt-in/disabled-default guidance below is historical. START and REPLY/PLAN job identities, storage protocol, authentication/revision/lease checks and approval/reply/send gates remain.",
+    "deployment": "Full graph/review DB capabilities required before startup. Old env keys are ignored by Settings; never bypass failed health. Actual mail sending retains its independent setting."
   }
 }

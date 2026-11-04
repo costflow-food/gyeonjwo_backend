@@ -58,14 +58,6 @@ class Settings(BaseSettings):
     google_mailbox_poll_seconds: int = Field(default=90, ge=60, le=120)
     gmail_initial_sync_limit: int = Field(default=10, ge=1, le=500)
     app_build_revision: str = 'development'
-    agent_stop_after_extraction: bool = True
-    agent_extraction_enabled: bool = False
-    agent_extraction_worker_enabled: bool = False
-    # Opt-in full START graph: preprocess -> extraction -> candidates -> drafts.
-    # Legacy extraction stays available until the graph DB contract is deployed.
-    agent_graph_enabled: bool = False
-    # Separate rollout: requires durable REPLY/PLAN jobs and guarded card commit.
-    agent_graph_review_enabled: bool = False
     agent_graph_review_timeout_seconds: int = Field(default=300, ge=30, le=600)
     agent_graph_timeout_seconds: int = Field(default=180, ge=30, le=600)
     agent_graph_request_timeout_seconds: int = Field(default=45, ge=5, le=120)
@@ -74,12 +66,6 @@ class Settings(BaseSettings):
     rfq_workflow_enabled: bool = False
     rfq_workflow_owner_ids: list[UUID] = Field(default_factory=list)
     rfq_mail_sending_enabled: bool = False
-
-    @model_validator(mode='after')
-    def graph_review_dependency(self):
-        if self.agent_graph_review_enabled and not self.agent_graph_enabled:
-            raise ValueError('AGENT_GRAPH_REVIEW_ENABLED requires AGENT_GRAPH_ENABLED')
-        return self
 
     @field_validator('supabase_url', 'llm_base_url', 'supabase_secret_key', 'supabase_publishable_key',
                      'llm_api_key', 'gmail_client_secret', 'gmail_refresh_token', 'google_token_encryption_key',

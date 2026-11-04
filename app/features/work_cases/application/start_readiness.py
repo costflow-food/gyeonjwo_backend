@@ -28,12 +28,6 @@ class StartReadiness:
 
 
 def configuration_readiness(settings):
-    if not settings.agent_extraction_enabled:
-        return StartReadiness('EXTRACTION_DISABLED', '서버의 검토 실행 설정이 꺼져 있습니다.',
-                              ('AGENT_EXTRACTION_ENABLED',))
-    if not settings.agent_graph_enabled and not settings.agent_stop_after_extraction:
-        return StartReadiness('EXTRACTION_MODE_REQUIRED', '서버를 ① 정보 추출 전용 실행 모드로 설정해야 합니다.',
-                              ('AGENT_STOP_AFTER_EXTRACTION',))
     missing = tuple(name.upper() for name in ('llm_base_url', 'llm_api_key', 'llm_model')
                     if not getattr(settings, name))
     if missing:
@@ -41,18 +35,13 @@ def configuration_readiness(settings):
     return StartReadiness()
 
 
-def agent_readiness(graph_enabled=False):
-    if graph_enabled:
-        try:
-            from app.features.work_cases.application.graph_boundary import graph_contract
-            graph_contract()
-            return StartReadiness()
-        except Exception:
-            return StartReadiness('AGENT_INTEGRATION_REQUIRED', '에이전트 그래프 공개 인터페이스를 확인해야 합니다.')
-    from app.features.work_cases.application.agent_boundary import extraction_adapter_available
-    if not extraction_adapter_available():
-        return StartReadiness('AGENT_INTEGRATION_REQUIRED', '정보 추출 에이전트 연결 코드를 확인해야 합니다.')
-    return StartReadiness()
+def agent_readiness():
+    try:
+        from app.features.work_cases.application.graph_boundary import graph_contract
+        graph_contract(review_enabled=True)
+        return StartReadiness()
+    except Exception:
+        return StartReadiness('AGENT_INTEGRATION_REQUIRED', '에이전트 그래프 공개 인터페이스를 확인해야 합니다.')
 
 
 def database_readiness(repo):
@@ -69,9 +58,6 @@ def database_readiness(repo):
 
 
 def worker_readiness(settings, worker):
-    if not settings.agent_extraction_worker_enabled:
-        return StartReadiness('EXTRACTION_WORKER_DISABLED', '서버의 정보 추출 워커 설정이 꺼져 있습니다.',
-                              ('AGENT_EXTRACTION_WORKER_ENABLED',))
     if worker is None or not worker.running:
         return StartReadiness('EXTRACTION_WORKER_UNAVAILABLE', '정보 추출 워커가 실행 중이 아닙니다. 서버 상태를 확인해 주세요.')
     return StartReadiness()

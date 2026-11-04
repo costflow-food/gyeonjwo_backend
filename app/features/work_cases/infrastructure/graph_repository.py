@@ -4,16 +4,15 @@ from app.features.work_cases.infrastructure.runtime_repository import CaseRuntim
 
 
 class GraphRuntimeRepository(CaseRuntimeRepository):
-    def __init__(self, client, *, review_enabled=False):
-        super().__init__(client)
-        self.review_enabled = review_enabled
-
     def available(self):
         result = self.call('case_graph_health')
+        return self.health_ready(result)
+
+    @staticmethod
+    def health_ready(result):
         required = {'START', 'SCOPED_LEASES', 'DOCUMENTS', 'CANDIDATES', 'DRAFTS', 'RUNS', 'RESULTS',
                     'LEGACY_RFQ_GUARD', 'CAUTION_GUARD', 'CANDIDATE_SETS', 'USER_SELECTION_GATE', 'EXTRACTED_CONTINUATIONS'}
-        if self.review_enabled:
-            required |= {'REPLY', 'PLAN', 'REVIEW_STORES', 'REVIEW_CARD_STAGE', 'REVIEW_CARD_COMMIT', 'REVIEW_OUTBOUND_GUARD'}
+        required |= {'REPLY', 'PLAN', 'REVIEW_STORES', 'REVIEW_CARD_STAGE', 'REVIEW_CARD_COMMIT', 'REVIEW_OUTBOUND_GUARD'}
         return (isinstance(result, dict) and type(result.get('contract_version')) is int and result.get('contract_version') == 1
                 and result.get('ready') is True and result.get('legacy_queue_drained') is True
                 and isinstance(result.get('capabilities'), list)
@@ -46,15 +45,14 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
         if row['input_revision'] != revision or str(row.get('current_batch_id')) != str(batch):
             raise ServiceError('REVISION_CONFLICT', '검토 입력이 변경됐습니다.', 409)
         if (row.get('archived_at') or row.get('decision') in {'ACCEPT_INCREASE', 'CONFIRM_REVIEW'} or row['status'] != 'Running'
-                or row['processing_step'] not in ({'EXTRACTING', 'SELECTING_CANDIDATES', 'NEEDS_INFO', 'BUILDING_PLANS',
-                    'BUILDING_COUNTER_OFFER'} if self.review_enabled else {'EXTRACTING', 'SELECTING_CANDIDATES'})):
+                or row['processing_step'] not in ({'EXTRACTING', 'SELECTING_CANDIDATES', 'CANDIDATES', 'NEEDS_INFO', 'BUILDING_PLANS',
+                    'GENERATING_PLANS',
+                    'BUILDING_COUNTER_OFFER'})):
             raise ServiceError('ACTION_NOT_ALLOWED', '그래프 검토 실행이 중단됐습니다.', 409)
         return row
 
     def claim(self):
-        if self.review_enabled:
-            return self.call('claim_case_graph_review_run')
-        return self.call('claim_case_graph_run', p_start_from='START')
+        return self.call('claim_case_graph_review_run')
 
     def heartbeat(self, job):
         if self.call('heartbeat_case_graph_run', p_job=job['job_id'], p_token=job['claim_token']) is not True:
@@ -70,11 +68,10 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
         scheduled = self.call('schedule_case_graph_continuations', p_limit=25)
         if type(scheduled) is not int or not 0 <= scheduled <= 25:
             raise ServiceError('PROCESSING_UNAVAILABLE', '추출 완료 업무의 그래프 연결을 확인할 수 없습니다.', 503)
-        if self.review_enabled:
-            for name in ('schedule_case_graph_replies', 'schedule_case_graph_recalculations', 'finalize_case_graph_reviews'):
-                count = self.call(name, p_limit=25)
-                if type(count) is not int or not 0 <= count <= 25:
-                    raise ServiceError('PROCESSING_UNAVAILABLE', '회신·카드 작업 복구 계약을 확인해야 합니다.', 503)
+        for name in ('schedule_case_graph_replies', 'schedule_case_graph_recalculations', 'finalize_case_graph_reviews'):
+            count = self.call(name, p_limit=25)
+            if type(count) is not int or not 0 <= count <= 25:
+                raise ServiceError('PROCESSING_UNAVAILABLE', '회신·카드 작업 복구 계약을 확인해야 합니다.', 503)
         return result
 
     def finish_graph(self, job, output):
@@ -84,4 +81,4 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
 
 
 def runtime_repository(client, settings):
-    return GraphRuntimeRepository(client, review_enabled=settings.agent_graph_review_enabled) if settings.agent_graph_enabled else CaseRuntimeRepository(client)
+    return GraphRuntimeRepository(client)

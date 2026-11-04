@@ -1,0 +1,29 @@
+{
+  "policy": "User requested removal of temporary switches and duplicate backend role allowlists; public agent graph untouched.",
+  "removed_settings": [
+    "AGENT_GRAPH_ENABLED",
+    "AGENT_GRAPH_REVIEW_ENABLED",
+    "AGENT_EXTRACTION_ENABLED",
+    "AGENT_EXTRACTION_WORKER_ENABLED",
+    "AGENT_STOP_AFTER_EXTRACTION"
+  ],
+  "default_runtime": "GraphWorker + GraphRuntimeRepository, START/REPLY/PLAN enabled and complete DB capabilities required.",
+  "preserved": [
+    "owner/revision/batch/lease checks",
+    "START/REPLY/PLAN durable job identity and separate scoped store implementations",
+    "human candidate selection, approval, reply wait, mail sending toggle",
+    "commercial validation and card persistence checks"
+  ],
+  "deployment": "Not applied to teammate Mac; existing old env keys ignored. Full graph DB contract required before new server starts; no SQL changes.",
+  "verification": {
+    "assertions": 19,
+    "public_paths": [
+      "START roles1/2",
+      "REPLY roles1/3/4/5",
+      "PLAN roles4/5"
+    ],
+    "synthetic_nodes_and_stores": true,
+    "real_db_model_mail_calls": false,
+    "permanent_tests_created": false
+  }
+}

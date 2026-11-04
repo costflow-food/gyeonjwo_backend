@@ -105,5 +105,10 @@
     "remote_schema_changed": false,
     "test_files_retained": false,
     "quote_integrity_and_send_snapshot_assertions": 33
+  },
+  "runtime_policy_override": {
+    "source": "2026-11-04 explicit user request",
+    "policy": "Graph-only automatic API runtime. Removed all five AGENT enable/stop switches and duplicate backend role allowlists. Old opt-in/disabled-default guidance below is historical. START and REPLY/PLAN job identities, storage protocol, authentication/revision/lease checks and approval/reply/send gates remain.",
+    "deployment": "Full graph/review DB capabilities required before startup. Old env keys are ignored by Settings; never bypass failed health. Actual mail sending retains its independent setting."
   }
 }

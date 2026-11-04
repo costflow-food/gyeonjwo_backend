@@ -47,7 +47,7 @@ def resume_readiness(request, repo=None, *, fresh=False):
 
 def extraction_readiness(request, repo=None, *, fresh=False):
     settings = request.app.state.settings
-    for probe in (lambda: configuration_readiness(settings), lambda: agent_readiness(settings.agent_graph_enabled)):
+    for probe in (lambda: configuration_readiness(settings), lambda: agent_readiness()):
         result = probe()
         if not result.available:
             return result

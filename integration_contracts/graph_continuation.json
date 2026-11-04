@@ -1,0 +1,30 @@
+{
+  "ticket": "BE-2",
+  "status": "READ_ONLY_INSPECTOR_PREPARED_REAL_CASE_NOT_VERIFIED",
+  "target_prefix": "ce6994f4",
+  "prerequisite": "BE-1 applied on teammate Mac, legacy queue drained and both health RPCs ready",
+  "existing_continuation": "GraphRuntimeRepository.recover calls schedule_case_graph_continuations(p_limit=25) on startup and worker recovery intervals. DB decides eligibility and creates one guarded graph job. Do not mint a new case or repeat public START for a Running case.",
+  "execution": "Continuation re-enters public START and may revalidate/extract initial mail before role 2; not a new agent entry point. Quote persistence must deduplicate unchanged evidence. No roles 3-5 or sending enabled.",
+  "inspect_command": "python -m scripts.check_graph_continuation --case-prefix ce6994f4",
+  "success": "Unique target; nonempty CandidateSnapshot matches current input_revision and current batch. Separate authenticated GET /api/v1/work-cases/{case_id}/candidates must return200 with same set/revision; inspector does not claim HTTP proof.",
+  "fallback": [
+    "If no candidate set after worker recovery, inspect durable graph job/agent failure and registered supplier_items evidence.",
+    "Archived/accepted or stopped non-Running cases must not be silently restarted. Resolve state/reopen policy with DB owner using an agreed transaction; graph resume is currently intentionally unavailable.",
+    "If a legacy job/draft/active sender blocks DB continuation, resolve it through its existing guarded completion/reconciliation path before scheduling. Do not delete jobs or bypass health."
+  ],
+  "verification": {
+    "synthetic_assertions": 17,
+    "real_case_read": false,
+    "real_case_executed": false,
+    "http_api11_verified": false,
+    "schema_changes": false,
+    "permanent_test_files_created": false,
+    "additional_review_assertions": 12,
+    "review_notes": "Independent health probes; BE-2 storage-only scope and false acceptance/HTTP flags; intervention states distinguish resume/input/send resolution."
+  },
+  "runtime_policy_override": {
+    "source": "2026-11-04 explicit user request",
+    "policy": "Graph-only automatic API runtime. Removed all five AGENT enable/stop switches and duplicate backend role allowlists. Old opt-in/disabled-default guidance below is historical. START and REPLY/PLAN job identities, storage protocol, authentication/revision/lease checks and approval/reply/send gates remain.",
+    "deployment": "Full graph/review DB capabilities required before startup. Old env keys are ignored by Settings; never bypass failed health. Actual mail sending retains its independent setting."
+  }
+}
