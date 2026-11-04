@@ -1,0 +1,38 @@
+{
+  "status": "START_CONTRACT_PRESERVED_REVIEW_CLAIM_PENDING",
+  "active_claim": {
+    "function": "claim_case_graph_run",
+    "args": {
+      "p_start_from": "START"
+    },
+    "returns": "Existing GRAPH_START_V1 job or null; no review fallback."
+  },
+  "inactive_proposal": {
+    "function": "claim_case_graph_review_run",
+    "status": "NOT_CALLED_PENDING_DB_OWNER_AGREEMENT",
+    "questions": [
+      "Does it claim only REPLY/PLAN or START too?",
+      "What atomic queue exclusion and exact health attestation apply?",
+      "What lease/return shape applies to each entry point?"
+    ]
+  },
+  "agent_interface_dependencies": [
+    "AgentRunner(model,runs,role_models)",
+    "build_graph(run_agent,current_revision,latest_quotes)",
+    "run_case(RunCaseInput)",
+    "use_case_store/use_quote_store/use_candidate_store/use_draft_store/use_document_store",
+    "Review use_priority_store/use_card_store checked when review adapter is used; review queue integration remains deferred."
+  ],
+  "scope_notes": [
+    "Legacy ExtractionWorker superclass remains used by GraphWorker; do not delete until shared thread lifecycle extracted.",
+    "Quantity source and mandatory/company policy editing are product/DB contracts still requiring decisions. No past quantity or company policy invented here."
+  ],
+  "deployment": "Existing mail/API available without graph RPCs. Restart after graph DB deployment. No SQL or remote DB changes.",
+  "verification": {
+    "correction_assertions": 19,
+    "actual_app_lifespan_with_mocked_dependencies": true,
+    "http_transport_verified": false,
+    "real_dev_db_verified": false,
+    "permanent_test_files_created": false
+  }
+}

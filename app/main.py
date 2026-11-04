@@ -92,26 +92,35 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
                 rfq_worker = RfqMetadataWorker(metadata_repo,
                     app.state.mailbox_service, [str(x) for x in settings.rfq_metadata_owner_ids])
                 app.state.rfq_metadata_worker = rfq_worker
-            if settings.agent_extraction_worker_enabled:
-                if not settings.agent_extraction_enabled or (not settings.agent_graph_enabled and not settings.agent_stop_after_extraction):
-                    raise RuntimeError('Enable extraction-only integration before starting its worker')
-                from app.features.work_cases.application.extraction_worker import ExtractionWorker
-                from app.features.work_cases.infrastructure.graph_repository import runtime_repository
-                if app.state.mailbox_service is None:
-                    app.state.mailbox_service = make_mailbox_service(settings)
+            # Graph readiness is optional for receiving mail and serving APIs.
+            # No feature toggle: attempt the existing START contract each boot.
+            from app.features.work_cases.infrastructure.graph_repository import runtime_repository
+            from app.features.work_cases.application.graph_worker import GraphWorker
+            from app.features.work_cases.application.start_readiness import configuration_readiness, agent_readiness
+            try:
+                configuration_readiness(settings).require()
+                agent_readiness().require()
                 repo = runtime_repository(make_server_client(settings), settings)
                 if not repo.available():
-                    raise RuntimeError('Extraction runtime DB contract is not ready')
-                if settings.agent_graph_enabled:
-                    from app.features.work_cases.application.graph_worker import GraphWorker
-                    extraction_worker = GraphWorker(settings, repo, app.state.mailbox_service,
-                        on_drafts_ready=rfq_workflow.wake.set if rfq_workflow else None)
-                else:
-                    extraction_worker = ExtractionWorker(settings, repo, app.state.mailbox_service)
+                    raise RuntimeError('Graph START contract unavailable')
+                if app.state.mailbox_service is None:
+                    app.state.mailbox_service = make_mailbox_service(settings)
+                extraction_worker = GraphWorker(settings, repo, app.state.mailbox_service)
+                extraction_worker.start()
                 app.state.extraction_worker = extraction_worker
-            # Validate every dependency before any worker can process mail.
-            # The sender starts last, after receiver/recovery startup succeeds.
-            for prepared_worker in (extraction_worker, worker, connected_worker, rfq_worker, rfq_workflow):
+                app.state.graph_startup_code = None
+            except Exception:
+                if extraction_worker is not None:
+                    try:
+                        extraction_worker.close()
+                    except Exception:
+                        logger.warning('graph cleanup failed code=GRAPH_CLEANUP_FAILED')
+                extraction_worker = None
+                app.state.extraction_worker = None
+                app.state.graph_startup_code = 'GRAPH_RUNTIME_UNAVAILABLE'
+                logger.warning('graph unavailable code=GRAPH_RUNTIME_UNAVAILABLE; mail/API remain available')
+            # Independent mail/metadata lifecycles; sender remains separately gated.
+            for prepared_worker in (worker, connected_worker, rfq_worker, rfq_workflow):
                 if prepared_worker is not None:
                     prepared_worker.start()
             yield
@@ -136,6 +145,7 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     app.state.mailbox_service = mailbox_service
     app.state.connected_mailbox_worker = None
     app.state.extraction_worker = None
+    app.state.graph_startup_code = 'GRAPH_RUNTIME_UNAVAILABLE'
     app.state.rfq_metadata_worker = None
     app.state.rfq_workflow_worker = None
     app.state.service_lock = threading.Lock()

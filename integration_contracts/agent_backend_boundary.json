@@ -81,5 +81,12 @@
     "AGENT_GRAPH_ENABLED": "false by default selects legacy extraction-only mode; true needs graph_start.json functions",
     "AGENT_GRAPH_REVIEW_ENABLED": "false by default; true additionally needs graph_review.json functions and graph mode",
     "external_effects": "No enabling, live Gmail/LLM calls, schema migration or direct SQL installation in this integration."
+  },
+  "runtime_policy_override": {
+    "source": "2026-11-04 PR41 review correction; supersedes previous runtime override",
+    "policy": "No temporary AGENT switches and no duplicate backend role lists. Graph START worker is optional: unavailable config/interfaces/DB/startup leaves API and mail receiver running. START follows the public graph through role2; no extraction-only fallback.",
+    "claim": "Only claim_case_graph_run(p_start_from=START). Unified START/REPLY/PLAN claim and review scheduling deferred until DB owner agreement; not called by this runtime.",
+    "steps": "Canonical agent steps SELECTING_CANDIDATES and BUILDING_PLANS. Read compatibility CANDIDATES only for persisted legacy boundary; no new writes under that alias. GENERATING_PLANS removed.",
+    "deployment": "After DB functions are deployed restart server to attach graph worker; missing graph does not prevent mail/API startup. API START still requires readiness/live worker. /ready reports mail readiness and degraded review separately."
   }
 }

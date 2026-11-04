@@ -34,7 +34,7 @@ class GraphWorker(ExtractionWorker):
             review = job.get('execution_mode') == 'GRAPH_REVIEW_V1'
             mode = job.get('start_from')
             valid_mode = (job.get('execution_mode') == 'GRAPH_START_V1' and mode == 'START') or (
-                review and self.settings.agent_graph_review_enabled and mode in {'REPLY', 'PLAN'})
+                review and mode in {'REPLY', 'PLAN'})
             if (not valid_mode
                     or type(job['input_revision']) is not int or job['input_revision'] < 1
                     or not isinstance(job['mail_ids'], list) or len(job['mail_ids']) > 100

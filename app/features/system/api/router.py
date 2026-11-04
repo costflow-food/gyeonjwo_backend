@@ -37,24 +37,20 @@ def ready(request: Request):
             if not worker or not worker.running:
                 return JSONResponse({'status':'not_ready','mode':'google-mailbox','checks':checks},status_code=503)
             checks['gmail_worker']='running'
-        checks['extraction'] = 'disabled'
-        checks['review_execution_mode'] = 'GRAPH_START' if settings.agent_graph_enabled else 'EXTRACTION_ONLY'
-        if settings.agent_extraction_enabled:
-            from app.features.work_cases.api.router import get_runtime_repository
-            try:
-                if ((not settings.agent_graph_enabled and not settings.agent_stop_after_extraction)
-                        or not get_runtime_repository(request).available()):
-                    raise RuntimeError('Extraction contract unavailable')
-                checks['extraction'] = 'ready'
-                if settings.agent_extraction_worker_enabled:
-                    worker = request.app.state.extraction_worker
-                    if not worker or not worker.running:
-                        raise RuntimeError('Extraction worker unavailable')
-                    checks['extraction'] = 'running'
-            except Exception:
-                checks['extraction'] = 'not_ready'
-                return JSONResponse({'status':'not_ready','mode':'google-mailbox','checks':checks},status_code=503)
-        return {'status':'ready','mode':'google-mailbox','checks':checks}
+        checks['review_execution_mode'] = 'GRAPH_START'
+        checks['review_claim'] = 'awaiting_db_contract'
+        from app.features.work_cases.api.router import get_runtime_repository
+        try:
+            worker = request.app.state.extraction_worker
+            if not worker or not worker.running:
+                raise RuntimeError('Graph worker unavailable')
+            if not get_runtime_repository(request).available():
+                raise RuntimeError('Graph contract unavailable')
+            checks['extraction'] = 'running'
+        except Exception:
+            checks['extraction'] = 'not_ready'
+        return {'status':'ready','mode':'google-mailbox','checks':checks,
+                'degraded_features': ['review'] if checks['extraction'] == 'not_ready' else []}
     settings = request.app.state.settings
     try:
         settings.require_server()
