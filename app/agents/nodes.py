@@ -136,7 +136,7 @@ def preprocess(state) -> dict:
 
 
 def plan_validation(state) -> dict:
-    """④ 구매안을 최신 견적으로 다시 계산해 총액·공급량·MOQ·발주 배수·분산 정책·세금 기준을 검증한다.
+    """④ 구매안을 최신 견적으로 다시 계산해 총액·공급량·MOQ·발주 배수·분산 정책·세금 기준·유지안 포함을 검증한다.
     반환: {'plan_check': PlanCheck, 'plan_check_reason': 위반 목록 JSON (FIX·NEED_INFO일 때),
            'pending_questions': ③에 넘길 미확인 (NEED_INFO일 때)}"""
     plans = [plan.model_dump(mode='json') if hasattr(plan, 'model_dump') else plan for plan in state.get('plans', [])]
