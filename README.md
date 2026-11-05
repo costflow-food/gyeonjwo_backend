@@ -27,7 +27,7 @@ cd C:\Users\user\Documents\Codex\gyeonjwo_backend
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-`.env`에 Supabase URL·서버 키·publishable 키, 승인된 LLM endpoint·모델·키, Gmail OAuth·Pub/Sub 설정을 입력합니다. 노션 07의 모델 선택은 미확정이므로 특정 모델을 자동 선택하지 않습니다. 비밀 키는 채팅이나 Flutter 코드에 넣지 않습니다. SQL v2.2(13개 테이블·101개 컬럼·서버 RPC 19개)가 배포된 Supabase가 필요합니다. 코드는 DB 구조를 자동 생성하거나 변경하지 않습니다.
+`.env`에 Supabase URL·서버 키·publishable 키, LLM endpoint·키, Gmail OAuth·토큰 암호화 키(Pub/Sub는 선택)를 입력합니다. 모델·추론 수준·시간 제한은 `app/core/config.py` 상수입니다. 비밀 키는 채팅이나 Flutter 코드에 넣지 않습니다. SQL v2.2(13개 테이블·101개 컬럼·서버 RPC 19개)가 배포된 Supabase가 필요합니다. 코드는 DB 구조를 자동 생성하거나 변경하지 않습니다.
 
 현재 이 PC에는 `.venv`와 패키지를 설치했습니다. 다른 PC에서 처음 받을 때는 아래를 먼저 실행합니다.
 
@@ -41,7 +41,7 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-서버 문서: http://127.0.0.1:8000/docs. `/health`는 서버 생존 확인, `/ready`는 필수 설정·DB 읽기 점검·Gmail 워커 실행 상태 확인입니다. `/ready`의 llm=configured는 모델 응답 품질·접속 성공을 뜻하지 않습니다. WORKER_ENABLED=true는 실제 Gmail 동기화를 시작하므로 모든 팀 설정을 확인한 뒤 켭니다. 단일 프로세스, 한 번에 한 업무 분석을 사용합니다. 분석 중 --reload로 재시작하지 마세요.
+서버 문서: http://127.0.0.1:8000/docs. `/health`는 서버 생존 확인, `/ready`는 필수 설정·DB 읽기 점검·Gmail 워커 실행 상태 확인입니다. `/ready`의 llm=configured는 모델 응답 품질·접속 성공을 뜻하지 않습니다. 연결 메일함 워커와 RFQ 메타데이터 워커는 서버 시작 시 자동으로 시작되고, 비밀값이 없으면 항목 이름만 경고한 뒤 그 워커만 꺼집니다. 같은 DB에 붙는 서버는 하나만 띄웁니다. 단일 프로세스, 한 번에 한 업무 분석을 사용합니다. 분석 중 --reload로 재시작하지 마세요.
 
 ## 코드 위치
 

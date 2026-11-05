@@ -23,7 +23,8 @@ def outbound_metadata(raw):
 
 class RfqMetadataWorker:
     def __init__(self, repo, mailbox, owners):
-        self.repo, self.mailbox, self.owners = repo, mailbox, tuple(owners)
+        # owners is called every cycle so newly connected mailboxes are picked up without a restart.
+        self.repo, self.mailbox, self.owners = repo, mailbox, owners
         self.stop = threading.Event()
         self.thread = None
         self.running = False
@@ -55,7 +56,12 @@ class RfqMetadataWorker:
             try:
                 while not self.stop.is_set():
                     busy = False
-                    for owner in self.owners:
+                    try:
+                        owners = self.owners()
+                    except Exception:
+                        owners = ()
+                        logger.warning('rfq metadata_worker_unavailable code=STORAGE_UNAVAILABLE')
+                    for owner in owners:
                         if self.stop.is_set():
                             break
                         try:

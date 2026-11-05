@@ -7,15 +7,9 @@ param(
 $ErrorActionPreference='Stop'
 $root=Split-Path -Parent $PSScriptRoot
 $python=Join-Path $root '.venv\Scripts\python.exe'
-$oldLegacyWorker=$env:WORKER_ENABLED
-$oldConnectedWorker=$env:GOOGLE_MAILBOX_WORKER_ENABLED
 Push-Location -LiteralPath $root
 try {
     if ($Offline -and $Publish) { throw '-Offline cannot publish an external endpoint.' }
-    if ($Offline) {
-        $env:WORKER_ENABLED='false'
-        $env:GOOGLE_MAILBOX_WORKER_ENABLED='false'
-    }
     if (-not (Test-Path -LiteralPath $python)) { throw 'Backend .venv is required.' }
     $preflightArgs=@('-m','scripts.check_integration','--local-only')
     if (-not $Offline) { $preflightArgs+='--db' }
@@ -55,13 +49,12 @@ try {
             & docker @composeArgs logs --tail 40 tunnel
         } else {
             Write-Host "Local API ready: http://127.0.0.1:$Port/docs"
-            if ($Offline) { Write-Host 'Offline verification only: DB readiness was not checked, receiver workers are disabled. Account connection is not verified.' }
+            if ($Offline) { Write-Host 'Offline verification only: DB readiness was not checked. Account connection is not verified.' }
             Write-Host 'No external endpoint was published. -Publish explicitly starts the development HTTPS tunnel.'
         }
     } finally {
         $env:BACKEND_PORT=$oldPort; $env:BUILD_REVISION=$oldRevision
     }
 } finally {
-    $env:WORKER_ENABLED=$oldLegacyWorker; $env:GOOGLE_MAILBOX_WORKER_ENABLED=$oldConnectedWorker
     Pop-Location
 }

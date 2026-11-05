@@ -70,17 +70,27 @@ class RfqDeliveryRepository(RfqRepository):
         if not chosen:
             return {'configured': False, 'auto_eligible': False}
         approval = chosen['approval_required_by_purpose'].get(purpose)
-        scope = chosen['allowed_scope_jsonb']
+        # The mailbox default covers every case; recipients are the owner's registered supplier contacts.
         configured = (chosen['configured'] is True and type(approval) is bool
-            and recipient in chosen['allowed_recipients_jsonb']
-            and purpose in scope.get('purposes', []) and case['id'] in scope.get('work_case_ids', [])
-            and ('supplier_ids' not in scope or (isinstance(scope['supplier_ids'], list)
-                and supplier_id is not None and str(supplier_id) in scope['supplier_ids'])))
+                      and self.registered_recipient(owner, supplier_id, recipient))
         return {'configured': configured, 'approval_required': approval,
                 'auto_eligible': configured and approval is False,
                 'style': chosen.get('style_jsonb') or {},
                 'settings_version': (base_rows[0]['id'] if base_rows else 'none') + ':'
                                     + (override['id'] if override else 'none')}
+
+    def registered_recipient(self, owner, supplier_id, recipient):
+        """받는 주소가 그 사용자 등록 업체의 contact_email과 같은지 확인한다."""
+        from app.features.work_cases.domain.rfq import mailbox_address
+        if supplier_id is None or not recipient:
+            return False
+        rows = self.data(self.client.table('suppliers').select('contact_email')
+            .eq('owner_user_id', str(owner)).eq('id', str(supplier_id))
+            .in_('source_type', ['REGISTERED', 'VERIFIED_WEB']).limit(1))
+        try:
+            return bool(rows) and mailbox_address(rows[0].get('contact_email')) == mailbox_address(recipient)
+        except (ValueError, TypeError):
+            return False
 
     def begin_candidates(self, owner, case, model_id):
         run_id = str(uuid5(NAMESPACE_URL, 'gyeonjwo:candidate:' + str(owner) + ':' + case['id'] + ':'

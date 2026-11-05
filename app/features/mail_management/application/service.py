@@ -113,16 +113,9 @@ class MailManagementService:
                 missing.append(labels[purpose] + ' 승인 여부')
             elif chosen.get('configured') is not True:
                 missing.append(labels[purpose] + ' 발송 범위 확인')
-        # Scope and style belong to the explicit case settings if present.
-        selected = override or base or {}
-        allowed_scope = selected.get('allowed_scope_jsonb') or {}
-        allowed_ids = set(allowed_scope.get('supplier_ids') or [])
-        recipients = {str(value).casefold() for value in (selected.get('allowed_recipients_jsonb') or [])}
+        # Every registered supplier with a contact address can receive mail; there is no allow list.
         allowed = [{'supplier_id': row['id'], 'name': row['name'], 'email': row.get('contact_email'),
-                    'allowed': ((row.get('contact_email') or '').casefold() in recipients
-                                and (not allowed_ids or row['id'] in allowed_ids))} for row in suppliers]
-        if any(setting['effective_approval_required'] is False for setting in effective.values()) and not any(row['allowed'] for row in allowed):
-            missing.append('자동 발송 허용 업체')
+                    'allowed': bool(row.get('contact_email'))} for row in suppliers]
         style = {**((base or {}).get('style_jsonb') or {}), **((override or {}).get('style_jsonb') or {})}
         names = {row['id']: row['name'] for row in suppliers}
         try:
@@ -190,19 +183,6 @@ class MailManagementService:
             if case and case.get('archived_at'):
                 raise ServiceError('ACTION_NOT_ALLOWED', '보관된 업무의 발송 설정은 변경할 수 없습니다.', 409)
             suppliers = {row['id']: row for row in self.repo.suppliers(owner)}
-            ids = {str(value) for value in payload.allowed_supplier_ids}
-            try:
-                if not ids.issubset(suppliers):
-                    raise ValueError('Unowned supplier')
-                recipients = {mailbox_address(suppliers[value]['contact_email']) for value in ids}
-            except (ValueError, KeyError, TypeError):
-                raise ServiceError('SEND_SCOPE_REQUIRED', '허용 업체와 유효한 수신 주소를 확인해 주세요.', 422) from None
-            approval = payload.approval_required_by_purpose.model_dump(exclude_none=True)
-            # A null value inherits; it must not persist as an OFF or shadow the base.
-            proposed = {'approval_required_by_purpose': approval}
-            values = [purpose_setting(base, proposed, purpose)[2] if payload.case_id else approval.get(purpose) for purpose in PURPOSES]
-            if False in values and not recipients:
-                raise ServiceError('SEND_SCOPE_REQUIRED', '승인 OFF에는 허용 업체가 필요합니다.', 422)
             drafts = {row['id']: row for row in self.repo.drafts(owner, payload.case_id)}
             selected = []
             for draft_id in payload.draft_ids:
@@ -213,8 +193,12 @@ class MailManagementService:
                     recipient = mailbox_address(row['recipient'])
                 except (ValueError, TypeError):
                     raise ServiceError('SEND_SCOPE_REQUIRED', '초안의 수신 주소를 확인해 주세요.', 422) from None
-                if row['supplier_id'] not in ids or recipient not in recipients:
-                    raise ServiceError('SEND_SCOPE_REQUIRED', '초안의 수신 대상이 허용 범위에 없습니다.', 422)
+                try:
+                    contact = mailbox_address(suppliers[row['supplier_id']]['contact_email'])
+                except (ValueError, KeyError, TypeError):
+                    contact = None
+                if recipient != contact:
+                    raise ServiceError('SEND_SCOPE_REQUIRED', '초안의 수신 대상이 등록 업체 주소와 다릅니다.', 422)
                 selected.append(row)
             if payload.apply_to == 'SPECIFIED_DRAFTS' and not dispatch_ready:
                 raise ServiceError('PROCESSING_UNAVAILABLE', '기존 초안을 처리할 발송 워커가 준비되지 않았습니다.', 503)

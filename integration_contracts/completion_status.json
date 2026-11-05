@@ -32,9 +32,7 @@
     "Other service APIs and roles ③–⑤ are outside this RFQ completion scope."
   ],
   "runtime_defaults": {
-    "RFQ_WORKFLOW_ENABLED": false,
-    "RFQ_MAIL_SENDING_ENABLED": false,
-    "RFQ_METADATA_WORKER_ENABLED": false,
+    "send_switches": "removed; sending follows per-user send settings and Gmail send scope",
     "actual_env_edited": false
   },
   "next_steps": [

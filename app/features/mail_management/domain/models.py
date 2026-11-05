@@ -106,7 +106,8 @@ class SettingsUpdate(StrictModel):
     case_id: UUID | None = None
     expected_settings_version: int = Field(strict=True, ge=0, le=MAX_VERSION)
     approval_required_by_purpose: ApprovalUpdate
-    allowed_supplier_ids: list[UUID] = Field(max_length=100)
+    # Accepted for compatibility only; recipients are any registered supplier contact.
+    allowed_supplier_ids: list[UUID] = Field(default_factory=list, max_length=100)
     style: MailStyle
     apply_to: Literal['FUTURE_DRAFTS', 'SPECIFIED_DRAFTS']
     draft_ids: list[UUID] = Field(default_factory=list, max_length=100)
@@ -168,6 +169,4 @@ class SendSettings(StrictModel):
         if self.configured:
             if self.missing_items or any(value.effective_approval_required is None for value in self.effective_settings.values()):
                 raise ValueError('Incomplete settings cannot be configured')
-            if any(value.effective_approval_required is False for value in self.effective_settings.values()) and not any(value.allowed for value in self.allowed_suppliers):
-                raise ValueError('Automatic sending requires allowed suppliers')
         return self

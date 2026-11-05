@@ -43,10 +43,8 @@ def select_candidates(case_id: UUID, payload: CandidateSelectionRequest, request
     Approval ON waits for API-19. OFF queues only selected, policy-authorized,
     uncautioned targets. Existing mailbox limits are preserved pending decision.
     """
-    settings = request.app.state.settings
     worker = getattr(request.app.state, 'rfq_workflow_worker', None)
-    ready = (settings.rfq_workflow_enabled and settings.rfq_mail_sending_enabled and worker is not None
-             and worker.running and str(principal.user_id) in {str(value) for value in settings.rfq_workflow_owner_ids})
+    ready = worker is not None and worker.running
     response = service.submit(principal.user_id, case_id, payload, idempotency_key, dispatch_ready=bool(ready))
     if worker is not None:
         worker.wake.set()
