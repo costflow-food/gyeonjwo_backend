@@ -64,6 +64,7 @@ class CandidateSnapshot(StrictModel):
     review_batch_id: UUID
     items: list[CandidateItem] = Field(max_length=100)
     unknown_fields: list[str] = Field(default_factory=list, max_length=100)
+    web_observations: list[dict] = Field(default_factory=list, max_length=3)
 
     @model_validator(mode='after')
     def unique_suppliers(self):
