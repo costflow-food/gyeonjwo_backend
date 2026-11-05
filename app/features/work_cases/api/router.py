@@ -10,6 +10,7 @@ from app.core.errors import ServiceError
 from app.features.work_cases.application.actions import WorkCaseActions, validate_action_key
 from app.features.work_cases.infrastructure.graph_repository import runtime_repository
 from app.features.work_cases.domain.actions import DeletedCase, StartedCase
+from app.features.work_cases.api.decisions import DecisionRequest, RevisionRequest, submit_case_change
 
 from app.api.responses import Envelope, api_json
 from app.features.mailboxes.api.router import require_google_user
@@ -239,6 +240,27 @@ def resume_case(case_id: UUID, payload: ResumeRequest, request: Request,
         worker.wake.set()
     return JSONResponse(response, status_code=status, headers={
         'X-Request-ID': response['meta']['request_id'], 'Cache-Control': 'private, no-store'})
+
+
+@router.post('/{case_id}/decisions', summary='검토 판단 저장')
+def save_decision(case_id: UUID, payload: DecisionRequest,
+                  principal=Depends(require_google_user), repo=Depends(get_runtime_repository),
+                  idempotency_key: Annotated[str | None, Header(alias='Idempotency-Key')] = None):
+    return submit_case_change(repo, principal.user_id, case_id, 'DECISION', payload, idempotency_key)
+
+
+@router.post('/{case_id}/archive', summary='업무 보관')
+def archive_case(case_id: UUID, payload: RevisionRequest,
+                 principal=Depends(require_google_user), repo=Depends(get_runtime_repository),
+                 idempotency_key: Annotated[str | None, Header(alias='Idempotency-Key')] = None):
+    return submit_case_change(repo, principal.user_id, case_id, 'ARCHIVE', payload, idempotency_key)
+
+
+@router.post('/{case_id}/restore', summary='업무 복원')
+def restore_case(case_id: UUID, payload: RevisionRequest,
+                 principal=Depends(require_google_user), repo=Depends(get_runtime_repository),
+                 idempotency_key: Annotated[str | None, Header(alias='Idempotency-Key')] = None):
+    return submit_case_change(repo, principal.user_id, case_id, 'RESTORE', payload, idempotency_key)
 
 
 @router.get('/{case_id}/progress', summary='저장된 검토 단계 조회')

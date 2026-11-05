@@ -20,13 +20,23 @@ class CaseRuntimeRepository:
             raise ServiceError('PROCESSING_UNAVAILABLE', '업무 실행 저장소를 확인할 수 없습니다.', 503) from None
         if isinstance(result, dict) and result.get('kind') == 'ERROR':
             codes = {'RESOURCE_NOT_FOUND': 404, 'WORK_ALREADY_STARTED': 409, 'REVISION_CONFLICT': 409,
-                     'ACTION_NOT_ALLOWED': 409, 'REQUEST_IN_PROGRESS': 409, 'IDEMPOTENCY_KEY_REUSED': 409}
+                     'ACTION_NOT_ALLOWED': 409, 'REQUEST_IN_PROGRESS': 409, 'IDEMPOTENCY_KEY_REUSED': 409,
+                     'INVALID_PLAN_SELECTION': 422}
             code = result.get('code')
             if code in codes:
                 raise ServiceError(code, '최신 업무 상태와 요청을 확인해 주세요.', codes[code],
                                    current_revision=result.get('current_revision'), retryable=False)
             raise ServiceError('PROCESSING_UNAVAILABLE', '업무 변경을 확인할 수 없습니다.', 503)
         return result
+
+    def case_change_receipt(self, owner, case_id, operation, key, body_hash):
+        return self.call('lookup_work_case_change_request', p_owner=str(owner), p_case=str(case_id),
+                         p_operation=operation, p_key=key, p_hash=body_hash)
+
+    def submit_case_change(self, owner, case_id, operation, body, key, body_hash, request_id):
+        return self.call('submit_work_case_change', p_owner=str(owner), p_case=str(case_id),
+                         p_operation=operation, p_body=body, p_key=key, p_hash=body_hash,
+                         p_request_id=request_id)
 
     def available(self):
         try:

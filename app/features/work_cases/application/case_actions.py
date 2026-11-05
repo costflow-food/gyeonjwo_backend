@@ -5,6 +5,9 @@ from app.features.work_cases.application.start_readiness import StartReadiness
 def case_actions(case, readiness: StartReadiness, resume_readiness: StartReadiness | None = None):
     actions = ['VIEW_ORIGINAL']
     reason = None
+    archived = case.get('archived_at') is not None
+    decision = case.get('decision')
+    review_ready = case.get('status') == 'Complete' and case.get('processing_step') == 'REVIEW_READY'
     if case.get('archived_at') is not None:
         actions.append('RESTORE')
         reason = ('CASE_ARCHIVED', '보관된 업무는 먼저 복원해야 합니다.')
@@ -14,7 +17,7 @@ def case_actions(case, readiness: StartReadiness, resume_readiness: StartReadine
         if readiness.available:
             actions.insert(1, 'START')
         else:
-            return actions, [readiness.disabled_action()]
+            reason = (readiness.code, readiness.message)
     elif case.get('status') == 'Waiting' and case.get('decision') == 'ACCEPT_INCREASE':
         reason = ('ACTION_NOT_ALLOWED', '수용 이력이 있는 업무는 명시적으로 재개해야 합니다.')
     elif case.get('current_batch_id') or case.get('status') in {'Running', 'Complete'}:
@@ -31,7 +34,7 @@ def case_actions(case, readiness: StartReadiness, resume_readiness: StartReadine
         blocked = None
         if case.get('archived_at') is not None:
             blocked = ('CASE_ARCHIVED', '보관된 업무는 먼저 복원해야 합니다.')
-        elif case.get('status') != 'Pending' or case.get('decision') not in {None, 'HOLD'} or not case.get('current_batch_id'):
+        elif case.get('status') != 'Pending' or case.get('decision') is not None or not case.get('current_batch_id'):
             blocked = ('ACTION_NOT_ALLOWED', '현재 상태에서는 추출 보류 업무를 재개할 수 없습니다.')
         else:
             resume = resume_readiness or StartReadiness('RESUME_INTEGRATION_REQUIRED', '보류 업무의 재개 저장 기능이 아직 연결되지 않았습니다.')
@@ -42,4 +45,16 @@ def case_actions(case, readiness: StartReadiness, resume_readiness: StartReadine
                 blocked = (unavailable.code, unavailable.message)
         if blocked:
             disabled.append({'action': 'RESUME', 'reason_code': blocked[0], 'message': blocked[1]})
+    can_archive = not archived and case.get('status') in {'Waiting', 'Pending', 'Complete'}
+    if can_archive:
+        actions.append('ARCHIVE')
+    elif not archived:
+        disabled.append({'action': 'ARCHIVE', 'reason_code': 'ACTION_NOT_ALLOWED',
+                         'message': '현재 상태에서는 업무를 보관할 수 없습니다.'})
+    for action in ('SELECT_PLAN', 'HOLD', 'CONFIRM_REVIEW'):
+        if review_ready and not archived and decision not in {'ACCEPT_INCREASE', 'CONFIRM_REVIEW'}:
+            actions.append(action)
+        else:
+            disabled.append({'action': action, 'reason_code': 'CASE_ARCHIVED' if archived else 'ACTION_NOT_ALLOWED',
+                             'message': '최신 검토 카드에서 판단할 수 있습니다.'})
     return actions, disabled
