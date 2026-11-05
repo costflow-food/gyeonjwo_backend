@@ -25,7 +25,7 @@
   ],
   "scope_notes": [
     "Legacy ExtractionWorker superclass remains used by GraphWorker; do not delete until shared thread lifecycle extracted.",
-    "Quantity source and mandatory/company policy editing are product/DB contracts still requiring decisions. No past quantity or company policy invented here."
+    "Case comparison quantity is the incumbent increase notice supply quantity (INFO_EXTRACTOR available_quantity of the INITIAL mail); missing quantity holds at INFO_PRIORITY. Mandatory conditions come from company_items; company policy is snapshotted at START. See case_conditions.json."
   ],
   "deployment": "Existing mail/API available without graph RPCs. Restart after graph DB deployment. No SQL or remote DB changes.",
   "verification": {

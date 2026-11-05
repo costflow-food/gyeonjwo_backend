@@ -77,6 +77,7 @@
         "Use same POST canonical /api/v1/work-cases/{id}/start idempotency namespace and expected_revision-only normalized body hash as existing start. Check replay before current state.",
         "Lock owned Waiting/PENDING_START case, reject already-started/archived/accepted/revision mismatch.",
         "Persist Running/EXTRACTING, new batch, execution_mode=GRAPH_START_V1, start_from=START, initial mail ID, root execution/audit, ONE durable graph job and complete_api_request response in SAME connection/transaction.",
+        "In the same transaction snapshot the company policy into work_cases.policy_jsonb = {max_increase_rate:\"0.04\", incumbent_premium_rate:\"0.04\", allow_split:true, max_suppliers:2} (constants in this function until a company policy table exists; see case_conditions.json). Keep an existing non-empty policy_jsonb unchanged.",
         "Store entire immutable HTTP 202 {data:{case_id,input_revision,batch_id,progress_url},meta:{request_id}} before returning ACCEPTED; replay returns same body/status."
       ]
     },
@@ -114,20 +115,20 @@
         "p_record": "full QuoteVersionRecord JSONB"
       },
       "returns": "{kind:STORED,quote_id:uuid,record:full stored QuoteVersionRecord} or {kind:STALE}",
-      "rule": "Same immutable quote/evidence/NUMERIC/owner contract as existing store_case_agent_quote, but GRAPH token guard. Atomic quote+price_history+mail normalized fields+case conditions/requester+audit; preserve documents and unrelated JSON keys. Do not increment input_revision solely for extraction. Never create suppliers."
+      "rule": "Same immutable quote/evidence/NUMERIC/owner contract as existing store_case_agent_quote, but GRAPH token guard. Atomic quote+price_history+mail normalized fields+case conditions/requester+audit; preserve documents and unrelated JSON keys. Do not increment input_revision solely for extraction. Never create suppliers. record.supplier_item_id (nullable) must be an owned supplier_items row of record.supplier_id; store it in quote_versions.supplier_item_id and price_history. record.case_conditions may contain item_name, specification, standardized_item_key, quantity and unit: fill only NULL/empty work_cases fields. standardized_item_key must equal the linked supplier_item key. quantity/unit come only from the INITIAL (incumbent increase notice) mail available_quantity. When standardized_item_key is set, copy the owner company_items mandatory_conditions_jsonb into empty work_cases.mandatory_conditions_jsonb and its specification into empty work_cases.specification. See case_conditions.json."
     },
     "begin_case_graph_agent_run": {
       "args": {
         "p_job": "uuid",
         "p_token": "uuid",
         "p_revision": "int",
-        "p_role": "INFO_EXTRACTOR|CANDIDATE",
+        "p_role": "INFO_EXTRACTOR|CANDIDATE|INFO_PRIORITY|RESPONSE_PLAN|COUNTER_OFFER",
         "p_input": "role input JSONB",
         "p_model": "text",
         "p_prompt_version": "text"
       },
       "returns": "{agent_run_id:new UUID,review_batch_id:current batch UUID}",
-      "rule": "Atomic current job/owner/revision guard, distinct role execution row each call, processing_step EXTRACTING or SELECTING_CANDIDATES. Persist backend_execution_mode=GRAPH_START_V1 in input_snapshot_jsonb as backend-owned metadata, alongside role input. Append safe role progress log. No raw tool output logging."
+      "rule": "Atomic current job/owner/revision guard, distinct role execution row each call. GRAPH_START_V1 jobs accept INFO_EXTRACTOR/CANDIDATE; GRAPH_REVIEW_V1 jobs accept INFO_EXTRACTOR/INFO_PRIORITY/RESPONSE_PLAN/COUNTER_OFFER. Set processing_step by role: INFO_EXTRACTOR -> EXTRACTING, CANDIDATE -> SELECTING_CANDIDATES, INFO_PRIORITY/RESPONSE_PLAN/COUNTER_OFFER -> GENERATING_PLANS. Persist backend_execution_mode (GRAPH_START_V1 or GRAPH_REVIEW_V1) in input_snapshot_jsonb as backend-owned metadata, alongside role input. Append safe role progress log. No raw tool output logging."
     },
     "finish_case_graph_agent_run": {
       "args": {
@@ -243,7 +244,7 @@
     "source": "2026-11-04 PR41 review correction; supersedes previous runtime override",
     "policy": "No temporary AGENT switches and no duplicate backend role lists. Graph START worker is optional: unavailable config/interfaces/DB/startup leaves API and mail receiver running. START follows the public graph through role2; no extraction-only fallback.",
     "claim": "Only claim_case_graph_run(p_start_from=START). Unified START/REPLY/PLAN claim and review scheduling deferred until DB owner agreement; not called by this runtime.",
-    "steps": "Canonical agent steps SELECTING_CANDIDATES and BUILDING_PLANS. Read compatibility CANDIDATES only for persisted legacy boundary; no new writes under that alias. GENERATING_PLANS removed.",
+    "steps": "Steps follow the deployed DB work_cases_check5 (2026-11-05) and agent schemas.ProcessingStep. Running graph steps: EXTRACTING (INFO_EXTRACTOR), SELECTING_CANDIDATES (CANDIDATE running), GENERATING_PLANS (INFO_PRIORITY/RESPONSE_PLAN/COUNTER_OFFER). CANDIDATES is the post-graph user-selection wait set by complete_case_graph_run. Terminal: REVIEW_READY/ON_HOLD/FAILED. BUILDING_PLANS and BUILDING_COUNTER_OFFER are not written (DB rejects them).",
     "deployment": "After DB functions are deployed restart server to attach graph worker; missing graph does not prevent mail/API startup. API START still requires readiness/live worker. /ready reports mail readiness and degraded review separately."
   }
 }
