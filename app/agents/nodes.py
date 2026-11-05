@@ -151,9 +151,9 @@ def plan_validation(state) -> dict:
 
 def price_validation(state) -> dict:
     """⑤ 역제안의 회사 가격 정책·근거 검증.
-    state['last_action']이 COUNTER_OFFER_SKIPPED면 counter_offer는 None이다. 이때는 회사 정책이 역제안 생략을
-    허용하는지 확인한다 (사유: state['counter_offer_skip_reason']).
-    PASS → 검토 카드, FIX(정책 범위 밖 목표 조건·허용되지 않는 생략) → ⑤, NEED_INFO(근거·정책 없음) → ③.
+    state['last_action']이 COUNTER_OFFER_SKIPPED면 counter_offer는 None이다. 이때는 수용 추천 조건(요청 인상률 ≤
+    허용 인상률, 또는 요청 단가로도 대안보다 쌈)을 다시 확인한다 (사유: state['counter_offer_skip_reason']).
+    PASS → 검토 카드, FIX(정책 범위 밖 목표 조건·조건에 맞지 않는 생략) → ⑤, NEED_INFO(근거·정책 없음) → ③.
     반환: {'price_check': PriceCheck, 'price_check_reason': ⑤에 넘길 사유 (FIX일 때),
            'pending_questions': ③에 넘길 미확인 (NEED_INFO일 때)}"""
     target = state.get('counter_offer')
