@@ -44,6 +44,7 @@
 import dataclasses
 import hashlib
 import json
+import logging
 import re
 from datetime import date, timedelta
 from decimal import Decimal
@@ -57,6 +58,8 @@ from app.agents.schemas import READ_RETRY_LIMIT, AgentRole, DecimalStr, RunConte
 from app.core.errors import ReviewRequired
 from app.features.review.domain.validation import decimal_value, explicit_date, unit_name
 from app.shared.domain.schemas import StrictModel
+
+logger = logging.getLogger('gyeonjwo')
 
 # 역할 결과는 AgentRunner가 최종 응답으로 agent_runs에 저장한다(실패하면 그때까지의 도구 호출도). 저장 도구는 없다
 _READ = ('get_case_context', 'read_mail_evidence')
@@ -279,7 +282,7 @@ _HINTS = {
     'TIER_OVERLAP': '단가 구간의 경계를 원문에서 다시 확인한다.',
     'CURRENCY_MISMATCH': '단가의 통화 표기와 currency가 다르다. 원문을 다시 확인한다.',
     'MISSING_FIELD': '업체가 연결되지 않은 메일이면 원문의 업체명을 supplier_name으로 보낸다. 원문에 없으면 HOLD한다.',
-    'SUPPLIER_NOT_MATCHED': '등록된 업체가 아니다. 저장하지 말고 HOLD한다.',
+    'SUPPLIER_NOT_MATCHED': '등록된 업체명과 글자가 정확히 같지 않다. 결과의 next를 따른다.',
     'SUPPLIER_MISMATCH': '메일에 연결된 업체와 업체명이 다르다. 저장하지 말고 HOLD한다.',
     'SUPPLIER_EVIDENCE_MIXED': '한 업체의 메일 근거만 남기고 다시 보낸다.',
     'TAX_BASIS_NOT_TAX_TERMS': 'tax_basis는 field_name이 tax_terms인 항목에만 붙인다.',
@@ -364,6 +367,13 @@ class QuoteStore(CaseStore, Protocol):
 
     def list_supplier_items(self, case_id: str, supplier_id: str) -> list[dict]:
         """그 업체의 등록 품목(supplier_items) {id, item_name, specification, unit, standardized_item_key}."""
+
+    def record_extraction_issue(self, case_id: str, agent_run_id: str | None, issue: dict) -> None:
+        """업체 관련 거절의 근거(쪽지)를 실행 기록(agent_runs.input_snapshot_jsonb.extraction_issue)에 남긴다.
+        issue: {code, field, supplier_name?, evidence: [{evidence_id, excerpt}]}. evidence_id는 '<mail_id>:body' 또는
+        '<mail_id>:part:<attachment_ref>'. 실서버는 record_case_graph_extraction_issue(그래프)·record_case_extraction_issue
+        (추출 전용) RPC로 기록하고, DB가 장부와 다시 대조한다. 이 쪽지가 있어야 업체 관련 HOLD 코드가 인정된다.
+        DB가 거절하면 예외를 올린다(도구는 예외를 삼키고 거절 결과를 그대로 돌려준다)."""
 
     def insert_quote_version(self, record: QuoteVersionRecord,
                              expected_input_revision: int) -> tuple[str, QuoteVersionRecord] | None:
@@ -594,6 +604,58 @@ def _quote_supplier(store: QuoteStore, case_id: str, case_mails: dict, evidence_
     return supplier_id, None
 
 
+# 업체 관련 거절. DB는 실행 기록의 쪽지(extraction_issue)가 있어야 이 HOLD 코드를 인정한다(internal.graph_finish_role)
+SUPPLIER_ISSUE_CODES = {'SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH', 'MISSING_FIELD'}
+_ISSUE_EXCERPT_LIMIT = 1500
+# 업체명에 붙어 등록 이름과 달라지게 하는 표기: 법인 표기, 부서·직책
+_NAME_DECORATION = re.compile(r'주식회사|유한회사|농업회사법인|영농조합법인|\((?:주|유)\)|㈜|'
+                              r'영업[부팀]|구매[부팀]|대표이사|과장|대리|팀장|부장|사원|드림')
+# 같은 실행에서 남긴 업체 관련 쪽지 코드 (run 식별 → code). 업체명을 빼고 다시 보내 생긴 MISSING_FIELD가
+# 앞서 남긴 SUPPLIER_NOT_MATCHED·SUPPLIER_MISMATCH 쪽지를 덮어쓰지 않게 한다(DB는 마지막 쪽지만 남긴다)
+_RUN_SUPPLIER_ISSUES: dict[tuple, str] = {}
+
+
+def _supplier_retry_next(supplier_name: str | None) -> str:
+    """SUPPLIER_NOT_MATCHED 뒤에 할 일. 보낸 업체명에 법인 표기·부서·직책이 붙었을 때만 다시 보내게 한다."""
+    if supplier_name and _NAME_DECORATION.search(supplier_name):
+        return ('업체명에 법인 표기나 부서·직책이 붙어 있다. 그 표기를 빼고 회사명만(예: "동해프레시 주식회사" → '
+                '"동해프레시") 한 번 더 보낸다. 나머지 값은 그대로 보낸다.')
+    return ('회사명만 보냈는데 등록된 거래처에 없다. 다시 보내지 말고(업체명을 빼고 보내지도 않는다) '
+            '바로 HOLD로 최종 응답한다. reason은 "[SUPPLIER_NOT_MATCHED] …" 문장이다.')
+
+
+def _record_supplier_issue(store: QuoteStore, context: RunContext, issue: dict, supplier: dict | None,
+                           ref: EvidenceRef | None, check: '_SourceCheck') -> bool:
+    """업체 관련 거절을 쪽지로 남긴다. 근거는 LLM이 보낸 업체명이 적힌 원문 줄이다(DB가 메일 원문과 다시 대조한다).
+    기록 실패(저장소에 메서드 없음, DB 거절)는 도구 결과를 바꾸지 않는다. 반환: 기록했는지."""
+    if issue['code'] == 'MISSING_FIELD' and issue.get('field') != 'supplier_name':
+        return False
+    run_key = (context.case_id, context.input_revision, context.agent_run_id)
+    if issue['code'] == 'MISSING_FIELD' and run_key in _RUN_SUPPLIER_ISSUES:
+        return False         # 앞서 남긴 더 정확한 업체 쪽지를 유지한다
+    record = getattr(store, 'record_extraction_issue', None)
+    if record is None:
+        return False
+    payload = {'code': issue['code'], 'field': 'supplier_name', 'evidence': []}
+    if supplier is not None:
+        payload['supplier_name'] = supplier['value']
+        if ref is not None:
+            lines = check.lines(ref, supplier['raw_value'])
+            excerpt = (lines[0].strip() if lines else supplier['raw_value'])[:_ISSUE_EXCERPT_LIMIT]
+            where = 'body' if ref.part == 'body' else f'part:{ref.part}'
+            payload['evidence'] = [{'evidence_id': f'{ref.mail_id}:{where}', 'excerpt': excerpt}]
+    try:
+        record(context.case_id, context.agent_run_id, payload)
+    except Exception:
+        logger.warning('extraction issue not recorded code=%s', issue['code'])
+        return False
+    if issue['code'] != 'MISSING_FIELD':
+        if len(_RUN_SUPPLIER_ISSUES) > 1000:
+            _RUN_SUPPLIER_ISSUES.clear()
+        _RUN_SUPPLIER_ISSUES[run_key] = issue['code']
+    return True
+
+
 def _carry(previous: tuple[str, QuoteVersionRecord], values: dict, tiers: list, costs: list,
            review: list) -> tuple[list, list, list]:
     """이번 메일에 없는 값을 이전 버전에서 원래 근거와 함께 이어받는다. 반환: (tiers, costs, 이어받은 항목).
@@ -632,14 +694,20 @@ def _letters(text) -> str:
     return re.sub(r'[^0-9a-zA-Z가-힣]', '', str(text or '')).casefold()
 
 
+def _item_key(text) -> str:
+    """등록 품목 대조용 품목명: 띄어쓰기를 모두 빼고 대소문자를 무시한다 ('냉동딸기 (IQF)' → '냉동딸기(iqf)').
+    견적 저장 DB 함수(store_case_graph_quote)의 품목명 일치 검사와 같은 기준이다(2026-11-05 팀 결정: 띄어쓰기 무시)."""
+    return re.sub(r'\s+', '', str(text or '')).casefold()
+
+
 def _registered_item(items: list[dict], current: dict) -> dict | None:
-    """이번 메일의 품목과 같은 그 업체의 등록 품목. 품목명이 서로 포함되면 같은 품목으로 보고, 여럿이면 규격으로 좁힌다.
-    하나로 정해질 때만 돌려준다(애매하면 연결하지 않는다)."""
-    name = _letters(current.get('item_name', {}).get('value'))
+    """이번 메일의 품목과 같은 그 업체의 등록 품목. 띄어쓰기·대소문자만 빼고 품목명이 같을 때 같은 품목으로 보고,
+    여럿이면 규격으로 좁힌다. 하나로 정해질 때만 돌려준다(애매하면 연결하지 않는다).
+    이름이 서로 포함되는 정도('냉동딸기'와 '냉동딸기 (IQF)')로는 연결하지 않는다. DB가 같은 품목으로 보지 않아 저장이 거부된다."""
+    name = _item_key(current.get('item_name', {}).get('value'))
     if not name:
         return None
-    found = [item for item in items if (registered := _letters(item.get('item_name'))) and
-             (registered in name or name in registered)]
+    found = [item for item in items if _item_key(item.get('item_name')) == name]
     if len(found) > 1:
         wanted = name + _letters(current.get('specification', {}).get('value'))
         found = [item for item in found if _letters(item.get('specification')) and
@@ -742,7 +810,12 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
     supplier_name = values['supplier_name']['value'] if 'supplier_name' in values else None
     supplier_id, issue = _quote_supplier(store, case_id, case_mails, evidence_mails, supplier_name)
     if issue:
-        return _with_hints({'status': 'REJECTED', 'rejected': [issue]}, [issue])
+        if issue['code'] in SUPPLIER_ISSUE_CODES:
+            _record_supplier_issue(store, context, issue, values.get('supplier_name'), refs.get('supplier_name'), check)
+        result = _with_hints({'status': 'REJECTED', 'rejected': [issue]}, [issue])
+        if issue['code'] == 'SUPPLIER_NOT_MATCHED':
+            result['next'] = _supplier_retry_next(supplier_name)
+        return result
     # 원문 메일은 근거 메일 중 가장 최근에 받은 메일이다 (회신이 이전 메일의 값을 함께 근거로 써도 회신이 원문)
     source_mail_id = max(evidence_mails, key=lambda mail_id: (case_mails[mail_id].get('received_at') or '', mail_id))
     if check.instruction_mails & evidence_mails:
@@ -1015,7 +1088,8 @@ def search_summary(result: dict, item_name: str, drafted: list[str] | None = Non
     drafted가 있으면(초안 생성 후) 실제로 초안을 만든 업체와 만들지 못한 업체로 쓴다."""
     scope = result['scope']
     if scope['searched'] == 0:
-        return f'{item_name} 취급 등록 업체가 없어 견적을 요청할 후보가 없습니다.'
+        # "등록 … 업체 … 없" 표현은 서버가 '거래처 미연결'로 잘못 읽는다(hold.py). 후보가 없다는 뜻만 쓴다
+        return f'{item_name} 취급 업체를 찾지 못해 견적을 요청할 후보가 없습니다.'
     parts = []
     for code, label in EXCLUDE_LABELS.items():
         rows = [e for e in result['excluded'] if e['code'] == code]
