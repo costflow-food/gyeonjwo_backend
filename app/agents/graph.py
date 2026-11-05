@@ -7,7 +7,8 @@
                                                └─────────────────┘          FIX → ④ · NEED_INFO → ③ · PASS ↓
                          ⑤ ─ COUNTER_OFFER_PROPOSED ─┬ price_validation ─ PASS ─ review_card (COMPLETE)
                            └ COUNTER_OFFER_SKIPPED ──┘                 FIX → ⑤ · NEED_INFO → ③
-    COUNTER_OFFER_SKIPPED: 정책상 역제안 불필요. 가격 검증이 생략 허용을 확인하고, 카드에 생략 사유를 남긴다.
+    COUNTER_OFFER_SKIPPED: 역제안 없이 인상 수용 추천(요청 인상률이 허용 인상률 이하이거나 요청 단가로도 대안보다 쌈).
+    가격 검증이 수용 추천 조건을 다시 확인하고, 카드에 사유를 남긴다.
     ③④⑤ RECHECK_SOURCE → ①(근거를 인용한 메일을 다시 읽는다) · ④⑤ NEEDS_EVIDENCE → ③ · ①~④ HOLD → hold (ON_HOLD)
     ⑤ HOLD(정책 없음 등) → review_card: 구매안은 검증을 통과했으므로 카드에 구매안·역제안 보류 사유·참고 계산을 보인다
 
@@ -75,9 +76,9 @@ class CaseState(TypedDict, total=False):
 ROLE_STEPS = {
     AgentRole.INFO_EXTRACTOR: ProcessingStep.EXTRACTING,
     AgentRole.CANDIDATE: ProcessingStep.SELECTING_CANDIDATES,
-    AgentRole.INFO_PRIORITY: ProcessingStep.NEEDS_INFO,
-    AgentRole.RESPONSE_PLAN: ProcessingStep.BUILDING_PLANS,
-    AgentRole.COUNTER_OFFER: ProcessingStep.BUILDING_COUNTER_OFFER,
+    AgentRole.INFO_PRIORITY: ProcessingStep.GENERATING_PLANS,
+    AgentRole.RESPONSE_PLAN: ProcessingStep.GENERATING_PLANS,
+    AgentRole.COUNTER_OFFER: ProcessingStep.GENERATING_PLANS,
 }
 
 

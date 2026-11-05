@@ -43,18 +43,22 @@ class StartFrom(StrEnum):
 
 
 class ProcessingStep(StrEnum):
-    """업무 processing_step 값 (07 상태 계약). work_cases.CaseSnapshot.processing_step과 같은 값을 쓴다."""
-    # Waiting — 백엔드
+    """업무 processing_step 값. DB work_cases_processing_step_check가 허용하는 값과 같다.
+    Running은 EXTRACTING·SELECTING_CANDIDATES·CANDIDATES·GENERATING_PLANS·WAITING_REPLY만, Pending은
+    WAITING_APPROVAL·NEEDS_INFO·ON_HOLD·FAILED·SEND_UNKNOWN만 쓸 수 있다(work_cases_check4·5)."""
+    # Waiting·Confirm — 백엔드
     PENDING_START = 'PENDING_START'
-    NEEDS_CLASSIFICATION_REVIEW = 'NEEDS_CLASSIFICATION_REVIEW'
+    ACKNOWLEDGED = 'ACKNOWLEDGED'
     # Running
-    EXTRACTING = 'EXTRACTING'                          # 그래프
-    SELECTING_CANDIDATES = 'SELECTING_CANDIDATES'      # 그래프
-    AWAITING_APPROVAL = 'AWAITING_APPROVAL'            # 백엔드 (승인 ON)
+    EXTRACTING = 'EXTRACTING'                          # 그래프: 정보 추출
+    SELECTING_CANDIDATES = 'SELECTING_CANDIDATES'      # 그래프: 후보 선정 에이전트 실행 중
+    CANDIDATES = 'CANDIDATES'                          # 백엔드: 그래프가 끝나고 사용자 후보 선택 대기
+    GENERATING_PLANS = 'GENERATING_PLANS'              # 그래프: 정보·우선순위, 구매안, 역제안
     WAITING_REPLY = 'WAITING_REPLY'                    # 백엔드 (발송 후)
-    NEEDS_INFO = 'NEEDS_INFO'                          # 그래프
-    BUILDING_PLANS = 'BUILDING_PLANS'                  # 그래프
-    BUILDING_COUNTER_OFFER = 'BUILDING_COUNTER_OFFER'  # 그래프
+    # Pending
+    WAITING_APPROVAL = 'WAITING_APPROVAL'              # 백엔드 (승인 ON)
+    NEEDS_INFO = 'NEEDS_INFO'                          # 백엔드
+    SEND_UNKNOWN = 'SEND_UNKNOWN'                      # 백엔드 (발송 결과 미확인)
     ON_HOLD = 'ON_HOLD'                                # 그래프
     FAILED = 'FAILED'                                  # 그래프
     # Complete
@@ -197,7 +201,7 @@ class Plan(StrictModel):
 
 class CounterOfferReference(StrictModel):
     """⑤ 참고 계산. 정책이 없어 목표를 만들지 않을 때도 검토 카드에 보인다. 값은 최종 검사가 도구 결과로 채운다."""
-    status: str                                # PROPOSABLE·NO_POLICY·NOT_NEEDED·NOT_COMPETITIVE·NOT_COMPUTABLE 등
+    status: str                                # PROPOSABLE·NO_POLICY·NOT_NEEDED·WITHIN_POLICY·NOT_COMPUTABLE 등
     unit: str | None = None
     requested_unit_price: DecimalStr | None = None   # 기존 업체가 요청한 단가
     previous_unit_price: DecimalStr | None = None    # 인상 전 단가 (인상 통보 메일 근거)
