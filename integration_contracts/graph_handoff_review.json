@@ -1,6 +1,6 @@
 {
   "status": "CODE_CORRECTED_REAL_MAC_FAILURE_NOT_REPRODUCED",
-  "change": "CANDIDATES alias accepted for current Running graph batch; GENERATING_PLANS accepted in review alongside BUILDING_PLANS. Owner, input revision, batch and terminal/intervention guards retained.",
+  "change": "Running graph steps follow the deployed DB constraint: EXTRACTING, SELECTING_CANDIDATES, GENERATING_PLANS; CANDIDATES is the user-selection wait (see runtime_policy_override.steps in graph_start.json). Owner, input revision, batch and terminal/intervention guards retained.",
   "review_preflight": "Validate priority and card store hooks before review worker execution, including API readiness and CLI checks.",
   "diagnostics": "Safe role_failed log preserves a fixed error code before public graph converts it to FAILED. No model/mail/provider text logged.",
   "remaining": "Exact Mac failure logs and real role transition validation still needed. Flags, real sending and agent sources were not modified.",

@@ -43,11 +43,11 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
         row = rows[0]
         if row['input_revision'] != revision or str(row.get('current_batch_id')) != str(batch):
             raise ServiceError('REVISION_CONFLICT', '검토 입력이 변경됐습니다.', 409)
-        # CANDIDATES is a persisted legacy extraction/selection boundary only.
-        # Agents write SELECTING_CANDIDATES/BUILDING_PLANS; no new alias is emitted.
+        # Graph role steps as written by begin_case_graph_agent_run (DB work_cases_check5):
+        # EXTRACTING, SELECTING_CANDIDATES (candidate role running), GENERATING_PLANS (roles 3-5).
+        # CANDIDATES is the post-graph user-selection wait, not a running graph step.
         if (row.get('archived_at') or row.get('decision') in {'ACCEPT_INCREASE', 'CONFIRM_REVIEW'} or row['status'] != 'Running'
-                or row['processing_step'] not in ({'EXTRACTING', 'SELECTING_CANDIDATES', 'CANDIDATES', 'NEEDS_INFO', 'BUILDING_PLANS',
-                    'BUILDING_COUNTER_OFFER'})):
+                or row['processing_step'] not in {'EXTRACTING', 'SELECTING_CANDIDATES', 'GENERATING_PLANS'}):
             raise ServiceError('ACTION_NOT_ALLOWED', '그래프 검토 실행이 중단됐습니다.', 409)
         return row
 

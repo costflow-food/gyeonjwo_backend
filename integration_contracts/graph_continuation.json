@@ -26,7 +26,7 @@
     "source": "2026-11-04 PR41 review correction; supersedes previous runtime override",
     "policy": "No temporary AGENT switches and no duplicate backend role lists. Graph START worker is optional: unavailable config/interfaces/DB/startup leaves API and mail receiver running. START follows the public graph through role2; no extraction-only fallback.",
     "claim": "Only claim_case_graph_run(p_start_from=START). Unified START/REPLY/PLAN claim and review scheduling deferred until DB owner agreement; not called by this runtime.",
-    "steps": "Canonical agent steps SELECTING_CANDIDATES and BUILDING_PLANS. Read compatibility CANDIDATES only for persisted legacy boundary; no new writes under that alias. GENERATING_PLANS removed.",
+    "steps": "Steps follow the deployed DB work_cases_check5 (2026-11-05) and agent schemas.ProcessingStep. Running graph steps: EXTRACTING (INFO_EXTRACTOR), SELECTING_CANDIDATES (CANDIDATE running), GENERATING_PLANS (INFO_PRIORITY/RESPONSE_PLAN/COUNTER_OFFER). CANDIDATES is the post-graph user-selection wait set by complete_case_graph_run. Terminal: REVIEW_READY/ON_HOLD/FAILED. BUILDING_PLANS and BUILDING_COUNTER_OFFER are not written (DB rejects them).",
     "deployment": "After DB functions are deployed restart server to attach graph worker; missing graph does not prevent mail/API startup. API START still requires readiness/live worker. /ready reports mail readiness and degraded review separately."
   }
 }

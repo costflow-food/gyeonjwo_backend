@@ -1,0 +1,63 @@
+{
+  "contract_version": 1,
+  "date": "2026-11-05",
+  "status": "AGENT_IMPLEMENTED_DB_PENDING",
+  "scope": "Where work_cases comparison conditions come from: quantity/unit, mandatory conditions, company policy. Agents read only work_cases (get_work_case); DB functions fill it.",
+  "quantity": {
+    "source": "Incumbent increase notice (INITIAL mail) supply quantity extracted by INFO_EXTRACTOR as available_quantity, e.g. \"11월 공급 계획 1,000kg에 대해 5,000원에서 5,500원으로 인상\" -> quantity 1000, unit kg.",
+    "rules": [
+      "Team decision 2026-11-05: there is no separate buyer order quantity. Test mails always state the supply quantity.",
+      "store_case_graph_quote fills work_cases.quantity/unit from record.case_conditions only when they are empty.",
+      "unit is the quantity unit; if absent, the same mail price unit.",
+      "Alternative supplier replies never set the case quantity; their available_quantity is only a supply capacity check.",
+      "Missing quantity: INFO_PRIORITY returns CONDITIONS_MISSING and holds. A user correction path (API-06) is required before production but deferred."
+    ]
+  },
+  "company_items": {
+    "purpose": "Buyer-side required conditions per purchased item. Not supplier attributes.",
+    "columns": {
+      "id": "uuid PK",
+      "owner_user_id": "uuid",
+      "created_at": "timestamptz",
+      "standardized_item_key": "text, same key space as supplier_items.standardized_item_key",
+      "item_name": "text",
+      "specification": "text nullable",
+      "unit": "text nullable",
+      "mandatory_conditions_jsonb": "jsonb, e.g. {\"certifications\": [\"HACCP\"], \"specification\": \"특품\"}"
+    },
+    "constraints": [
+      "UNIQUE(owner_user_id, standardized_item_key)"
+    ],
+    "linking": [
+      "INFO_EXTRACTOR links the quote to the supplier registered item when item name (and specification if several) match uniquely, sending supplier_item_id and, on first extraction, standardized_item_key in case_conditions.",
+      "store_case_graph_quote copies company_items.mandatory_conditions_jsonb and specification into empty work_cases fields for that key. No company_items row: conditions stay empty (comparison without required conditions)."
+    ],
+    "registration": "Seed data by SQL for MVP; no CRUD API in this scope."
+  },
+  "company_policy": {
+    "policy_jsonb": {
+      "max_increase_rate": "decimal string. Accepted increase rate; a requested increase at or below it is a recommendation to accept, above it the counter-offer upper bound is previous price x (1 + rate).",
+      "incumbent_premium_rate": "decimal string. Incumbent may stay up to this much above the alternative; competitive line = keep ceiling x (1 + rate).",
+      "allow_split": "boolean, RESPONSE_PLAN split plans",
+      "max_suppliers": "int, split supplier limit (default 2)"
+    },
+    "defaults_2026_11_05": {
+      "max_increase_rate": "0.04",
+      "incumbent_premium_rate": "0.04",
+      "allow_split": true,
+      "max_suppliers": 2
+    },
+    "snapshot": "submit_case_graph_start writes the defaults as constants into work_cases.policy_jsonb at START. A company policy table may replace the constants later without agent changes.",
+    "counter_offer_statuses": {
+      "PROPOSABLE": "counter-offer within allowed_range [previous, min(requested, previous x (1+max_increase_rate), competitive line if inside)]; above_alternative=true when the whole range is above the competitive line",
+      "WITHIN_POLICY": "requested increase <= max_increase_rate: COUNTER_OFFER_SKIPPED (recommend accepting)",
+      "NOT_NEEDED": "requested price already cheaper than the alternative: COUNTER_OFFER_SKIPPED",
+      "NO_POLICY": "no max_increase_rate: HOLD with reference calculation only",
+      "PREVIOUS_UNKNOWN / COSTS_UNKNOWN / NOT_COMPUTABLE": "recheck source, ask evidence, or HOLD"
+    }
+  },
+  "not_in_scope": [
+    "API-04 request body is unchanged (no quantity input).",
+    "API-06 PATCH /work-cases/{id}/conditions and its RPC are deferred."
+  ]
+}
