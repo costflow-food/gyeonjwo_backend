@@ -121,7 +121,9 @@ class CaseStore(Protocol):
 
     def read_mail_part(self, case_id: str, mail_id: str, part: str, page: int | None) -> dict | None:
         """업무에 속한 메일의 본문(part='body') 또는 첨부(part=attachment_ref) 한 쪽의 {text, location}.
-        body_text와 normalized_jsonb의 문서 읽기·OCR 결과에서 읽는다. 업무 밖이면 None."""
+        body_text와 normalized_jsonb의 문서 읽기·OCR 결과에서 읽는다. 업무 밖이면 None.
+        선택 키 — text_source: 'TEXT'(텍스트 레이어·본문, 없으면 이것) 또는 'OCR'(documents.ocr_pdf_page 결과)
+          unreadable: true면 그 쪽을 읽지 못했다(text는 ''). attempts·retry_exhausted는 ocr_pdf_page의 시도 기록이다."""
 
 
 _case_store: CaseStore | None = None
@@ -170,10 +172,16 @@ def load_evidence(store: CaseStore, context: RunContext, mail_id: str, part: str
                 {'part': attachment['attachment_ref'], 'pages': attachment['pages']}
                 for attachment in mail.get('attachments') or []]
         return result
+    if item.get('unreadable'):
+        # 기술 오류로 시도를 다 쓴 쪽 등. 다시 불러도 저장소가 같은 결과를 돌려준다
+        return {'status': 'UNREADABLE', 'mail_id': mail_id, 'part': part, 'page': page,
+                'attempts': item.get('attempts'), 'retry_exhausted': bool(item.get('retry_exhausted'))}
     text = item['text']
     # empty: 글자가 없는 쪽(스캔 이미지 등). 이 쪽에서는 어떤 값도 근거가 되지 않는다
+    # text_source OCR: 그림을 글자로 읽은 결과라 잘못 읽은 글자가 있을 수 있다
     return {'status': 'OK', 'mail_id': mail_id, 'part': part, 'page': page, 'text': text[:MAX_EVIDENCE_CHARS],
-            'location': item.get('location'), 'truncated': len(text) > MAX_EVIDENCE_CHARS, 'empty': not text.strip()}
+            'location': item.get('location'), 'truncated': len(text) > MAX_EVIDENCE_CHARS, 'empty': not text.strip(),
+            'text_source': item.get('text_source') or 'TEXT'}
 
 
 @register
@@ -195,8 +203,10 @@ def read_mail_evidence(mail_id: str, runtime: ToolRuntime[RunContext], part: str
     part: 본문은 'body', 첨부는 get_case_context 메일 목록의 attachment_ref 값(예: 'att-1'). 'attachment_ref'라는 글자가 아니다.
     page: 첨부의 쪽 번호(1부터). 본문은 비운다.
 
-    반환 status: OK면 text·location·truncated(원문이 길어 앞부분만 줬으면 true)
+    반환 status: OK면 text·location·truncated(원문이 길어 앞부분만 줬으면 true)·empty(글자가 없는 쪽)·
+      text_source(TEXT 또는 OCR: 스캔 그림을 글자로 읽은 쪽. 원문 그대로 옮기되 없는 글자를 짐작해 채우지 않는다)
       / NOT_FOUND(이 업무의 메일인데 part·page가 틀렸으면 available_parts로 읽을 수 있는 part·쪽수를 알려준다)
+      / UNREADABLE(이 쪽을 읽지 못했다. 다시 불러도 같다. 이 쪽의 값은 근거로 쓰지 않는다)
     '''
     return load_evidence(_case_store, _run_context(_case_store, runtime), mail_id, part, page)
 
