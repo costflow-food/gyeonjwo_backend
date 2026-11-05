@@ -16,7 +16,6 @@ from app.shared.infrastructure.db.contracts import OwnershipLost, WorkNotFound
 from app.core.errors import ServiceError
 from app.features.mail.infrastructure.gmail import verify_push
 from app.features.review.application.services import Services
-from app.features.mail.application.worker import GmailWorker
 from app.core.http_limits import BodyLimitMiddleware
 from app.features.system.api.router import router as system_router
 from app.features.mail.api.router import router as mail_router
@@ -34,64 +33,63 @@ RATE_WINDOW_SECONDS = 60
 RATE_LIMIT_PER_WINDOW = 120
 RATE_LIMIT_EXEMPT_PATHS = frozenset({'/api/v1/webhooks/gmail'})
 
+def start_metadata_worker(settings, mailbox_service):
+    """보낸 RFQ의 메일 헤더를 기록하는 워커를 만든다. 스키마가 없으면 경고만 남기고 None을 돌려준다."""
+    from app.features.work_cases.infrastructure.rfq_repository import RfqRepository
+    from app.features.work_cases.application.rfq_metadata_worker import RfqMetadataWorker
+    repo = RfqRepository(make_server_client(settings))
+    try:
+        repo.require_schema()
+    except Exception:
+        logger.warning('rfq metadata worker unavailable code=SCHEMA_REQUIRED; API remains available')
+        return None
+    return RfqMetadataWorker(repo, mailbox_service, repo.metadata_owners)
+
+
+def start_workflow_worker(settings, mailbox_service):
+    """RFQ 준비·발송 워커를 만든다. 발송 여부는 사용자별 발송 설정이 정한다. 스키마가 없으면 경고만 남기고 None."""
+    from app.features.work_cases.infrastructure.rfq_delivery_repository import RfqDeliveryRepository
+    from app.features.work_cases.application.rfq_preparation import RfqPreparation
+    from app.features.work_cases.application.rfq_delivery import RfqDelivery
+    from app.features.work_cases.application.rfq_workflow_worker import RfqWorkflowWorker
+    from app.shared.infrastructure.llm import JsonAgent
+    repo = RfqDeliveryRepository(make_server_client(settings))
+    try:
+        repo.require_schema()
+        repo.require_http_schema()
+    except Exception:
+        logger.warning('rfq workflow worker unavailable code=SCHEMA_REQUIRED; API remains available')
+        return None
+    return RfqWorkflowWorker(repo, RfqPreparation(repo, JsonAgent(settings), settings.llm_model),
+                             RfqDelivery(repo, mailbox_service), repo.metadata_owners)
+
+
 def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_service=None):
     settings = settings or get_settings()
     require_startup_configuration(settings)
 
     @asynccontextmanager
     async def lifespan(app):
-        worker = None
         connected_worker = None
         extraction_worker = None
         rfq_worker = None
         rfq_workflow = None
-        if settings.worker_enabled and settings.google_mailbox_worker_enabled:
-            raise RuntimeError('Legacy and connected-mailbox workers cannot run together')
-        if settings.worker_enabled:
-            settings.require_server()
-            settings.require_gmail()
-            settings.require_llm()
-            if app.state.services is None:
-                app.state.services = Services(settings, make_server_client(settings))
-            worker = GmailWorker(app.state.services)
-            app.state.worker = worker
-        if settings.google_mailbox_worker_enabled:
+        # Workers start by default; a missing secret only keeps that worker off (names were logged at startup).
+        try:
             settings.require_google_connect()
             settings.require_classification()
             if app.state.mailbox_service is None:
                 app.state.mailbox_service = make_mailbox_service(settings)
             connected_worker = ConnectedMailboxWorker(app.state.mailbox_service)
             app.state.connected_mailbox_worker = connected_worker
+        except RuntimeError:
+            logger.warning('mailbox worker unavailable code=CONFIGURATION_REQUIRED; API remains available')
         try:
-            if settings.rfq_workflow_enabled:
-                from app.features.work_cases.infrastructure.rfq_delivery_repository import RfqDeliveryRepository
-                from app.features.work_cases.application.rfq_preparation import RfqPreparation
-                from app.features.work_cases.application.rfq_delivery import RfqDelivery
-                from app.features.work_cases.application.rfq_workflow_worker import RfqWorkflowWorker
-                from app.shared.infrastructure.llm import JsonAgent
-                if app.state.mailbox_service is None:
-                    app.state.mailbox_service = make_mailbox_service(settings)
-                delivery_repo = RfqDeliveryRepository(make_server_client(settings))
-                delivery_repo.require_schema()
-                delivery_repo.require_http_schema()
-                rfq_workflow = RfqWorkflowWorker(delivery_repo,
-                    RfqPreparation(delivery_repo, JsonAgent(settings), settings.llm_model),
-                    RfqDelivery(delivery_repo, app.state.mailbox_service),
-                    [str(x) for x in settings.rfq_workflow_owner_ids],
-                    sending_enabled=settings.rfq_mail_sending_enabled)
-                app.state.rfq_workflow_worker = rfq_workflow
-            if settings.rfq_metadata_worker_enabled:
-                if not settings.rfq_metadata_owner_ids:
-                    raise RuntimeError('RFQ_METADATA_OWNER_IDS is required')
-                from app.features.work_cases.infrastructure.rfq_repository import RfqRepository
-                from app.features.work_cases.application.rfq_metadata_worker import RfqMetadataWorker
-                if app.state.mailbox_service is None:
-                    app.state.mailbox_service = make_mailbox_service(settings)
-                metadata_repo = RfqRepository(make_server_client(settings))
-                metadata_repo.require_schema()
-                rfq_worker = RfqMetadataWorker(metadata_repo,
-                    app.state.mailbox_service, [str(x) for x in settings.rfq_metadata_owner_ids])
+            if connected_worker is not None:
+                rfq_worker = start_metadata_worker(settings, app.state.mailbox_service)
                 app.state.rfq_metadata_worker = rfq_worker
+                rfq_workflow = start_workflow_worker(settings, app.state.mailbox_service)
+                app.state.rfq_workflow_worker = rfq_workflow
             # Graph readiness is optional for receiving mail and serving APIs.
             # No feature toggle: attempt the existing START contract each boot.
             from app.features.work_cases.infrastructure.graph_repository import runtime_repository
@@ -120,7 +118,7 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
                 app.state.graph_startup_code = 'GRAPH_RUNTIME_UNAVAILABLE'
                 logger.warning('graph unavailable code=GRAPH_RUNTIME_UNAVAILABLE; mail/API remain available')
             # Independent mail/metadata lifecycles; sender remains separately gated.
-            for prepared_worker in (worker, connected_worker, rfq_worker, rfq_workflow):
+            for prepared_worker in (connected_worker, rfq_worker, rfq_workflow):
                 if prepared_worker is not None:
                     prepared_worker.start()
             yield
@@ -129,8 +127,6 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
                 rfq_workflow.close()
             if rfq_worker:
                 rfq_worker.close()
-            if worker:
-                worker.close()
             if connected_worker:
                 connected_worker.close()
             if extraction_worker:
@@ -141,7 +137,7 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
                      (400, 401, 403, 404, 405, 409, 413, 422, 429, 502, 503, 504)}
     app = FastAPI(title='견줘 Python Backend', version='1.0.0', lifespan=lifespan,
                   responses=common_errors)
-    app.state.settings, app.state.services, app.state.worker = settings, services, None
+    app.state.settings, app.state.services = settings, services
     app.state.mailbox_service = mailbox_service
     app.state.connected_mailbox_worker = None
     app.state.extraction_worker = None

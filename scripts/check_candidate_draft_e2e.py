@@ -48,9 +48,6 @@ def verify(http, db, owner, prefix, selected, *, expected_items=12):
     require(isinstance(cases, list) and len(cases) == 1, 'CASE_NOT_UNIQUE_OR_NOT_FOUND')
     case = cases[0]
     require(isinstance(case.get('standardized_item_key'), str) and case['standardized_item_key'], 'ITEM_KEY_REQUIRED')
-    # Read the active API process, not merely this CLI's .env.
-    health = http.get('/health')
-    require(health.status_code == 200 and health.json().get('mail_sending_enabled') is False, 'SENDING_NOT_PROVEN_DISABLED')
     candidate = CandidatesResponse.model_validate(data(http, f"/api/v1/work-cases/{case['id']}/candidates"))
     require(str(candidate.case_id) == case['id'] and candidate.revision == case['input_revision']
             and not candidate.is_stale, 'STALE_CANDIDATES')
@@ -81,14 +78,13 @@ def verify(http, db, owner, prefix, selected, *, expected_items=12):
     require(set(selected) <= set(report['selectable_supplier_ids']), 'INVALID_TARGET_SELECTION')
     require(set(selected) <= set(supplier_ids), 'TARGET_OUTSIDE_ITEM_INVENTORY')
     settings = data(http, '/api/v1/mail-send-settings', case_id=case['id'])
+    # Approval ON keeps the selection from sending; there is no server-wide send switch.
     require(settings.get('configured') is True
             and settings.get('effective_settings', {}).get('RFQ', {}).get('effective_approval_required') is True,
             'RFQ_APPROVAL_MUST_BE_ON')
     body = {'expected_revision': candidate.revision, 'candidate_set_id': str(candidate.candidate_set_id),
             'selected_supplier_ids': selected}
     key = 'be3:' + hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
-    health = http.get('/health')
-    require(health.status_code == 200 and health.json().get('mail_sending_enabled') is False, 'SENDING_NOT_PROVEN_DISABLED')
     response = http.put(f"/api/v1/work-cases/{case['id']}/candidate-selection", json=body,
                         headers={'Idempotency-Key': key})
     require(response.status_code == 200, 'SELECTION_FAILED')

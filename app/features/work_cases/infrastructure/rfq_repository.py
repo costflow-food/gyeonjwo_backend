@@ -29,6 +29,11 @@ class RfqRepository:
                 raise ServiceError('ACTION_NOT_ALLOWED', '현재 상태에서는 RFQ 작업을 진행할 수 없습니다.', 409, retryable=False) from None
             raise ServiceError('PROCESSING_UNAVAILABLE', 'RFQ 저장소를 확인할 수 없습니다.', 503) from None
 
+    def metadata_owners(self):
+        """메일함을 연결한 사용자 ID 목록. 메타데이터 워커가 매 주기 사용자별로 작업을 가져갈 때 쓴다."""
+        rows = self.client.table('mail_sync_states').select('owner_user_id').execute().data or []
+        return sorted({str(row['owner_user_id']) for row in rows})
+
     def open_round(self, owner, case_id, revision, current_round, suppliers, key):
         """Internal candidate orchestrator entry, not a browser/LLM tool.
 

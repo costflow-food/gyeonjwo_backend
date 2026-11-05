@@ -64,7 +64,7 @@ def main():
     parser.add_argument('--skip-readiness',action='store_true',help='Do not call /ready (it probes the DB).')
     args=parser.parse_args()
     settings=Settings()
-    result={'configuration':configuration_report(settings,receiver=settings.google_mailbox_worker_enabled)}
+    result={'configuration':configuration_report(settings)}
     if args.db: result['database']=database_report(settings)
     if not args.local_only:
         result['server']=server_report(args.base_url,args.origin,check_readiness=not args.skip_readiness)

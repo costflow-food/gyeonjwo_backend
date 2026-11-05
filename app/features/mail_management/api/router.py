@@ -79,11 +79,8 @@ def settings(principal=Depends(require_google_user), service=Depends(get_managem
 def save_settings(payload: SettingsUpdate, request: Request,
                   principal=Depends(require_google_user), service=Depends(get_management_service),
                   idempotency_key: Annotated[str | None, Header(alias='Idempotency-Key')] = None):
-    settings = request.app.state.settings
     worker = getattr(request.app.state, 'rfq_workflow_worker', None)
-    dispatch_ready = (settings.rfq_workflow_enabled and settings.rfq_mail_sending_enabled
-        and worker is not None and worker.running
-        and str(principal.user_id) in {str(value) for value in settings.rfq_workflow_owner_ids})
+    dispatch_ready = worker is not None and worker.running
     response = service.save_settings(principal.user_id, payload, idempotency_key, dispatch_ready=bool(dispatch_ready))
     if worker:
         worker.wake.set()

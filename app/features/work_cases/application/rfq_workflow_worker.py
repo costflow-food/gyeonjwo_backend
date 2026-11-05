@@ -1,4 +1,4 @@
-"""Opt-in server workflow: prepare new RFQs, dispatch only eligible own drafts."""
+"""Server workflow: prepare new RFQs, dispatch only drafts allowed by the owner send settings."""
 import logging
 import threading
 from app.core.errors import ServiceError
@@ -7,10 +7,10 @@ logger = logging.getLogger('uvicorn.error.rfq_workflow')
 
 
 class RfqWorkflowWorker:
-    def __init__(self, repo, preparation, delivery, owners, *, sending_enabled=False):
+    def __init__(self, repo, preparation, delivery, owners):
+        # owners is called every cycle so newly connected mailboxes are picked up without a restart.
         self.repo, self.preparation, self.delivery = repo, preparation, delivery
-        self.owners = tuple(owners)
-        self.sending_enabled = sending_enabled
+        self.owners = owners
         self.stop = threading.Event()
         self.wake = threading.Event()
         self.thread = None
@@ -53,7 +53,7 @@ class RfqWorkflowWorker:
                 logger.warning('rfq reconciliation_unavailable')
             else:
                 self.repo.finish_reconcile_job(owner, job)
-        if not self.sending_enabled or self.stop.is_set():
+        if self.stop.is_set():
             return
         pending = self.repo.pending(owner, after=self.send_cursors.get(owner))
         self.send_cursors[owner] = pending[-1]['id'] if len(pending) == 50 else None
@@ -77,7 +77,12 @@ class RfqWorkflowWorker:
             self.running = True
             try:
                 while not self.stop.is_set():
-                    for owner in self.owners:
+                    try:
+                        owners = self.owners()
+                    except Exception:
+                        owners = ()
+                        logger.warning('rfq workflow_unavailable code=STORAGE_UNAVAILABLE')
+                    for owner in owners:
                         if self.stop.is_set():
                             break
                         try:

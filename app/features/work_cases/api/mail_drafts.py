@@ -39,11 +39,8 @@ def get_draft(draft_id: UUID, principal=Depends(require_google_user), service=De
 
 
 def submit(request, principal, service, draft_id, action, payload, key):
-    settings = request.app.state.settings
     worker = getattr(request.app.state, 'rfq_workflow_worker', None)
-    accepting = (settings.rfq_workflow_enabled and worker is not None and worker.running
-                 and str(principal.user_id) in {str(x) for x in settings.rfq_workflow_owner_ids}
-                 and (action != 'APPROVE_SEND' or settings.rfq_mail_sending_enabled))
+    accepting = worker is not None and worker.running
     response = service.submit(principal.user_id, draft_id, action, payload, key, bool(accepting))
     if worker is not None:
         worker.wake.set()

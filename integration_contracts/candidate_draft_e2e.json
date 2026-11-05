@@ -3,7 +3,7 @@
   "status": "VERIFIER_PREPARED_REAL_E2E_PENDING",
   "target_prefix": "ce6994f4",
   "inventory": "Owned standardized_item_key of target case; expect12 supplier_items, distinct supplier business emails checked without displaying addresses.",
-  "no_send": "Read actual API /health.mail_sending_enabled=false, require approval ON, no approve/send/settings mutation endpoints. Missing guard field refuses selection.",
+  "no_send": "There is no server send switch. Require RFQ approval ON in the effective settings before selection; no approve/send/settings mutation endpoints.",
   "mutation": "Only explicitly listed supplier UUIDs through API-12, deterministic idempotency key, then API-17 and owned logs.",
   "operator": "Run on teammate Mac; hidden token prompt, local API only, no redirect/proxy. First run inventory without --supplier-id.",
   "verification": {

@@ -387,8 +387,8 @@ next_action:
 
 
 def chat_model(settings, role: AgentRole | None = None) -> BaseChatModel:
-    """설정의 LLM 클라이언트. role을 주면 그 역할의 모델(LLM_MODEL_<ROLE>, 없으면 LLM_MODEL)과
-    추론 수준(LLM_REASONING_EFFORT_<ROLE>, 없으면 LLM_REASONING_EFFORT)을 쓴다. 추론 수준이 없으면 보내지 않는다.
+    """설정의 LLM 클라이언트. role을 주면 그 역할의 모델(llm_role_models, 없으면 llm_model)과
+    추론 수준(llm_role_reasoning_efforts, 없으면 llm_reasoning_effort)을 쓴다. 추론 수준이 없으면 보내지 않는다.
     추론 수준이 있으면 Responses API로 부른다(Chat Completions는 도구 호출과 추론 수준을 함께 받지 않는 모델이 있다).
     응답은 OpenAI에 저장하지 않는다(store=False, 메일 원문이 담긴 요청이다)."""
     settings.require_llm()

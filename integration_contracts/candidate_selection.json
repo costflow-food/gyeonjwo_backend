@@ -19,11 +19,11 @@
     }
   },
   "policy": {
-    "decision": "UNDECIDED: preserve existing restrictions",
-    "mode": "PRESERVE_MAILBOX_LIMIT",
-    "targets": "User selects case candidates; mailbox allowed_supplier_ids is never target selection and never edited by this API. Retain effective recipient/purpose/case scope and explicit supplier_ids if present. Empty explicit supplier_ids permits none.",
+    "decision": "DECIDED 2026-11-05: registered supplier contacts, mailbox default covers every case",
+    "mode": "REGISTERED_CONTACT",
+    "targets": "User selects case candidates. Send judgment (team decision 2026-11-05): choose the case override if it has a boolean for the purpose, else the mailbox default (work_case_id null), which applies to every case. Configured = row.configured and approval_required_by_purpose[purpose] is boolean (null/missing = unset, no send). Recipient must equal the owner's REGISTERED/VERIFIED_WEB supplier contact_email for the draft supplier_id. allowed_recipients_jsonb and allowed_scope_jsonb (purposes/work_case_ids/supplier_ids) are not used. Auto send only when the user saved false.",
     "ON": "WAITING_APPROVAL; existing APIs16-19 then guarded claim",
-    "OFF": "Only chosen suppliers and configured permission scope may AUTO_QUEUED. Candidate caution requires manual confirmation. Sender unavailable blocks new automatic submission before mutation. Final current-policy check remains atomic at DB claim.",
+    "OFF": "Only chosen suppliers whose contact matches the registered supplier may AUTO_QUEUED. Candidate caution requires manual confirmation. Sender unavailable blocks new automatic submission before mutation. Final current-policy check remains atomic at DB claim.",
     "pending_team_agreement": "Whether mailbox allowlist remains independent restriction must be agreed with frontend/DB; no removal assumed."
   },
   "storage": {

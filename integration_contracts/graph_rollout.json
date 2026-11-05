@@ -13,7 +13,6 @@
     "AGENT_EXTRACTION_WORKER_ENABLED": true,
     "AGENT_GRAPH_ENABLED": true,
     "AGENT_GRAPH_REVIEW_ENABLED": false,
-    "RFQ_MAIL_SENDING_ENABLED": false,
     "AGENT_STOP_AFTER_EXTRACTION": "ignored in graph mode"
   },
   "check": "python -m scripts.check_graph_rollout --db",

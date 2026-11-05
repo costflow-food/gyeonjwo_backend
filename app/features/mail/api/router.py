@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
 from fastapi.security import HTTPAuthorizationCredentials
 from starlette.concurrency import run_in_threadpool
-from app.api.dependencies import bearer, get_service, require_member
+from app.api.dependencies import bearer, require_member
 from app.api.responses import api_json, Envelope
 from app.core.errors import ServiceError
 from app.features.mail.infrastructure.gmail import parse_notification
@@ -75,12 +75,9 @@ def attachment_content(mail_id: UUID, attachment_id: str, request: Request,
 async def gmail_webhook(request: Request, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]):
     receive_logger.info('gmail push_received')
     settings = request.app.state.settings
-    # Pausing the worker must not send connected-mailbox pushes into the legacy DB path.
-    # A verified notification can still be durably queued while processing is paused.
-    connected = settings.google_mailbox_worker_enabled or (
-        not settings.worker_enabled and bool(settings.google_token_encryption_key))
+    # A verified notification is durably queued even while the mailbox worker is not running.
     if (not settings.pubsub_audience or not settings.pubsub_service_account or not settings.gmail_subscription
-            or (not connected and not settings.gmail_email)):
+            or not settings.google_token_encryption_key):
         receive_logger.warning('gmail push_rejected code=CONFIGURATION_REQUIRED')
         raise ServiceError('INGEST_UNAVAILABLE', '메일 수신 설정이 필요합니다.', 503)
     if not credentials:
@@ -104,30 +101,20 @@ async def gmail_webhook(request: Request, credentials: Annotated[HTTPAuthorizati
         receive_logger.warning('gmail push_rejected code=INVALID_JSON')
         raise ServiceError('INVALID_NOTIFICATION', '잘못된 알림 JSON입니다.', 400) from None
     try:
-        notification_id, email, history_id = parse_notification(payload, settings, connected=connected)
+        notification_id, email, history_id = parse_notification(payload, settings)
     except ServiceError:
         receive_logger.warning('gmail push_rejected code=INVALID_NOTIFICATION_OR_SUBSCRIPTION')
         raise
-    if connected:
-        mailbox = get_mailbox_service(request)
-        try:
-            await run_in_threadpool(mailbox.repo.enqueue_push, settings.gmail_subscription, notification_id, email, history_id)
-        except Exception:
-            receive_logger.warning('gmail push_enqueue_failed mode=connected')
-            raise
-        receive_logger.info('gmail push_enqueued mode=connected')
-        worker = request.app.state.connected_mailbox_worker
-        if worker:
-            worker.wake.set()
-        return Response(status_code=204)
-    service = get_service(request)
+    mailbox = get_mailbox_service(request)
     try:
-        await run_in_threadpool(service.rpc.call, 'enqueue_gmail_notification', p_subscription=settings.gmail_subscription,
-                                p_pubsub_message_id=notification_id, p_email=email, p_history_id=history_id)
+        await run_in_threadpool(mailbox.repo.enqueue_push, settings.gmail_subscription, notification_id, email, history_id)
     except Exception:
-        receive_logger.warning('gmail push_enqueue_failed mode=legacy')
-        raise ServiceError('INGEST_UNAVAILABLE', '알림을 영속 접수하지 못했습니다.', 503) from None
-    receive_logger.info('gmail push_enqueued mode=legacy')
+        receive_logger.warning('gmail push_enqueue_failed mode=connected')
+        raise
+    receive_logger.info('gmail push_enqueued mode=connected')
+    worker = request.app.state.connected_mailbox_worker
+    if worker:
+        worker.wake.set()
     return Response(status_code=204)
 
 

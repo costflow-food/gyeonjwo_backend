@@ -16,7 +16,6 @@ from app.shared.infrastructure.db.client import make_server_client
 
 def report(settings, *, db=False, client=None):
     checks = {
-        'mail_sending_disabled': settings.rfq_mail_sending_enabled is False,
         'configuration_ready': configuration_readiness(settings).available,
         'agent_interface_ready': agent_readiness().available,
         'legacy_queue_drained': False,
