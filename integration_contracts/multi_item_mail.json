@@ -1,0 +1,37 @@
+{
+  "status": "PROPOSED_PENDING_DB_AND_EXTRACTION_AGREEMENT",
+  "scope": "03 MVP Must",
+  "observed_base": "210ebfab82a5493a7486d3ea857c5a51c0b27475",
+  "dependencies": {
+    "KAN-133": "DB owner to supply schema, RPC signatures, backfill and deployment readiness. Names below describe logical fields.",
+    "extraction_1": "Confirm where a full validated per-item list becomes available before case-scoped quote persistence and candidate selection. Existing ExtractionOut returns quote_version_ids only.",
+    "work_case_display": "Confirm related_cases response shape and placement with frontend."
+  },
+  "extraction_proposal": {
+    "items": [
+      {
+        "source_item_key": "Stable opaque string per source mail and logical item. Reordering or retrying must preserve keys.",
+        "evidence": "Source location sufficient to disambiguate similar items."
+      }
+    ],
+    "invalid": "Reject missing or conflicting keys before writing. Preserve existing handling for unavailable extraction and existing single-item cases."
+  },
+  "storage_proposal": {
+    "transaction": "Lock the owner-scoped canonical source mail or its ingestion receipt. Reuse legacy initial case for its confirmed item and atomically create remaining cases and links. Persist the item-to-case result before acknowledging processing. Keep later graph execution scoped to one item's quote IDs.",
+    "uniqueness": "Enforce uniqueness in the database by owner, canonical source mail and source_item_key. Treat provider retries as the same canonical mail using existing mailbox-scoped receipts. Keep ACCEPTED receipts and do not recreate accepted items on replay.",
+    "mail_case_links": "Shared canonical initial mail plus each case's separately verified replies. Enforce owner consistency for both mail and case. Keep the shared original and remaining links when one case is accepted.",
+    "related_cases": "Derive from other owned cases with the same initial source mail. Exclude self and removed cases. Proposal for case detail is an ordered list of case IDs, empty for single-item cases. Derive via the initial mail only so shared replies do not introduce unrelated siblings."
+  },
+  "access_and_reply": {
+    "original": "Keep API-25 owner-scoped. Case-scoped evidence, attachment reads and outbound draft source lookup use owner plus the mail-to-case link once KAN-133 is ready.",
+    "reply": "Retain participant and reference checks and DB revalidation. A reference to the shared initial message does not uniquely resolve a case. Use a verified case-specific outbound reference when available, otherwise keep existing ambiguous intake. Never fan out an ambiguous reply."
+  },
+  "acceptance": [
+    "Two items produce two owned cases and two links to one original. Each detail lists only the other case.",
+    "Retry with reordered items and concurrent duplicate delivery. Both return the same cases. Inject transaction failure and verify no partial case/link set.",
+    "Single-item new and pre-existing cases preserve IDs, original access and reply behavior.",
+    "Case-specific replies link only to the intended case. Shared initial reference remains ambiguous. Other owners cannot access evidence or discover siblings.",
+    "Accept one sibling and retry ingestion. The other retains its original and the accepted case stays deleted."
+  ],
+  "deployment": "Confirm both upstream contracts before enabling behavior and verify using an isolated test database. This proposal does not define a deployed RPC."
+}

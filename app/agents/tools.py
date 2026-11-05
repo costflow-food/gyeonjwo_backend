@@ -742,6 +742,9 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
     supplier_name = values['supplier_name']['value'] if 'supplier_name' in values else None
     supplier_id, issue = _quote_supplier(store, case_id, case_mails, evidence_mails, supplier_name)
     if issue:
+        record_issue = getattr(store, 'record_extraction_issue', None)
+        if callable(record_issue) and issue['code'] in {'SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH'}:
+            record_issue(case_id, sorted(evidence_mails), issue, supplier_name)
         return _with_hints({'status': 'REJECTED', 'rejected': [issue]}, [issue])
     # 원문 메일은 근거 메일 중 가장 최근에 받은 메일이다 (회신이 이전 메일의 값을 함께 근거로 써도 회신이 원문)
     source_mail_id = max(evidence_mails, key=lambda mail_id: (case_mails[mail_id].get('received_at') or '', mail_id))
