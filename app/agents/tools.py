@@ -347,7 +347,9 @@ class QuoteVersionRecord(StrictModel):
     extraction_status: Literal['NEEDS_REVIEW', 'CONFIRMED', 'UNSUPPORTED']
     currency: str = 'KRW'              # 원문에 통화가 없으면 KRW (MOQ·발주 배수는 pricing_terms_jsonb에 있다)
     mail_normalized: dict              # mail_id → mail_messages.normalized_jsonb
-    case_conditions: dict | None       # 최초 추출 시 work_cases.item_name·specification
+    case_conditions: dict | None       # 비어 있는 work_cases 조건만: item_name·specification·standardized_item_key
+                                       # (최초 추출), quantity·unit(인상 통보의 공급 물량)
+    supplier_item_id: str | None = None  # 같은 품목으로 확인된 그 업체의 등록 품목(supplier_items.id)
 
 
 class QuoteStore(CaseStore, Protocol):
@@ -359,6 +361,9 @@ class QuoteStore(CaseStore, Protocol):
 
     def latest_quote_version(self, case_id: str, supplier_id: str) -> tuple[str, QuoteVersionRecord] | None:
         """이 업무·업체의 최신 quote_versions (id, 행)."""
+
+    def list_supplier_items(self, case_id: str, supplier_id: str) -> list[dict]:
+        """그 업체의 등록 품목(supplier_items) {id, item_name, specification, unit, standardized_item_key}."""
 
     def insert_quote_version(self, record: QuoteVersionRecord,
                              expected_input_revision: int) -> tuple[str, QuoteVersionRecord] | None:
@@ -622,6 +627,45 @@ def _carry(previous: tuple[str, QuoteVersionRecord], values: dict, tiers: list, 
     return tiers, costs, carried
 
 
+def _letters(text) -> str:
+    """품목·규격 대조용 표기: 한글·영문·숫자만 남긴다 ('특품, 10kg/박스' → '특품10kg박스')."""
+    return re.sub(r'[^0-9a-zA-Z가-힣]', '', str(text or '')).casefold()
+
+
+def _registered_item(items: list[dict], current: dict) -> dict | None:
+    """이번 메일의 품목과 같은 그 업체의 등록 품목. 품목명이 서로 포함되면 같은 품목으로 보고, 여럿이면 규격으로 좁힌다.
+    하나로 정해질 때만 돌려준다(애매하면 연결하지 않는다)."""
+    name = _letters(current.get('item_name', {}).get('value'))
+    if not name:
+        return None
+    found = [item for item in items if (registered := _letters(item.get('item_name'))) and
+             (registered in name or name in registered)]
+    if len(found) > 1:
+        wanted = name + _letters(current.get('specification', {}).get('value'))
+        found = [item for item in found if _letters(item.get('specification')) and
+                 _letters(item.get('specification')) in wanted] or found
+    return found[0] if len(found) == 1 else None
+
+
+def _case_conditions(case: dict, current: dict, item: dict | None, initial_mails: set) -> dict | None:
+    """이번 메일 값으로 채울 업무 조건. 업무에 아직 없는 것만 채운다.
+    품목·규격은 처음 추출할 때(등록 품목이 확인되면 그 품목 키도) 채운다.
+    업무 비교 수량은 기존 업체 인상 통보(INITIAL 메일)의 공급 물량(available_quantity)이다(2026-11-05 팀 결정).
+    단위는 그 수량의 단위, 없으면 같은 메일의 단가 단위다. 대안 업체 회신의 공급 가능량으로는 채우지 않는다."""
+    conditions = {}
+    if not case.get('item_name') and 'item_name' in current:
+        conditions |= {'item_name': current['item_name']['value'],
+                       'specification': current['specification']['value'] if 'specification' in current else None}
+        if item and item.get('standardized_item_key'):
+            conditions['standardized_item_key'] = item['standardized_item_key']
+    supply = current.get('available_quantity')
+    if supply and supply['mail_id'] in initial_mails and not case.get('quantity'):
+        unit = supply.get('quantity_unit') or current.get('unit', {}).get('value')
+        if unit:
+            conditions |= {'quantity': supply['value'], 'unit': unit}
+    return conditions or None
+
+
 def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[QuoteField],
                           price_tiers: list[PriceTier], cost_terms: list[CostTerm], item_notes: list[ItemNote]) -> dict:
     """store_structured_mail의 본체. 업무·revision은 실행 정보(context)에서만 받는다."""
@@ -734,6 +778,9 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
     foreign = value('currency') not in (None, 'KRW')
     quantity_units = {f'{name}_unit': values[name]['quantity_unit'] for name in sorted(_QUANTITY_FIELDS)
                       if values.get(name, {}).get('quantity_unit')}
+    item = _registered_item(_read(lambda: store.list_supplier_items(case_id, supplier_id)) or [], current)
+    initial_mails = {mail_id for mail_id, mail in case_mails.items() if mail.get('message_role') == 'INITIAL'}
+    conditions = _case_conditions(case, current, item, initial_mails)
     record = QuoteVersionRecord(
         work_case_id=case_id, supplier_id=supplier_id, source_mail_id=source_mail_id,
         version_no=previous[1].version_no + 1 if previous else 1, supersedes_id=previous[0] if previous else None,
@@ -748,8 +795,7 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         evidence_jsonb={name: entry for name, entry in values.items() if QUOTE_FIELDS[name][1] != 'mail'},
         extraction_status='NEEDS_REVIEW' if foreign or review else 'CONFIRMED',
         currency=value('currency') or 'KRW', mail_normalized=mails,
-        case_conditions={'item_name': value('item_name'), 'specification': value('specification')}
-        if not case_item and 'item_name' in current else None)
+        case_conditions=conditions, supplier_item_id=item['id'] if item else None)
     if previous and _same_quote(previous[1], record):
         saved = previous                     # 같은 메일을 다시 추출해 저장 값이 같으면 새 버전을 만들지 않는다
     else:
@@ -878,6 +924,10 @@ def use_candidate_store(store: CandidateStore | None) -> None:
     _candidate_store = store
 
 
+# suppliers.source_type: 웹에서 수집해 등록한 업체 (등록 거래처는 REGISTERED)
+WEB_SOURCE_TYPE = 'VERIFIED_WEB'
+
+
 def _key(text) -> str:
     return re.sub(r'\s+', '', str(text)).casefold()
 
@@ -906,16 +956,20 @@ def _check(condition: str, required: bool, state: str, refs: list[str]) -> dict:
     return {'condition': condition, 'required': required, 'state': state, 'evidence_refs': refs}
 
 
-def _required_checks(case: dict, item: dict) -> list[dict]:
+def _required_checks(case: dict, item: dict, web: bool = False) -> list[dict]:
+    """품목 한 행의 필수 조건 체크(규격·필수 인증). web이면 웹 수집 업체의 품목이다.
+    웹 수집 인증은 공개 자료의 표시라 확인 전이고, 인증 정보 없이 저장된 품목도 []로 읽힌다(컬럼 기본값).
+    그래서 웹 품목의 필수 인증은 PASS·FAIL로 정하지 않고 UNKNOWN으로 두어 RFQ로 묻는다."""
     ref = [f"supplier_items:{item['id']}"]
     checks = []
     if case.get('specification'):
         checks.append(_check(f"규격 {case['specification']}", True, _spec_state(case['specification'],
                                                                                item.get('specification')), ref))
     certifications = item.get('certifications_jsonb')
-    owned = {_key(name) for name in certifications or []}
+    unconfirmed = web or certifications is None
+    owned = set() if unconfirmed else {_key(name) for name in certifications}
     for name in _required_names(case.get('mandatory_conditions')):
-        state = 'UNKNOWN' if certifications is None else 'PASS' if _key(name) in owned else 'FAIL'
+        state = 'UNKNOWN' if unconfirmed else 'PASS' if _key(name) in owned else 'FAIL'
         checks.append(_check(name, True, state, ref))
     # 수량·납기는 업체 쪽에 비교할 값이 없어 판정하지 않는다. RFQ 고정 질문으로 묻는다
     return checks
@@ -1050,12 +1104,13 @@ def evaluate_candidates(store: CandidateStore, context: RunContext, supplier_ite
                       key=lambda row: str(row.get('transaction_date') or '')):
         purchases[row['supplier_id']] = row
 
+    web = {sid for sid, supplier in suppliers.items() if supplier.get('source_type') == WEB_SOURCE_TYPE}
     excluded, best = [], {}
     for item in items:
         supplier_id = item['supplier_id']
         if supplier_id in incumbents:
             continue
-        checks = _required_checks(case, item)
+        checks = _required_checks(case, item, web=supplier_id in web)
         rank = (sum(c['state'] == 'FAIL' for c in checks), -sum(c['state'] == 'PASS' for c in checks))
         if supplier_id not in best or rank < best[supplier_id][0]:      # 업체의 품목 행 중 가장 잘 맞는 행
             best[supplier_id] = (rank, item, checks)
@@ -1082,6 +1137,7 @@ def evaluate_candidates(store: CandidateStore, context: RunContext, supplier_ite
             'supplier_id': supplier_id, 'supplier_name': supplier.get('name'),
             'has_contact': bool((supplier.get('contact_email') or '').strip()),
             'checklist': checklist, 'preference_score': _score_text(score), 'evidence_refs': refs,
+            'provisional': supplier_id in web,      # 웹 수집 업체: 잠정 후보, 회신으로 확인
             'origin': item.get('origin'),
             # 후보 업체 자신의 등록 비고. LLM이 주의 표시 근거로만 쓴다. 제외·점수 근거가 아니다(BR-15)
             'notes': notes, 'notes_ref': f"supplier_items:{item['id']}.notes" if notes else None,
@@ -2137,7 +2193,8 @@ def validate_purchase_plan(plan_type: Literal['KEEP', 'SWITCH', 'SPLIT'], alloca
 def revalidate_plans(store: ComparisonStore, case_id: str, plans: list[dict]) -> dict:
     """구매안 검증 노드: 안마다 최신 견적으로 총액·위반을 다시 계산한다(07 "코드 계산·조건 검증").
     반환: {check: PASS·FIX·NEED_INFO, violations: [{plan, code, supplier_id, expected, actual}]}
-    견적이 최신이 아니면 NEED_INFO(③부터 다시), 위반·총액 차이가 있으면 FIX(④가 고친다)."""
+    견적이 최신이 아니면 NEED_INFO(③부터 다시), 위반·총액 차이가 있으면 FIX(④가 고친다).
+    기존 업체의 총액을 계산할 수 있는데 유지안이 없으면 KEEP_MISSING으로 FIX한다(검토 카드의 비교 기준)."""
     case = _read(lambda: store.get_work_case(case_id))
     latest = set(case.get('latest_quote_version_ids') or [])
     records = dict(_read(lambda: store.get_quote_versions(case_id, sorted(latest))))
@@ -2157,20 +2214,36 @@ def revalidate_plans(store: ComparisonStore, case_id: str, plans: list[dict]) ->
         if expected != (_amount_text(_amount(plan.get('total_amount'))) if plan.get('total_amount') else None):
             violations.append({'plan': index, 'code': 'TOTAL_MISMATCH', 'supplier_id': None,
                                'expected': expected, 'actual': plan.get('total_amount')})
+    violations += _missing_keep(store, case_id, case, records, plans)
     return {'check': 'NEED_INFO' if need_info else 'FIX' if violations else 'PASS', 'violations': violations}
+
+
+def _missing_keep(store: ComparisonStore, case_id: str, case: dict, records: dict, plans: list[dict]) -> list[dict]:
+    """유지안이 빠졌는지. 기존 업체의 총액을 계산할 수 있으면 build_plan_candidates가 유지안을 만드므로 카드에 있어야 한다."""
+    if any(plan['plan_type'] == 'KEEP' for plan in plans):
+        return []
+    incumbents = {mail['supplier_id'] for mail in _read(lambda: store.list_case_mails(case_id))
+                  if mail.get('message_role') == 'INITIAL' and mail.get('supplier_id')}
+    return [{'plan': None, 'code': 'KEEP_MISSING', 'supplier_id': record.supplier_id,
+             'hint': '기존 업체 유지안(KEEP)을 validate_purchase_plan으로 확인해 plans에 넣는다.'}
+            for quote_id, record in records.items()
+            if record.supplier_id in incumbents and not cost_sheet(quote_id, record, case['quantity'], case['unit']).blocked]
 
 
 
 # ─────────────────────────────────────────────
 # ⑤ COUNTER_OFFER: calculate_counter_offer, validate_counter_offer, create_counter_offer_draft (+ 가격 검증 노드)
-#   설계: docs/AGENT5_COUNTER_OFFER_DESIGN.md. 기존 업체가 검증된 대안보다 싸지는 상한(유지 상한 단가)과 회사 정책
-#   (policy_jsonb.counter_offer) 범위를 코드가 계산하고, LLM은 그 안에서 목표 단가와 조건을 정한다.
+#   설계: docs/AGENT5_COUNTER_OFFER_DESIGN.md. 회사 정책(policy_jsonb)은 허용 인상률(max_increase_rate)과
+#   기존 업체 선호 폭(incumbent_premium_rate) 두 값이다(2026-11-04 확정, 4%·4%).
+#   요청 인상률이 허용 인상률 이하이거나 요청 단가로도 대안보다 싸면 수용을 추천한다(역제안 생략).
+#   그 외에는 [인상 전 단가, min(요청 단가, 인상 전 × (1+허용 인상률))] 안에서 역제안한다. 대안과 경쟁할 수 있는 선
+#   (유지 상한 × (1+선호 폭))이 그 범위 안이면 상한을 그 선으로 낮추고, 범위보다 낮으면 그대로 두되 대안보다 비싸다고 알린다.
 #   정책이 없으면 목표를 만들지 않는다(07 ⑤ "정책 없는 합리적 인상률 생성 금지"). 메일에는 다른 공급처 이야기를 넣지 않는다.
 # ─────────────────────────────────────────────
 
-COUNTER_TARGET_RANGES = ('BETWEEN_PREVIOUS_AND_REQUESTED',)     # 정책 target_range 값 (C4, 팀 합의 전 초안)
-COUNTER_STATUSES = ('PROPOSABLE', 'NO_POLICY', 'NOT_NEEDED', 'NOT_COMPETITIVE', 'NOT_COMPUTABLE', 'COSTS_UNKNOWN',
+COUNTER_STATUSES = ('PROPOSABLE', 'NO_POLICY', 'NOT_NEEDED', 'WITHIN_POLICY', 'NOT_COMPUTABLE', 'COSTS_UNKNOWN',
                     'PREVIOUS_UNKNOWN')
+COUNTER_SKIP_STATUSES = ('NOT_NEEDED', 'WITHIN_POLICY')          # 역제안 없이 인상 수용을 추천하는 상태
 
 
 class CounterOfferStore(PriorityStore, Protocol):
@@ -2188,16 +2261,22 @@ class AlternativeAllocation(StrictModel):
 
 
 def _counter_policy(case: dict) -> dict | None:
-    """정책(policy_jsonb.counter_offer). enabled가 true이고 target_range가 정해진 값일 때만 쓴다."""
-    policy = (case.get('policy') or {}).get('counter_offer') or {}
-    return policy if policy.get('enabled') and policy.get('target_range') in COUNTER_TARGET_RANGES else None
+    """회사 정책(policy_jsonb)의 {max_increase_rate, incumbent_premium_rate}. 허용 인상률이 없거나 음수면 None이다.
+    선호 폭이 없으면 0(대안보다 비싸면 유지하지 않음)으로 본다."""
+    policy = case.get('policy') or {}
+    rate, premium = _amount(policy.get('max_increase_rate')), _amount(policy.get('incumbent_premium_rate') or '0')
+    if rate is None or rate < 0 or premium is None or premium < 0:
+        return None
+    return {'max_increase_rate': rate, 'incumbent_premium_rate': premium}
 
 
 def counter_offer_numbers(store: CounterOfferStore, context: RunContext, alternative: list[AlternativeAllocation]) -> dict:
     """calculate_counter_offer의 본체. 기존 업체 요청·인상 전 단가, 대안 총액, 유지 상한 단가, 정책 범위, 허용 목표 범위.
     status: PROPOSABLE(허용 범위 있음) / NO_POLICY / NOT_NEEDED(요청 단가로도 대안보다 싸거나 같음) /
-    NOT_COMPETITIVE(허용 하한으로도 대안보다 비쌈) / NOT_COMPUTABLE(총액·세금 기준 비교 불가) /
-    COSTS_UNKNOWN(기존 업체의 단가 외 비용 미확인) / PREVIOUS_UNKNOWN"""
+    WITHIN_POLICY(요청 인상률이 허용 인상률 이하) / NOT_COMPUTABLE(총액·세금 기준 비교 불가) /
+    COSTS_UNKNOWN(기존 업체의 단가 외 비용 미확인) / PREVIOUS_UNKNOWN.
+    NOT_NEEDED·WITHIN_POLICY는 수용 추천(skip_allowed). PROPOSABLE에서 above_alternative가 true면
+    허용 범위의 어떤 값도 대안과 경쟁할 수 있는 선보다 비싸다."""
     case, stop = _priority_case(store, context)
     if stop:
         return stop
@@ -2243,16 +2322,17 @@ def counter_offer_numbers(store: CounterOfferStore, context: RunContext, alterna
         status = 'NO_POLICY'
     elif previous is None:
         status = 'PREVIOUS_UNKNOWN'
+    elif sheet.unit_price <= previous * (1 + policy['max_increase_rate']):
+        status = 'WITHIN_POLICY'
     else:
-        low, high = previous, sheet.unit_price
-        if policy.get('max_increase_rate') is not None:
-            high = min(high, previous * (1 + Decimal(str(policy['max_increase_rate']))))
-        high = min(high, top)
-        status = 'PROPOSABLE' if low <= high else 'NOT_COMPETITIVE'
-        if status == 'PROPOSABLE':
-            result['allowed_range'] = [_amount_text(low), _amount_text(high)]
-    skip_when = (policy or {}).get('skip_when') or []
-    return {'status': 'OK', 'counter_status': status, 'skip_allowed': status in skip_when} | result
+        status = 'PROPOSABLE'
+        low, high = previous, min(sheet.unit_price, previous * (1 + policy['max_increase_rate']))
+        competitive = top * (1 + policy['incumbent_premium_rate'])
+        if competitive >= low:
+            high = min(high, competitive)
+        result |= {'allowed_range': [_amount_text(low), _amount_text(high)],
+                   'competitive_unit_price': _amount_text(competitive), 'above_alternative': competitive < low}
+    return {'status': 'OK', 'counter_status': status, 'skip_allowed': status in COUNTER_SKIP_STATUSES} | result
 
 
 @register
@@ -2263,11 +2343,12 @@ def calculate_counter_offer(alternative: list[AlternativeAllocation], runtime: T
       가장 싼 비유지 안(VALID)을 그대로 보낸다.
 
     반환 status OK: counter_status(PROPOSABLE: allowed_range 안에서 목표를 정한다 / NO_POLICY: 회사 정책이 없어 목표를
-      만들지 않는다 / NOT_NEEDED: 요청 단가로도 대안보다 싸다 / NOT_COMPETITIVE: 허용 하한으로도 대안보다 비싸다 /
+      만들지 않는다 / NOT_NEEDED: 요청 단가로도 대안보다 싸다 / WITHIN_POLICY: 요청 인상률이 회사 허용 인상률 이하다 /
       NOT_COMPUTABLE / COSTS_UNKNOWN: 기존 업체의 단가 외 비용(incumbent_unknown_costs)을 모른다 /
-      PREVIOUS_UNKNOWN: 인상 전 단가 근거가 없다), skip_allowed(정책이 역제안 생략을 허용),
+      PREVIOUS_UNKNOWN: 인상 전 단가 근거가 없다), skip_allowed(true면 역제안 없이 인상 수용을 추천한다),
       requested_unit_price, previous_unit_price(previous_source 메일), ceiling_unit_price(이 단가 이하면 대안보다 싸다),
-      alternative_total, allowed_range([최소, 최대]), unit, increase_reason
+      alternative_total, allowed_range([최소, 최대]), above_alternative(true면 범위 안의 목표가 받아들여져도
+      대안보다 비싸다), unit, increase_reason
     / REJECTED(code·hint) / CONDITIONS_MISSING / REVISION_CHANGED / CASE_NOT_FOUND
     '''
     return counter_offer_numbers(_priority_store, _run_context(_priority_store, runtime), alternative)

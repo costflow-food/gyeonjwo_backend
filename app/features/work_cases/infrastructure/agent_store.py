@@ -151,6 +151,15 @@ class AgentStore:
             .in_('source_type',['REGISTERED','VERIFIED_WEB']).limit(2))
         return rows[0]['id'] if len(rows)==1 else None
 
+    def list_supplier_items(self, case_id, supplier_id):
+        self.check(case_id)
+        rows = self.rows(self.repo.client.table('supplier_items')
+            .select('id,item_name,specification,unit,standardized_item_key')
+            .eq('owner_user_id', self.scope.owner).eq('supplier_id', str(UUID(supplier_id))).limit(101))
+        if len(rows) > 100:
+            raise ServiceError('PROCESSING_UNAVAILABLE', '업체 등록 품목 조회 범위를 확인해야 합니다.', 503)
+        return rows
+
     def latest_ids(self, case_id):
         self.check(case_id)
         rows=self.rows(self.repo.client.table('quote_versions').select('id,supplier_id,version_no')
