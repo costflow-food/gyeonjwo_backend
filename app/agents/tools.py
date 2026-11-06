@@ -46,7 +46,7 @@ import hashlib
 import json
 import re
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Literal, Protocol
 
 from langchain.tools import ToolRuntime
@@ -1261,7 +1261,7 @@ def evaluate_candidates(store: CandidateStore, context: RunContext, supplier_ite
               'scope': {'searched': len({item['supplier_id'] for item in items}),
                         'candidates': len(candidates), 'excluded': len(excluded)},
               'rfq_facts': {'품목': item_name, '규격': case.get('specification'),
-                            '수량': f"{case['quantity']}{case.get('unit') or ''}" if case.get('quantity') else None,
+                            '수량': f"{_mail_quantity(case['quantity'])}{case.get('unit') or ''}" if case.get('quantity') else None,
                             '납기일': case.get('due_date')},
               'candidates': candidates, 'excluded': excluded,
               'question_options': dict(RFQ_OPTIONAL_QUESTIONS), 'default_question_options': list(RFQ_DEFAULT_OPTIONS)}
@@ -1509,6 +1509,15 @@ def _amount(value) -> Decimal | None:
         return Decimal(str(value).replace(',', ''))
     except Exception:
         return None
+
+
+def _mail_quantity(quantity) -> str:
+    """메일에 쓰는 수량 표기: 천 단위 쉼표, 끝자리 0 없이 ('1000.000000' → '1,000', '2.5' → '2.5').
+    숫자로 읽을 수 없는 값은 그대로 쓴다."""
+    try:
+        return f'{Decimal(str(quantity)).normalize():,f}'
+    except InvalidOperation:
+        return str(quantity)
 
 
 def _amount_text(amount: Decimal) -> str:

@@ -169,6 +169,7 @@ PROMPTS = {
   비고가 여러 개면 하나씩 따로 넣는다. 비고를 이유로 업체를 제외하거나 비용을 판단하지 않는다.
 - tax_terms를 보낼 때 tax_basis도 붙인다: 단가에 부가세가 포함이면 INCLUDED, 별도면 EXCLUDED, 면세면 EXEMPT.
   (예: "부가세 별도" → EXCLUDED, "부가세 면세" → EXEMPT, "VAT 포함 가격" → INCLUDED) 원문으로 판단할 수 없으면 null이다.
+  tax_basis는 tax_terms 항목에만 붙인다. 단가 줄에 "(부가세 별도)"가 함께 적혀 있어도 unit_price 등 다른 항목은 null로 둔다.
 - increase_reason은 원문에 인상 사유가 적혀 있을 때만 넣는다. 적용 시점("다음 달부터")은 사유가 아니다.
 - available_quantity는 업체가 공급하는(할 수 있는) 물량이다. 공급 계획·공급 물량·공급 가능량 모두 여기에 넣고 단위까지 옮긴다.
   예) "11월 공급 계획 1,000kg에 대해 5,000원에서 5,500원으로 인상" → available_quantity "1,000kg"
