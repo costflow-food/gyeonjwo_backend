@@ -297,6 +297,7 @@ def case_progress(case_id: UUID, principal=Depends(require_google_user), repo=De
 @router.get('/{case_id}', summary='업무의 저장 상태 조회: 실행 없음')
 def get_case(case_id: UUID, request: Request, principal=Depends(require_google_user), repo=Depends(get_runtime_repository)):
     row = load_action_case(repo, principal.user_id, case_id)
+    related_cases = repo.related_case_ids(principal.user_id, case_id, row['initial_mail_id'])
     actions, disabled = case_actions(row, extraction_readiness(request, repo), resume_readiness(request, repo),
                                      case_changes_ready=case_changes_ready(repo))
     if 'RESUME' in actions:
@@ -313,4 +314,4 @@ def get_case(case_id: UUID, request: Request, principal=Depends(require_google_u
     batch_id = row.pop('current_batch_id')
     return api_json({'case_id': row.pop('id'), **row,
                     'batch_id': batch_id, 'progress_url': f'/api/v1/work-cases/{case_id}/progress',
-                    'allowed_actions': actions, 'disabled_actions': disabled})
+                    'allowed_actions': actions, 'disabled_actions': disabled, 'related_cases': related_cases})

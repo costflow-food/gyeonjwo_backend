@@ -21,7 +21,8 @@ class CaseRuntimeRepository:
         if isinstance(result, dict) and result.get('kind') == 'ERROR':
             codes = {'RESOURCE_NOT_FOUND': 404, 'WORK_ALREADY_STARTED': 409, 'REVISION_CONFLICT': 409,
                      'ACTION_NOT_ALLOWED': 409, 'REQUEST_IN_PROGRESS': 409, 'IDEMPOTENCY_KEY_REUSED': 409,
-                     'INVALID_PLAN_SELECTION': 422}
+                     'INVALID_PLAN_SELECTION': 422, 'DRAFT_CHANGED': 409, 'SEND_RESULT_UNKNOWN': 409,
+                     'INVALID_CONDITIONS': 422}
             code = result.get('code')
             if code in codes:
                 raise ServiceError(code, '최신 업무 상태와 요청을 확인해 주세요.', codes[code],
@@ -32,6 +33,30 @@ class CaseRuntimeRepository:
     def case_change_receipt(self, owner, case_id, operation, key, body_hash):
         return self.call('lookup_work_case_change_request', p_owner=str(owner), p_case=str(case_id),
                          p_operation=operation, p_key=key, p_hash=body_hash)
+
+    def related_case_ids(self, owner, case_id, initial_mail_id):
+        """Read siblings by canonical initial mail, never by a shared reply."""
+        related = []
+        after = None
+        try:
+            while True:
+                query = (self.client.table('work_cases').select('id')
+                         .eq('owner_user_id', str(owner)).eq('initial_mail_id', str(initial_mail_id))
+                         .neq('id', str(case_id)).order('id').limit(100))
+                if after is not None:
+                    query = query.gt('id', after)
+                rows = query.execute().data
+                if not isinstance(rows, list):
+                    raise ValueError('Invalid related cases')
+                ids = [row['id'] for row in rows]
+                if ids != sorted(set(ids)) or (after is not None and ids and ids[0] <= after):
+                    raise ValueError('Invalid related case order')
+                related.extend(ids)
+                if len(ids) < 100:
+                    return related
+                after = ids[-1]
+        except Exception:
+            raise ServiceError('PROCESSING_UNAVAILABLE', '관련 업무를 조회할 수 없습니다.', 503) from None
 
     def submit_case_change(self, owner, case_id, operation, body, key, body_hash, request_id):
         return self.call('submit_work_case_change', p_owner=str(owner), p_case=str(case_id),

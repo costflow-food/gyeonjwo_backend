@@ -22,6 +22,8 @@ STEP_MESSAGES = {
     'SELECTING_CANDIDATES': '후보 찾기 대기',
     'CANDIDATES': '견적 요청 준비 중',
     'GENERATING_PLANS': '검토안 생성 중',
+    'BUILDING_PLANS': '구매 대응안 생성 중',
+    'BUILDING_COUNTER_OFFER': '역제안 생성 중',
     'SEND_UNKNOWN': '발송 결과 확인 필요',
 }
 
