@@ -615,42 +615,69 @@ def _costs(check, costs: list[CostTerm], rejected: list, review: list) -> list[d
 
 
 def _quote_supplier(store: QuoteStore, case_id: str, case_mails: dict, evidence_mails: set,
-                    supplier_name: str | None) -> tuple[str | None, dict | None]:
+                    supplier_name: str | None) -> tuple[str | None, dict | None, str | None]:
     """견적 업체는 근거 메일의 서버 연결(mail_messages.supplier_id)로 정한다. LLM이 적은 업체명은 대조에만 쓴다.
-    반환: (supplier_id, 거절 사유)."""
+    반환: (supplier_id, 거절 사유, 등록 업체와 맞은 업체명 — 법인 표기를 뺐으면 뺀 이름)."""
     if not evidence_mails:
-        return None, {'field': 'supplier_name', 'code': 'MISSING_FIELD'}
+        return None, {'field': 'supplier_name', 'code': 'MISSING_FIELD'}, None
     linked = {(case_mails.get(mail_id) or {}).get('supplier_id') for mail_id in evidence_mails}
-    named = _read(lambda: store.resolve_supplier(case_id, supplier_name)) if supplier_name else None
+    named, matched_name = _resolve_supplier_name(store, case_id, supplier_name)
     if None in linked:
         # 업체가 연결되지 않은 메일은 업체명으로 찾되, 다른 메일 값과 섞이지 않게 한 메일 안의 근거만 묶는다
         if len(evidence_mails) > 1:
-            return None, {'field': 'evidence', 'code': 'SUPPLIER_EVIDENCE_MIXED', 'mail_ids': sorted(evidence_mails)}
+            return None, {'field': 'evidence', 'code': 'SUPPLIER_EVIDENCE_MIXED',
+                          'mail_ids': sorted(evidence_mails)}, None
         if supplier_name is None:
-            return None, {'field': 'supplier_name', 'code': 'MISSING_FIELD'}
+            return None, {'field': 'supplier_name', 'code': 'MISSING_FIELD'}, None
         if named is None:
-            return None, {'field': 'supplier_name', 'code': 'SUPPLIER_NOT_MATCHED'}
-        return named, None
+            return None, {'field': 'supplier_name', 'code': 'SUPPLIER_NOT_MATCHED'}, None
+        return named, None, matched_name
     if len(linked) > 1:
-        return None, {'field': 'evidence', 'code': 'SUPPLIER_EVIDENCE_MIXED', 'mail_ids': sorted(evidence_mails)}
+        return None, {'field': 'evidence', 'code': 'SUPPLIER_EVIDENCE_MIXED', 'mail_ids': sorted(evidence_mails)}, None
     supplier_id = linked.pop()
     if named is not None and named != supplier_id:
-        return None, {'field': 'supplier_name', 'code': 'SUPPLIER_MISMATCH'}
-    return supplier_id, None
+        return None, {'field': 'supplier_name', 'code': 'SUPPLIER_MISMATCH'}, None
+    return supplier_id, None, matched_name if named is not None else None
 
 
-# 업체명에 붙어 등록 이름과 달라지게 하는 표기: 법인 표기, 부서·직책
-_NAME_DECORATION = re.compile(r'주식회사|유한회사|농업회사법인|영농조합법인|\((?:주|유)\)|㈜|'
-                              r'영업[부팀]|구매[부팀]|대표이사|과장|대리|팀장|부장|사원|드림')
+# 거래처는 법인 표기 없이 등록되어 있다. 업체명 앞뒤에 붙은 법인 표기만 뺀다('동해프레시 주식회사', '(주)청솔농산')
+_LEGAL_FORM = re.compile(r'주식회사|유한책임회사|유한회사|합자회사|합명회사|농업회사법인|영농조합법인|'
+                         r'\(\s*(?:주|유)\s*\)|㈜|㈲')
+# 법인 표기 외에 등록 이름과 달라지게 하는 표기: 부서·직책. 처음 나온 위치부터 뒤는 회사명이 아니다
+_NAME_DECORATION = re.compile(r'영업[부팀]|구매[부팀]|대표이사|과장|대리|팀장|부장|사원|드림')
 
 
-def _supplier_retry_next(supplier_name: str | None) -> str:
-    """SUPPLIER_NOT_MATCHED 뒤에 할 일. 보낸 업체명에 법인 표기·부서·직책이 붙었을 때만 다시 보내게 한다."""
-    if supplier_name and _NAME_DECORATION.search(supplier_name):
-        return ('업체명에 법인 표기나 부서·직책이 붙어 있다. 그 표기를 빼고 회사명만(예: "동해프레시 주식회사" → '
-                '"동해프레시") 한 번 더 보낸다. 나머지 값은 그대로 보낸다.')
-    return ('회사명만 보냈는데 등록된 거래처에 없다. 다시 보내지 말고(업체명을 빼고 보내지도 않는다) '
-            '바로 HOLD로 최종 응답한다. hold.code는 SUPPLIER_NOT_MATCHED다.')
+def _company_name(text: str | None) -> str:
+    """법인 표기를 빼고 띄어쓰기를 한 칸으로 줄인 업체명 ('동해프레시 주식회사' → '동해프레시')."""
+    return re.sub(r'\s+', ' ', _LEGAL_FORM.sub(' ', str(text or ''))).strip()
+
+
+def _resolve_supplier_name(store: QuoteStore, case_id: str, supplier_name: str | None) -> tuple[str | None, str | None]:
+    """업체명으로 등록 업체 하나를 찾는다. 반환: (supplier_id, 찾은 이름).
+    적힌 그대로 정확히 같은 업체를 먼저 찾고, 없으면 법인 표기를 뺀 이름, 그다음 부서·직책 표기 앞부분만 남긴 이름
+    ('한결냉동식품 영업팀 최서윤' → '한결냉동식품')으로 차례로 정확히 찾는다.
+    이름이 서로 포함되는 정도로는 찾지 않는다(저장소 조회는 정확 일치이고, 여럿이면 찾지 않는다).
+    찾은 이름은 등록 이름과 같으므로, 저장할 업체명 값으로 쓰면 DB의 업체 근거 검사(등록 이름과 같음)를 통과한다."""
+    if not supplier_name or not supplier_name.strip():
+        return None, None
+    named = _read(lambda: store.resolve_supplier(case_id, supplier_name))
+    if named is not None:
+        return named, supplier_name
+    company = _company_name(supplier_name)
+    decoration = _NAME_DECORATION.search(company)
+    tried = {supplier_name}
+    for name in (company, company[:decoration.start()].strip() if decoration else ''):
+        if name and name not in tried:
+            tried.add(name)
+            named = _read(lambda: store.resolve_supplier(case_id, name))
+            if named is not None:
+                return named, name
+    return None, None
+
+
+# SUPPLIER_NOT_MATCHED 뒤에 할 일. 법인 표기·부서·직책은 도구가 이미 빼고 찾았으므로 다시 보내지 않는다
+_SUPPLIER_NOT_MATCHED_NEXT = ('등록된 거래처에 없다. 다시 보내지 말고(업체명을 빼고 보내지도 않는다) '
+                              '바로 HOLD로 최종 응답한다. hold.code는 SUPPLIER_NOT_MATCHED다.')
 
 
 def _carry(previous: tuple[str, QuoteVersionRecord], values: dict, tiers: list, costs: list,
@@ -835,7 +862,10 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
     case_mails = {mail['mail_id']: mail for mail in _read(lambda: store.list_case_mails(case_id))}
     evidence_mails = {entry['mail_id'] for entry in [*values.values(), *tiers, *costs, *notes]}
     supplier_name = values['supplier_name']['value'] if 'supplier_name' in values else None
-    supplier_id, issue = _quote_supplier(store, case_id, case_mails, evidence_mails, supplier_name)
+    supplier_id, issue, matched_name = _quote_supplier(store, case_id, case_mails, evidence_mails, supplier_name)
+    if matched_name and matched_name != supplier_name:
+        # 법인 표기·부서·직책을 빼고 찾았으면 저장 값은 등록 이름, raw_value·근거는 원문 표기 그대로 둔다
+        values['supplier_name']['value'] = matched_name
     # 원문 근거가 확인된 업체명이 등록 거래처와 맞지 않으면(미등록·연결 업체와 다름) 다른 항목의 거절보다 먼저 알린다.
     # 다른 항목을 고쳐도 저장할 수 없는 견적이라, 다시 보내기를 다른 항목에 쓰고 원인을 잃지 않게 한다
     # (2026-11-06 실제 LLM 재현: 규격 근거 거절로 두 번 다시 보내고 SUPPLIER_MISMATCH에 닿지 못함)
@@ -846,7 +876,7 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
             _record_supplier_issue(store, context, check, issue, values.get('supplier_name'), refs.get('supplier_name'))
         result = _with_hints({'status': 'REJECTED', 'rejected': [issue]}, [issue])
         if issue['code'] == 'SUPPLIER_NOT_MATCHED':
-            result['next'] = _supplier_retry_next(supplier_name)
+            result['next'] = _SUPPLIER_NOT_MATCHED_NEXT
         return result
     # 원문 메일은 근거 메일 중 가장 최근에 받은 메일이다 (회신이 이전 메일의 값을 함께 근거로 써도 회신이 원문)
     source_mail_id = max(evidence_mails, key=lambda mail_id: (case_mails[mail_id].get('received_at') or '', mail_id))

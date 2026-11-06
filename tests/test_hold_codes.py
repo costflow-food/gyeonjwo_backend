@@ -17,6 +17,7 @@ MAIL = 'mail-donghae'
 BODY = ('박 대리님, 안녕하세요. 동해프레시 한도윤입니다.\n'
         ' - 냉동딸기(IQF) 특품, 주문 단위 10kg 박스\n'
         ' - 기존 50,000원/박스 → 변경 55,000원/박스\n'
+        ' - 월 공급 물량 100박스\n'
         '한도윤 드림\n동해프레시 영업부 | 033-555-0270')
 
 
@@ -29,7 +30,7 @@ def field(name, raw):
 
 
 FIELDS = [field('supplier_name', '동해프레시'), field('item_name', '냉동딸기(IQF)'),
-          field('unit_price', '55,000원'), field('unit', '박스')]
+          field('unit_price', '55,000원'), field('unit', '박스'), field('available_quantity', '100박스')]
 
 
 @pytest.fixture
@@ -91,13 +92,100 @@ def test_not_matched_next_says_hold_for_bare_name(store):
     assert 'HOLD' in result['next'] and '다시 보내지 말고' in result['next']
 
 
-def test_not_matched_next_says_retry_for_legal_suffix(store):
-    body = BODY + '\n동해프레시 주식회사 대표이사'
-    store.mail_messages[MAIL]['body_text'] = body
+def test_not_matched_next_says_hold_for_legal_suffix(store):
+    # S3-7: 법인 표기는 도구가 빼고 찾는다. 빼도 등록 업체가 없으면 다시 보내지 않고 HOLD
+    store.mail_messages[MAIL]['body_text'] = BODY + '\n동해프레시 주식회사 대표이사'
     fields = [field('supplier_name', '동해프레시 주식회사')] + FIELDS[1:]
     result = save_structured_quote(store, ctx(), fields, [], [], [])
     assert result['rejected'][0]['code'] == 'SUPPLIER_NOT_MATCHED'
-    assert '빼고' in result['next'] and '한 번 더' in result['next']
+    assert 'HOLD' in result['next'] and '다시 보내지 말고' in result['next']
+
+
+def test_not_matched_next_says_hold_for_department(store):
+    # KAN-163: 부서·직책도 도구가 빼고 찾는다. 빼도 등록 업체가 없으면 다시 보내지 않고 HOLD
+    fields = [field('supplier_name', '동해프레시 영업부')] + FIELDS[1:]
+    result = save_structured_quote(store, ctx(), fields, [], [], [])
+    assert result['rejected'][0]['code'] == 'SUPPLIER_NOT_MATCHED'
+    assert 'HOLD' in result['next'] and '다시 보내지 말고' in result['next']
+
+
+# ── KAN-163: 부서·직책 표기 앞부분만 남긴 회사명으로 정확 일치 ──
+
+@pytest.mark.parametrize('registered, written', [('동해프레시', '동해프레시 영업부'),
+                                                 ('동해프레시', '동해프레시 주식회사 영업팀 홍길동'),
+                                                 ('한결냉동식품', '한결냉동식품 영업팀 최서윤')])
+def test_department_is_removed_to_match_registered_supplier(store, registered, written):
+    store.add_supplier('sup-1', registered, 'sales@supplier.example')
+    store.mail_messages[MAIL]['body_text'] = BODY + f'\n{written}'
+    fields = [field('supplier_name', written)] + FIELDS[1:]
+    result = save_structured_quote(store, ctx(), fields, [], [], [])
+    assert result['status'] == 'STORED' and store.extraction_issues == []
+    [record] = store.quote_versions.values()
+    assert record.supplier_id == 'sup-1'
+    saved = record.mail_normalized[MAIL]['fields']['supplier_name']
+    assert saved['value'] == registered and saved['raw_value'] == written
+
+
+def test_department_removal_does_not_pick_one_of_duplicates(store):
+    store.add_supplier('sup-a', '동해프레시', 'a@donghae.example')
+    store.add_supplier('sup-b', '동해프레시', 'b@donghae.example')                   # 부서명만 다른 동명 업체
+    fields = [field('supplier_name', '동해프레시 영업부')] + FIELDS[1:]
+    result = save_structured_quote(store, ctx(), fields, [], [], [])
+    assert result['rejected'][0]['code'] == 'SUPPLIER_NOT_MATCHED'
+    assert store.quote_versions == {}
+
+
+# ── S3-7: 법인 표기 정규화 (등록 업체와 정확 일치만, 저장 값은 등록 이름) ──
+
+@pytest.mark.parametrize('written', ['동해프레시 주식회사', '주식회사 동해프레시', '(주)동해프레시', '( 주 ) 동해프레시',
+                                     '㈜동해프레시', '동해프레시(주)', '유한책임회사 동해프레시', '합자회사 동해프레시'])
+def test_legal_form_is_removed_to_match_registered_supplier(store, written):
+    store.add_supplier('sup-donghae', '동해프레시', 'sales@donghae.example')
+    store.mail_messages[MAIL]['body_text'] = BODY + f'\n{written}'
+    fields = [field('supplier_name', written)] + FIELDS[1:]
+    result = save_structured_quote(store, ctx(), fields, [], [], [])
+    assert result['status'] == 'STORED' and store.extraction_issues == []
+    [record] = store.quote_versions.values()
+    assert record.supplier_id == 'sup-donghae'
+    saved = record.mail_normalized[MAIL]['fields']['supplier_name']
+    # DB(store_case_graph_quote)는 연결 없는 메일의 업체명 값이 등록 이름과 같아야 받는다. 원문 표기는 raw_value에 남긴다
+    assert saved['value'] == '동해프레시' and saved['raw_value'] == written
+
+
+def test_exact_registered_name_with_legal_form_is_kept(store):
+    store.add_supplier('sup-donghae', '동해프레시 주식회사', 'sales@donghae.example')   # 법인 표기째 등록된 업체
+    store.mail_messages[MAIL]['body_text'] = BODY + '\n동해프레시 주식회사'
+    fields = [field('supplier_name', '동해프레시 주식회사')] + FIELDS[1:]
+    assert save_structured_quote(store, ctx(), fields, [], [], [])['status'] == 'STORED'
+    [record] = store.quote_versions.values()
+    assert record.mail_normalized[MAIL]['fields']['supplier_name']['value'] == '동해프레시 주식회사'
+
+
+def test_legal_form_removal_does_not_match_partial_name(store):
+    store.add_supplier('sup-donghae', '동해프레시푸드', 'sales@donghae.example')      # 이름이 포함될 뿐인 업체
+    store.mail_messages[MAIL]['body_text'] = BODY + '\n(주)동해프레시'
+    fields = [field('supplier_name', '(주)동해프레시')] + FIELDS[1:]
+    result = save_structured_quote(store, ctx(), fields, [], [], [])
+    assert result['rejected'][0]['code'] == 'SUPPLIER_NOT_MATCHED'
+
+
+def test_legal_form_removal_does_not_pick_one_of_duplicates(store):
+    store.add_supplier('sup-a', '동해프레시', 'a@donghae.example')
+    store.add_supplier('sup-b', '동해프레시', 'b@donghae.example')                   # 같은 이름이 둘이면 연결하지 않는다
+    store.mail_messages[MAIL]['body_text'] = BODY + '\n동해프레시 주식회사'
+    fields = [field('supplier_name', '동해프레시 주식회사')] + FIELDS[1:]
+    result = save_structured_quote(store, ctx(), fields, [], [], [])
+    assert result['rejected'][0]['code'] == 'SUPPLIER_NOT_MATCHED'
+
+
+def test_linked_mail_with_legal_form_of_other_supplier_is_mismatch(store):
+    store.add_supplier('sup-donghae', '동해프레시', 'sales@donghae.example')
+    store.add_supplier('sup-cheongsol', '청솔농산', 'sales@cheongsol.example')
+    link_mail(store, 'sup-donghae')
+    store.mail_messages[MAIL]['body_text'] = BODY + '\n(주)청솔농산'
+    fields = [field('supplier_name', '(주)청솔농산')] + FIELDS[1:]
+    result = save_structured_quote(store, ctx(), fields, [], [], [])
+    assert result['rejected'][0]['code'] == 'SUPPLIER_MISMATCH'
 
 
 def test_dropping_supplier_name_does_not_overwrite_supplier_issue(store):
