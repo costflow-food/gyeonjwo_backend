@@ -9,6 +9,8 @@ replace this adapter after review with the DB owner. Never select body_text/toke
 from app.core.errors import ServiceError
 from uuid import UUID
 from app.features.work_cases.domain.replies import reply_summary
+from app.features.work_cases.infrastructure.candidate_repository import CandidateRepository
+from time import monotonic
 
 CASE_COLUMNS = 'id,initial_mail_id,created_at,status,processing_step,input_revision,archived_at,item_name,decision,current_batch_id'
 MAIL_COLUMNS = 'id,subject,sender,sent_or_received_at,attachments_jsonb,supplier_id'
@@ -19,14 +21,15 @@ MAX_CASES = 10000
 class WorkCaseListRepository:
     def __init__(self, client, *, extraction_fields=True):
         self.client, self.extraction_fields = client, extraction_fields
+        self.candidates = CandidateRepository(client)
+        self._sender_name_retry_at = 0
 
     def resume_blocks(self, owner, cases):
         from app.features.work_cases.infrastructure.resume_repository import ResumeEligibilityRepository
         return ResumeEligibilityRepository(self.client).blocks(owner, cases)
 
     def candidate_blocks(self, owner, cases):
-        from app.features.work_cases.infrastructure.candidate_repository import CandidateRepository
-        return CandidateRepository(self.client).blocks(owner, cases)
+        return self.candidates.blocks(owner, cases)
 
     def rows(self, owner, snapshot, archived):
         cases, after = [], None
@@ -61,7 +64,7 @@ class WorkCaseListRepository:
                 after = next_id
             mails = {}
             ids = sorted({row['initial_mail_id'] for row in cases})
-            mail_columns = MAIL_COLUMNS + ',sender_name'
+            mail_columns = MAIL_COLUMNS + (',sender_name' if monotonic() >= self._sender_name_retry_at else '')
             for index in range(0, len(ids), BATCH_SIZE):
                 batch_ids = ids[index:index + BATCH_SIZE]
                 try:
@@ -72,11 +75,13 @@ class WorkCaseListRepository:
                             or 'sender_name' not in str(getattr(error, 'message', ''))):
                         raise
                     mail_columns = MAIL_COLUMNS
+                    self._sender_name_retry_at = monotonic() + 60
                     rows = (self.client.table('mail_messages').select(mail_columns)
                             .eq('owner_user_id', str(owner)).in_('id', batch_ids).execute().data)
                 for row in rows:
                     mails[row['id']] = row
-            supplier_ids = sorted({m['supplier_id'] for m in mails.values() if m.get('supplier_id')})
+            supplier_ids = sorted({mail['supplier_id'] for case in cases if case['processing_step'] != 'PENDING_START'
+                                   and (mail := mails.get(case['initial_mail_id'])) and mail.get('supplier_id')})
             names = {}
             for index in range(0, len(supplier_ids), BATCH_SIZE):
                 rows = (self.client.table('suppliers').select('id,name').eq('owner_user_id', str(owner))
