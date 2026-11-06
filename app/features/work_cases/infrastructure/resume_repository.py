@@ -16,14 +16,15 @@ class ResumeEligibilityRepository:
         held = {str(row['id']): row for row in cases}
         if not held:
             return {}
-        blocked = {key: ('ACTION_NOT_ALLOWED', '현재 업무는 정보 추출 보류 상태가 아니어서 재개할 수 없습니다.') for key in held}
+        blocked = {key: ('ACTION_NOT_ALLOWED', '보류된 검토 실행을 확인할 수 없습니다.')
+                   for key, row in held.items() if row.get('processing_step') == 'ON_HOLD'}
         try:
-            batches = sorted({str(row['current_batch_id']) for row in cases if row.get('current_batch_id')})
+            batches = sorted({str(held[key]['current_batch_id']) for key in blocked if held[key].get('current_batch_id')})
             latest, after, scanned = {}, None, 0
             while batches:
                 query = (self.client.table('agent_runs')
                          .select('id,owner_user_id,work_case_id,review_batch_id,input_revision,agent_role,status,finished_at,output_jsonb')
-                         .eq('owner_user_id', str(owner)).in_('work_case_id', list(held))
+                         .eq('owner_user_id', str(owner)).in_('work_case_id', list(blocked))
                          .in_('review_batch_id', batches).eq('component_type', 'AGENT')
                          .eq('status', 'COMPLETED').order('id').limit(200))
                 if after:

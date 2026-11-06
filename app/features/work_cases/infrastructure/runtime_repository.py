@@ -187,11 +187,11 @@ class CaseRuntimeRepository:
             p_prompt_version=metadata.get('prompt_version') or 'agent-owned',
             p_agent_output=metadata.get('agent_output'))
 
-    def start_receipt(self, owner, case_id, revision, key):
+    def start_receipt(self, owner, case_id, revision, key, *, conditions=None):
         from app.features.work_cases.application.actions import revision_body_hash
         try:
             result = self.call('lookup_work_case_start_request', p_owner=str(owner), p_case=str(case_id),
-                               p_key=key, p_hash=revision_body_hash(revision))
+                               p_key=key, p_hash=revision_body_hash(revision, conditions))
         except ServiceError as error:
             # Optional existing Supabase lookup. Absence requires no schema
             # installation: the transactional submit RPC still owns replay.

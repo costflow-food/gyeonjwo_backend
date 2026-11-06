@@ -31,17 +31,34 @@ def ready(request: Request):
     if not worker or not worker.running:
         return JSONResponse({'status':'not_ready','mode':'google-mailbox','checks':checks},status_code=503)
     checks['gmail_worker']='running'
+    metadata_worker = getattr(request.app.state, 'rfq_metadata_worker', None)
+    checks['rfq_metadata_worker'] = 'running' if metadata_worker and metadata_worker.running else 'not_running'
     checks['review_execution_mode'] = 'GRAPH_START'
     checks['review_claim'] = 'awaiting_db_contract'
     from app.features.work_cases.api.router import get_runtime_repository
+    from app.features.work_cases.api.decisions import case_changes_ready
+    checks['final_decision'] = 'not_ready'
+    degraded = []
     try:
         worker = request.app.state.extraction_worker
+        repo = get_runtime_repository(request)
+        if case_changes_ready(repo):
+            checks['final_decision'] = 'ready'
         if not worker or not worker.running:
             raise RuntimeError('Graph worker unavailable')
-        if not get_runtime_repository(request).available():
+        if not repo.available():
             raise RuntimeError('Graph contract unavailable')
         checks['extraction'] = 'running'
+        if getattr(worker.repo, 'review_ready', False):
+            checks['review_claim'] = 'ready'
     except Exception:
         checks['extraction'] = 'not_ready'
-    return {'status':'ready','mode':'google-mailbox','checks':checks,
-            'degraded_features': ['review'] if checks['extraction'] == 'not_ready' else []}
+    if checks['extraction'] == 'not_ready':
+        degraded.append('review')
+    if checks['review_claim'] != 'ready':
+        degraded.append('review_reply')
+    if checks['final_decision'] != 'ready':
+        degraded.append('final_decision')
+    if checks['rfq_metadata_worker'] != 'running':
+        degraded.append('rfq_metadata')
+    return {'status':'ready','mode':'google-mailbox','checks':checks,'degraded_features':degraded}

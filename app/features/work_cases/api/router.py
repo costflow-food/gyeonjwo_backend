@@ -3,8 +3,10 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Query, Request, Header
 from fastapi.responses import JSONResponse
 from uuid import UUID
+from datetime import date
+from decimal import Decimal
 import time
-from pydantic import Field
+from pydantic import Field, model_validator
 from app.shared.domain.schemas import StrictModel
 from app.core.errors import ServiceError
 from app.features.work_cases.application.actions import WorkCaseActions, validate_action_key
@@ -15,7 +17,9 @@ from app.features.work_cases.api.decisions import DecisionRequest, RevisionReque
 from app.api.responses import Envelope, api_json
 from app.features.mailboxes.api.router import require_google_user
 from app.features.work_cases.application.cursor import CursorCodec, utc_time, iso_z
-from app.features.work_cases.application.list_service import WorkCaseListService
+from app.features.work_cases.application.list_service import STEP_MESSAGES, WorkCaseListService
+from app.features.work_cases.infrastructure.hold_repository import HoldReasonRepository
+from app.features.work_cases.infrastructure.resume_repository import ResumeEligibilityRepository
 from app.features.work_cases.domain.listing import QueueFilter, WorkCaseList
 from app.features.work_cases.infrastructure.list_repository import WorkCaseListRepository
 from app.shared.infrastructure.db.client import make_server_client
@@ -139,6 +143,24 @@ class CaseActionRequest(StrictModel):
     expected_revision: int = Field(strict=True, ge=1)
 
 
+class StartRequest(CaseActionRequest):
+    quantity: str | None = Field(default=None, pattern=r'^[0-9]{1,14}(\.[0-9]{1,6})?$')
+    unit: str | None = Field(default=None, min_length=1, max_length=50)
+    due_date: date | None = None
+
+    @model_validator(mode='after')
+    def validate_quantity_pair(self):
+        if (self.quantity is None) != (self.unit is None):
+            raise ValueError('quantity and unit must be supplied together')
+        if self.quantity is not None:
+            quantity = Decimal(self.quantity)
+            if quantity <= 0 or not self.unit.strip():
+                raise ValueError('positive quantity and nonblank unit required')
+            self.quantity = format(quantity, 'f').rstrip('0').rstrip('.') if '.' in self.quantity else str(int(quantity))
+            self.unit = self.unit.strip()
+        return self
+
+
 class ResumeRequest(CaseActionRequest):
     reason: Literal['RETRY_FAILED', 'RESUME_HOLD', 'REOPEN_REVIEW', 'REOPEN_ACCEPTED']
 
@@ -177,17 +199,21 @@ def load_action_case(repo, owner, case_id):
 
 def action_response(request, principal, repo, case_id, payload, key, action):
     replay = None
+    conditions = None
     if action == 'START':
         validate_action_key(key)
         # Use a read-only receipt lookup only if already available in Supabase.
         # Otherwise let the existing transactional submit RPC handle replay and
         # revision/state guards; Python must not reject an already-started replay.
-        replay = repo.start_receipt(principal.user_id, case_id, payload.expected_revision, key)
+        if isinstance(payload, StartRequest):
+            conditions = payload.model_dump(mode='json', exclude={'expected_revision'}, exclude_none=True)
+        options = {'conditions': conditions} if conditions else {}
+        replay = repo.start_receipt(principal.user_id, case_id, payload.expected_revision, key, **options)
         if replay is None:
             load_action_case(repo, principal.user_id, case_id)
             extraction_readiness(request, repo, fresh=True).require()
     status, response = WorkCaseActions(repo, extraction_enabled=True).submit(
-        principal.user_id, case_id, payload.expected_revision, action, key, replay_result=replay)
+        principal.user_id, case_id, payload.expected_revision, action, key, replay_result=replay, conditions=conditions)
     worker = getattr(request.app.state, 'extraction_worker', None)
     if action == 'START' and worker:
         worker.wake.set()
@@ -204,7 +230,7 @@ def accept_increase(case_id: UUID, payload: CaseActionRequest, request: Request,
 
 
 @router.post('/{case_id}/start', status_code=202, response_model=Envelope[StartedCase], summary='검토 접수: ① 추출을 백그라운드에서 실행')
-def start_case(case_id: UUID, payload: CaseActionRequest, request: Request,
+def start_case(case_id: UUID, payload: StartRequest, request: Request,
                principal=Depends(require_google_user), repo=Depends(get_runtime_repository),
                idempotency_key: Annotated[str | None, Header(alias='Idempotency-Key')] = None):
     return action_response(request, principal, repo, case_id, payload, idempotency_key, 'START')
@@ -215,7 +241,7 @@ def start_case(case_id: UUID, payload: CaseActionRequest, request: Request,
 def resume_case(case_id: UUID, payload: ResumeRequest, request: Request,
                 principal=Depends(require_google_user), repo=Depends(get_runtime_repository),
                 idempotency_key: Annotated[str | None, Header(alias='Idempotency-Key')] = None):
-    """Only RESUME_HOLD is supported in this release; other defined reasons return 409.
+    """Resume a graph job after the durable transaction validates the reason.
 
     The durable transaction replays before state/revision checks, then checks
     ownership, latest extraction HOLD, unresolved sends and absence of live jobs.
@@ -225,8 +251,8 @@ def resume_case(case_id: UUID, payload: ResumeRequest, request: Request,
     # Resume never deletes its case: check visibility before inspecting storage
     # readiness so foreign/missing resources consistently remain 404.
     load_action_case(repo, principal.user_id, case_id)
-    if payload.reason != 'RESUME_HOLD':
-        raise ServiceError('ACTION_NOT_ALLOWED', '현재 재개 API는 추출 보류 업무의 재개만 지원합니다.', 409, retryable=False)
+    if payload.reason not in {'RESUME_HOLD', 'RETRY_FAILED', 'REOPEN_REVIEW'}:
+        raise ServiceError('ACTION_NOT_ALLOWED', '지원하지 않는 재개 사유입니다.', 409, retryable=False)
     replay = repo.resume_receipt(principal.user_id, case_id, payload.expected_revision,
                                  payload.reason, idempotency_key)
     if replay is None:
@@ -264,18 +290,25 @@ def restore_case(case_id: UUID, payload: RevisionRequest,
     return submit_case_change(repo, principal.user_id, case_id, 'RESTORE', payload, idempotency_key)
 
 
+def case_hold(repo, owner, row):
+    hold = (HoldReasonRepository(repo.client).for_cases(owner, [row]).get(str(row['id']))
+            if row['processing_step'] == 'ON_HOLD' else None)
+    return hold.model_dump() if hold is not None else None
+
+
 @router.get('/{case_id}/progress', summary='저장된 검토 단계 조회')
-def case_progress(case_id: UUID, principal=Depends(require_google_user), repo=Depends(get_runtime_repository)):
+def case_progress(case_id: UUID, request: Request, principal=Depends(require_google_user), repo=Depends(get_runtime_repository)):
     try:
         rows = (repo.client.table('work_cases')
-                .select('id,status,processing_step,input_revision,error_jsonb,updated_at,current_batch_id')
+                .select('id,status,processing_step,input_revision,error_jsonb,updated_at,current_batch_id,archived_at,decision')
                 .eq('owner_user_id', principal.user_id).eq('id', str(case_id)).limit(1).execute().data)
     except Exception:
         raise ServiceError('PROCESSING_UNAVAILABLE', '처리 단계를 조회할 수 없습니다.', 503) from None
     row = stored_case_row(rows, ('id', 'status', 'processing_step', 'input_revision', 'current_batch_id'))
     safe_codes = {'EXTRACTION_FAILED', 'EXTRACTION_TIME_LIMIT', 'WORKER_INTERRUPTED', 'INPUT_REVISION_CHANGED',
                   'RFQ_PREPARATION_FAILED', 'NO_REGISTERED_SUPPLIER_EVIDENCE', 'NO_SUITABLE_CANDIDATES',
-                  'SEND_POLICY_REQUIRED', 'SEND_RESULT_UNKNOWN', 'SETTINGS_CHANGED', 'RFQ_CONDITIONS_REQUIRED'}
+                  'SEND_POLICY_REQUIRED', 'SEND_RESULT_UNKNOWN', 'SETTINGS_CHANGED', 'RFQ_CONDITIONS_REQUIRED',
+                  'GRAPH_FAILED', 'GRAPH_TIME_LIMIT', 'GRAPH_ORPHANED'}
     error = row.get('error_jsonb')
     if error is not None and not isinstance(error, dict):
         raise ServiceError('PROCESSING_UNAVAILABLE', '저장된 오류 상태를 확인할 수 없습니다.', 503)
@@ -284,11 +317,35 @@ def case_progress(case_id: UUID, principal=Depends(require_google_user), repo=De
         updated_at = iso_z(utc_time(row['updated_at'])) if row.get('updated_at') else None
     except (ValueError, AttributeError, TypeError):
         raise ServiceError('PROCESSING_UNAVAILABLE', '저장된 시각 형식을 확인할 수 없습니다.', 503) from None
-    from app.features.work_cases.infrastructure.hold_repository import HoldReasonRepository
-    hold = (HoldReasonRepository(repo.client).for_cases(principal.user_id, [row]).get(str(case_id))
-            if row['processing_step'] == 'ON_HOLD' else None)
+    owner = principal.user_id
+    step = row['processing_step']
+    roles = []
+    try:
+        if row['current_batch_id']:
+            roles = (repo.client.table('agent_runs').select('agent_role')
+                     .eq('owner_user_id', owner).eq('work_case_id', str(case_id))
+                     .eq('review_batch_id', row['current_batch_id']).eq('input_revision', row['input_revision'])
+                     .eq('status', 'RUNNING').order('id').limit(25).execute().data)
+        history = (repo.client.table('workflow_logs').select('id,created_at')
+                   .eq('owner_user_id', owner).eq('work_case_id', str(case_id))
+                   .eq('input_revision', row['input_revision']).eq('event_type', 'REVIEW_STEP_CHANGED')
+                   .order('created_at', desc=True).order('id', desc=True).limit(25).execute().data)
+    except Exception:
+        raise ServiceError('PROCESSING_UNAVAILABLE', '검토 실행 이력을 조회할 수 없습니다.', 503) from None
+    resumable = False
+    if step in {'ON_HOLD', 'FAILED', 'REVIEW_READY'}:
+        readiness = resume_readiness(request, repo)
+        actions, _ = case_actions(row, readiness, readiness)
+        resumable = 'RESUME' in actions and not ResumeEligibilityRepository(repo.client).blocks(owner, [row])
     return api_json({'case_id': row['id'], 'status': row['status'], 'processing_step': row['processing_step'],
-                     'hold': hold.model_dump() if hold is not None else None,
+                     'hold': case_hold(repo, owner, row),
+                     'running_roles': sorted({run['agent_role'] for run in roles}),
+                     'step_history': [{'id': event['id'], 'event_type': 'REVIEW_STEP_CHANGED',
+                                       'created_at': iso_z(utc_time(event['created_at']))} for event in history],
+                     'waiting_reason': STEP_MESSAGES.get(step) if step in {'WAITING_REPLY', 'WAITING_APPROVAL',
+                                                                          'AWAITING_APPROVAL', 'NEEDS_INFO', 'ON_HOLD',
+                                                                          'SEND_UNKNOWN'} else None,
+                     'can_resume': resumable,
                      'input_revision': row['input_revision'], 'updated_at': updated_at,
                      'batch_id': row.get('current_batch_id'), 'progress_url': f'/api/v1/work-cases/{case_id}/progress',
                      'error': {'code': code if isinstance(code, str) and code in safe_codes else 'EXTRACTION_FAILED'} if code else None})
@@ -301,7 +358,6 @@ def get_case(case_id: UUID, request: Request, principal=Depends(require_google_u
     actions, disabled = case_actions(row, extraction_readiness(request, repo), resume_readiness(request, repo),
                                      case_changes_ready=case_changes_ready(repo))
     if 'RESUME' in actions:
-        from app.features.work_cases.infrastructure.resume_repository import ResumeEligibilityRepository
         block = ResumeEligibilityRepository(repo.client).blocks(principal.user_id, [row]).get(str(case_id))
         if block:
             actions.remove('RESUME')
@@ -314,4 +370,5 @@ def get_case(case_id: UUID, request: Request, principal=Depends(require_google_u
     batch_id = row.pop('current_batch_id')
     return api_json({'case_id': row.pop('id'), **row,
                     'batch_id': batch_id, 'progress_url': f'/api/v1/work-cases/{case_id}/progress',
-                    'allowed_actions': actions, 'disabled_actions': disabled, 'related_cases': related_cases})
+                    'allowed_actions': actions, 'disabled_actions': disabled, 'related_cases': related_cases,
+                    'hold': case_hold(repo, principal.user_id, {**row, 'id': str(case_id), 'current_batch_id': batch_id})})

@@ -74,6 +74,8 @@ class RfqDeliveryRepository(RfqRepository):
         configured = (chosen['configured'] is True and type(approval) is bool
                       and self.registered_recipient(owner, supplier_id, recipient))
         return {'configured': configured, 'approval_required': approval,
+                'source': 'CASE' if chosen is override else 'MAILBOX',
+                'source_settings_id': chosen['id'], 'source_version': chosen['version_no'],
                 'auto_eligible': configured and approval is False,
                 'style': chosen.get('style_jsonb') or {},
                 'settings_version': (base_rows[0]['id'] if base_rows else 'none') + ':'
@@ -129,7 +131,7 @@ class RfqDeliveryRepository(RfqRepository):
             rows = (self.client.table('mail_drafts').select(
                 'id,work_case_id,supplier_id,intent_id,purpose,recipient,subject,body_text,input_revision,'
                 'status,approved_by,approved_at,style_snapshot_jsonb,settings_snapshot_jsonb,'
-                'created_at,replaces_id,sent_provider_message_id,sent_at')
+                'created_at,replaces_id,sent_provider_message_id,sent_at,evidence_refs_jsonb')
                 .eq('owner_user_id', str(owner)).eq('id', str(draft_id)).limit(1).execute().data)
             if not isinstance(rows, list) or len(rows) > 1:
                 raise ValueError('Invalid draft response')

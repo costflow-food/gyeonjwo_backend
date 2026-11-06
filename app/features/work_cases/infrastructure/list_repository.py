@@ -61,9 +61,19 @@ class WorkCaseListRepository:
                 after = next_id
             mails = {}
             ids = sorted({row['initial_mail_id'] for row in cases})
+            mail_columns = MAIL_COLUMNS + ',sender_name'
             for index in range(0, len(ids), BATCH_SIZE):
-                rows = (self.client.table('mail_messages').select(MAIL_COLUMNS)
-                        .eq('owner_user_id', str(owner)).in_('id', ids[index:index + BATCH_SIZE]).execute().data)
+                batch_ids = ids[index:index + BATCH_SIZE]
+                try:
+                    rows = (self.client.table('mail_messages').select(mail_columns)
+                            .eq('owner_user_id', str(owner)).in_('id', batch_ids).execute().data)
+                except Exception as error:
+                    if (getattr(error, 'code', None) != '42703'
+                            or 'sender_name' not in str(getattr(error, 'message', ''))):
+                        raise
+                    mail_columns = MAIL_COLUMNS
+                    rows = (self.client.table('mail_messages').select(mail_columns)
+                            .eq('owner_user_id', str(owner)).in_('id', batch_ids).execute().data)
                 for row in rows:
                     mails[row['id']] = row
             supplier_ids = sorted({m['supplier_id'] for m in mails.values() if m.get('supplier_id')})
