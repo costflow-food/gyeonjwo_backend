@@ -166,13 +166,21 @@ def read_pdf_document(content: bytes) -> dict:
     return {'status': 'READ' if any(text.strip() for text in pages) else 'NO_TEXT', 'pages': pages, **log}
 
 
-def ocr_pdf_page(content: bytes, page: int) -> dict:
+def ocr_pdf_page(content: bytes, page: int, *, remaining_seconds=None) -> dict:
     """PDF의 page쪽(1부터) 하나를 그림으로 렌더링해 OCR한다. 기술 오류는 다시 시도한다.
     반환: {status: READ·NO_TEXT(OCR해도 글자 없음)·FAILED, text, text_source: 'OCR', attempts, error_kind,
            retry_exhausted}
     OCR 텍스트는 원문 그림을 읽은 결과라 글자를 잘못 읽었을 수 있다. 원문에 없는 값을 채우지 않는다."""
     args = ('ocr', str(page), ocr_model_dir(), str(OCR_DPI))
-    result, log = _with_retry(lambda: _pdf_worker(content, args, timeout=OCR_TIMEOUT_SECONDS))
+    def read():
+        timeout = OCR_TIMEOUT_SECONDS
+        if remaining_seconds is not None:
+            timeout = min(timeout, remaining_seconds() - 1)
+            if timeout <= 0:
+                raise OcrUnavailableError('Insufficient OCR execution time')
+        return _pdf_worker(content, args, timeout=timeout)
+
+    result, log = _with_retry(read)
     if result is None:
         return {'status': 'FAILED', 'text': '', 'text_source': 'OCR', **log}
     text = result['text']

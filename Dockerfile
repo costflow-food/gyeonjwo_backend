@@ -22,6 +22,9 @@ ARG BUILD_REVISION=unknown
 ENV APP_BUILD_REVISION=${BUILD_REVISION}
 
 COPY --chown=app:app app ./app
+RUN python -m app.features.review.infrastructure.pdf_worker setup /app/models/ocr \
+    && chmod -R a+rX /app/models/ocr
+ENV OCR_MODEL_DIR=/app/models/ocr
 COPY --chown=app:app scripts ./scripts
 USER 10001:10001
 
