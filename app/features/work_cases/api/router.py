@@ -1,4 +1,5 @@
 from typing import Annotated, Literal
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, Query, Request, Header
 from fastapi.responses import JSONResponse
@@ -28,6 +29,7 @@ from app.features.work_cases.application.start_readiness import (
 from app.features.work_cases.application.case_actions import case_actions
 
 router = APIRouter(prefix='/api/v1/work-cases', tags=['Work cases'])
+_LIST_READINESS = ThreadPoolExecutor(max_workers=2, thread_name_prefix='case-list-readiness')
 
 
 def resume_readiness(request, repo=None, *, fresh=False):
@@ -68,7 +70,7 @@ def get_list_service(request: Request):
         service = getattr(request.app.state, 'work_case_list_service', None)
         if service is None:
             settings = request.app.state.settings
-            client = make_server_client(settings)
+            client = make_server_client(settings, http1_only=True)
             service = WorkCaseListService(WorkCaseListRepository(client,
                                          extraction_fields=True, column_missing=runtime.cached_column_missing),
                                          CursorCodec(settings.google_token_encryption_key.get_secret_value()))
@@ -118,9 +120,11 @@ def list_work_cases(
     reply_summary counts distinct suppliers from SENT RFQs and verified quote
     replies in the current request round. Sidebar totals belong to the frontend.
     """
+    runtime = get_runtime_repository(request)
+    readiness = _LIST_READINESS.submit(case_changes_ready, runtime)
     result = service.list(principal.user_id, status=status, archived=archived, q=q, limit=limit, cursor=cursor,
                           start_readiness=extraction_readiness(request), resume_readiness=resume_readiness(request),
-                          case_changes_ready=case_changes_ready(get_runtime_repository(request)))
+                          case_changes_ready=readiness.result)
     return api_json(result.model_dump(mode='json'), headers={'Cache-Control': 'private, no-store'})
 
 
