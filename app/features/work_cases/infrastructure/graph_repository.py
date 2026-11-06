@@ -1,5 +1,7 @@
 """Graph START's isolated durable queue and service-only transaction boundaries."""
 import logging
+from threading import Lock
+from time import monotonic
 
 from app.core.errors import ServiceError
 from app.features.work_cases.infrastructure.runtime_repository import CaseRuntimeRepository
@@ -16,9 +18,22 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
         super().__init__(client)
         self.review_ready = False
         self.prefer_review = True
+        self._health_lock = Lock()
+        self._health_cache = None
+
+    def read_health(self):
+        with self._health_lock:
+            if self._health_cache is None or monotonic() >= self._health_cache[0]:
+                try:
+                    result = self.call('case_graph_health')
+                except ServiceError:
+                    self._health_cache = (monotonic() + 5, None)
+                else:
+                    self._health_cache = (monotonic() + (60 if self.health_ready(result) else 5), result)
+            return self._health_cache[1]
 
     def available(self):
-        result = self.call('case_graph_health')
+        result = self.read_health()
         return self.health_ready(result)
 
     @staticmethod
@@ -45,7 +60,7 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
                                503, retryable=False) from None
 
     def resume_available(self):
-        health = self.call('case_graph_health')
+        health = self.read_health()
         return (self.health_ready(health) and 'GRAPH_RESUME' in health['capabilities']
                 and super().resume_available())
 
