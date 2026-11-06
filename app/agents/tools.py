@@ -621,7 +621,7 @@ def _supplier_retry_next(supplier_name: str | None) -> str:
         return ('업체명에 법인 표기나 부서·직책이 붙어 있다. 그 표기를 빼고 회사명만(예: "동해프레시 주식회사" → '
                 '"동해프레시") 한 번 더 보낸다. 나머지 값은 그대로 보낸다.')
     return ('회사명만 보냈는데 등록된 거래처에 없다. 다시 보내지 말고(업체명을 빼고 보내지도 않는다) '
-            '바로 HOLD로 최종 응답한다. reason은 "[SUPPLIER_NOT_MATCHED] …" 문장이다.')
+            '바로 HOLD로 최종 응답한다. hold.code는 SUPPLIER_NOT_MATCHED다.')
 
 
 def _record_supplier_issue(store: QuoteStore, context: RunContext, issue: dict, supplier: dict | None,

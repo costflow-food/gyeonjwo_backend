@@ -69,6 +69,17 @@ PLAN ─────────────────────────
 
 - 금액과 수량은 `DecimalStr`(예: `"5450000"`)이다. 쉼표나 단위가 붙으면 검증에서 거부된다. 계산은 도구가 하고, LLM은 도구 결과를 옮겨 적는다.
 - `Plan`은 KEEP과 SWITCH가 업체 1곳, SPLIT이 서로 다른 업체 2곳이어야 한다.
+- ①②가 `HOLD`이면 `hold`에 보류 코드를 담는다(KAN-146). 서버가 이 코드로 화면 문구를 정하고, `reason`은 한국어 문장만 쓴다.
+  `STORED`·`SEND_RFQ`이면 `hold`는 null이다.
+
+  | 역할 | `hold` 형식 | 코드 |
+  |---|---|---|
+  | ① `ExtractionOut` | `{code, field}` | `SUPPLIER_NOT_MATCHED`, `SUPPLIER_MISMATCH`, `MISSING_FIELD`, `MISSING_EVIDENCE`, `SOURCE_READ_FAILED`, `NO_QUOTE_DATA` |
+  | ② `CandidateOut` | `{code}` | `NO_SUITABLE_CANDIDATES`, `CONDITIONS_MISSING` |
+
+  - `field`는 `MISSING_FIELD`일 때만 쓴다: `supplier_name`, `item_name`, `unit_price`, `unit`.
+  - 업체 관련 코드(`SUPPLIER_NOT_MATCHED`·`SUPPLIER_MISMATCH`)는 이번 실행의 `store_structured_mail` 거절 결과로만 정한다. ②의 코드는 검색 도구 결과로 정한다.
+  - `HOLD`인데 `hold`가 null인 경우는 두 가지뿐이다: 실행 중 업무가 바뀌어 멈춤(`REVISION_CHANGED`·`CASE_NOT_FOUND`, 화면에 쓰이지 않는 실행), 원인을 정하지 못함(서버가 `HOLD_REASON_UNAVAILABLE`로 본다).
 - ③④⑤가 `RECHECK_SOURCE`를 고르면 `unknown_fields`가 ①의 `ExtractionIn.recheck_fields`로 전달된다.
 - 필드가 더 필요하면 오케스트레이션 담당에게 요청한다.
 
