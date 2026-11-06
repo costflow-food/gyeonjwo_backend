@@ -520,6 +520,11 @@ def check_extraction(role: AgentRole, data: AgentInput, context: RunContext, out
         raise UngroundedOutputError(f'quote_version_ids {sorted(ids)} were not stored in this run')
     if output.next_action == 'STORED' and not ids:
         raise UngroundedOutputError('STORED needs quote_version_ids stored in this run')
+    # 이번 실행에서 견적을 저장한 뒤 HOLD를 고르면 서버가 완료를 거부해(HOLD_AFTER_QUOTE_STORED) 실행이 실패로 끝난다.
+    # 저장된 견적은 검증을 통과한 값이므로 STORED로 넘기고, 남은 미확인은 다음 역할이 확인한다
+    if output.next_action == 'HOLD' and stored:
+        output = type(output).model_validate(output.model_dump() | {
+            'next_action': 'STORED', 'quote_version_ids': sorted(stored), 'hold': None})
     unknown = [name for name in dict.fromkeys(output.unknown_fields) if name in EXTRACTION_FIELD_NAMES]
     changes = {'unknown_fields': unknown} if unknown != output.unknown_fields else {}
     hold = _extraction_hold(output, messages) if output.next_action == 'HOLD' else None
@@ -809,7 +814,8 @@ def check_plan(role: AgentRole, data: AgentInput, context: RunContext, output: A
         if key in seen:
             continue
         seen.add(key)
-        plans.append({'plan_type': plan.plan_type, 'allocations': result['allocations'],
+        # 담당자 선택(SELECT_PLAN)은 이 실행 결과의 plan_id로 안을 찾는다. LLM이 적은 값은 쓰지 않는다
+        plans.append({'plan_id': f'P{len(plans) + 1}', 'plan_type': plan.plan_type, 'allocations': result['allocations'],
                       'total_amount': result['total_amount'], 'validation_status': result['status'],
                       'conditions': result['conditions'], 'adjustments': result.get('adjustments', []),
                       'reason': plan.reason})

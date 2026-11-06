@@ -182,6 +182,7 @@ class Allocation(StrictModel):
 
 class Plan(StrictModel):
     """④ 구매안. 배정량·총액·검증 결과는 최종 검사가 validate_purchase_plan 결과로 채운다."""
+    plan_id: str | None = None                 # 최종 검사가 정한다 (P1·P2…). 담당자 선택이 이 ID로 안을 찾는다
     plan_type: PlanType
     allocations: list[Allocation] = Field(min_length=1, max_length=2)
     total_amount: DecimalStr | None = None     # validate_purchase_plan 결과
