@@ -39,7 +39,10 @@
       "max_increase_rate": "decimal string. Accepted increase rate; a requested increase at or below it is a recommendation to accept, above it the counter-offer upper bound is previous price x (1 + rate).",
       "incumbent_premium_rate": "decimal string. Incumbent may stay up to this much above the alternative; competitive line = keep ceiling x (1 + rate).",
       "allow_split": "boolean, RESPONSE_PLAN split plans",
-      "max_suppliers": "int, split supplier limit (default 2)"
+      "max_suppliers": "int, split supplier limit (default 2)",
+      "preferred_origin": "text, PROPOSED key name. ② CANDIDATE preferred origin; absent -> '국내산'.",
+      "origin_weight": "decimal string, PROPOSED. Score added when origin matches preferred_origin; absent, non-numeric or negative -> '2'.",
+      "history_weight": "decimal string, PROPOSED. Score added when purchase history exists; absent, non-numeric or negative -> '1'. Preference weights only order candidates and never offset a required-condition FAIL."
     },
     "defaults_2026_11_05": {
       "max_increase_rate": "0.04",

@@ -9,7 +9,6 @@
 """
 import json
 import os
-from datetime import date, timedelta
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -119,6 +118,23 @@ def test_preference_score_is_origin_and_history_only(store):
     assert not any(price in text for price in ('9500', '9200'))
 
 
+def test_preference_weights_come_from_policy(store):
+    store.work_cases[CASE]['policy'] = {'preferred_origin': '칠레산', 'origin_weight': '5', 'history_weight': '0.5'}
+    b, a, d = evaluate_candidates(store, ctx(), ITEMS)['candidates']
+    assert [c['supplier_id'] for c in (b, a, d)] == ['sup-b', 'sup-a', 'sup-d']
+    assert (b['preference_score'], a['preference_score'], d['preference_score']) == ('5', '0.5', '0')
+    assert states(b, False) == {'원산지 칠레산': 'PASS', '기존 거래 이력': 'FAIL'}
+
+
+@pytest.mark.parametrize('policy', [{}, None, {'origin_weight': 'abc', 'history_weight': ''},
+                                    {'origin_weight': 'NaN', 'history_weight': '-1'}])
+def test_missing_or_invalid_policy_weights_use_defaults(store, policy):
+    store.work_cases[CASE]['policy'] = policy
+    a, d, b = evaluate_candidates(store, ctx(), ITEMS)['candidates']
+    assert (a['preference_score'], d['preference_score'], b['preference_score']) == ('3', '2', '0')
+    assert states(a, False) == {'원산지 국내산': 'PASS', '기존 거래 이력': 'PASS'}
+
+
 def test_mandatory_conditions_object_form_is_read(store):
     store.work_cases[CASE]['mandatory_conditions'] = {'certifications': ['HACCP']}
     assert [c['supplier_id'] for c in evaluate_candidates(store, ctx(), ITEMS)['candidates']] == ['sup-a', 'sup-d', 'sup-b']
@@ -204,12 +220,11 @@ def test_one_call_makes_a_draft_per_supplier_from_the_code_template(store):
     assert (a.recipient, b.recipient) == ('daon@example.com', 'raon@example.com')
     assert a.purpose == 'RFQ' and a.status == 'DRAFT' and a.input_revision == 1 and a.style_snapshot_jsonb == STYLE
     assert a.subject == '[(주)트루나스] 냉동 딸기 견적 요청드립니다'
-    deadline = (date.today() + timedelta(days=tools.RFQ_REPLY_DAYS)).isoformat()
     assert a.body_text == (
         '안녕하세요. 다온푸드 담당자님\n건강한 동결건조 식품을 만드는 (주)트루나스입니다.\n\n'
-        f'아래 품목의 견적을 요청드립니다. {deadline}까지 회신 부탁드립니다.\n\n'
+        '아래 품목의 견적을 요청드립니다. 메일을 받으신 날로부터 2일 이내에 회신 부탁드립니다.\n\n'
         '<요청 내용>\n- 품목: 냉동 딸기\n- 규격: 10kg/박스\n- 수량: 600kg\n- 납기일: 2026-12-01\n\n'
-        '<견적서 포함 사항>\n1. 단가와 단가 기준 단위\n2. 요청 수량 공급 가능 여부\n3. 요청 납기일 납품 가능 여부\n'
+        '<견적서 포함 사항>\n1. 단가와 단가 기준 단위\n2. 공급 가능 수량과 그 단위\n3. 요청 납기일 납품 가능 여부\n'
         '4. 운송비 부담 주체와 단가 포함 여부\n5. 최소 주문 수량(MOQ)\n6. 견적 유효기간\n\n'
         '빠른 회신 주시면 내부 검토 후 신속히 연락드리겠습니다.\n감사합니다.\n트루나스 드림')
     # 확인되지 않은 필수 조건은 증빙 질문으로 더한다

@@ -45,7 +45,7 @@ import dataclasses
 import hashlib
 import json
 import re
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 from typing import Literal, Protocol
 
@@ -984,7 +984,7 @@ def store_structured_mail(fields: list[QuoteField], runtime: ToolRuntime[RunCont
 #   과거 단가는 순위에도 쓰지 않는다(BR-03).
 
 MAX_CANDIDATES = 10                  # 후보·RFQ 상한 (Notion ② 10곳)
-# 선호 가중치(잠정). 07 10절대로 팀이 정하면 회사 정책으로 옮긴다. 후보 정렬에만 쓰고 DB에 저장하지 않는다
+# 선호 가중치 기본값. 회사 정책(policy_jsonb)에 값이 없을 때만 쓴다(_preferences). 후보 정렬에만 쓰고 DB에 저장하지 않는다
 PREFERRED_ORIGIN, ORIGIN_WEIGHT, HISTORY_WEIGHT = '국내산', Decimal(2), Decimal(1)
 
 # RFQ 질문. 고정 질문은 모든 업체에 묻고, 선택 질문은 LLM이 업체마다 고른다(고르지 않으면 RFQ_DEFAULT_OPTIONS).
@@ -1084,17 +1084,26 @@ def _required_checks(case: dict, item: dict, web: bool = False) -> list[dict]:
     return checks
 
 
-def _preferences(rows: dict[str, dict], purchases: dict[str, dict]) -> dict[str, tuple[list[dict], Decimal]]:
-    """업체별 (선호 체크, 점수). 선호 원산지와 같으면 ORIGIN_WEIGHT, 거래 이력이 있으면 HISTORY_WEIGHT를 더한다."""
+def _preferences(rows: dict[str, dict], purchases: dict[str, dict],
+                 policy: dict | None = None) -> dict[str, tuple[list[dict], Decimal]]:
+    """업체별 (선호 체크, 점수). 선호 원산지와 같으면 원산지 가중치, 거래 이력이 있으면 이력 가중치를 더한다.
+    값은 회사 정책(policy_jsonb)에서 읽고, 없거나 숫자가 아니면 PREFERRED_ORIGIN·ORIGIN_WEIGHT·HISTORY_WEIGHT다."""
+    policy = policy or {}
+    # 키 이름 확정 대기: preferred_origin·origin_weight·history_weight는 제안값이다
+    preferred = str(policy.get('preferred_origin') or '').strip() or PREFERRED_ORIGIN
+    def weight(key, default):   # NaN·음수는 정렬을 깨거나 선호를 벌점으로 뒤집으므로 기본값을 쓴다
+        value = _amount(policy.get(key))
+        return value if value is not None and value.is_finite() and value >= 0 else default
+    origin_weight, history_weight = weight('origin_weight', ORIGIN_WEIGHT), weight('history_weight', HISTORY_WEIGHT)
     result = {}
     for supplier_id, item in rows.items():
         origin = item.get('origin')
-        origin_state = 'UNKNOWN' if not origin else 'PASS' if _key(origin) == _key(PREFERRED_ORIGIN) else 'FAIL'
+        origin_state = 'UNKNOWN' if not origin else 'PASS' if _key(origin) == _key(preferred) else 'FAIL'
         history_state = 'PASS' if supplier_id in purchases else 'FAIL'
-        checks = [_check(f'원산지 {PREFERRED_ORIGIN}', False, origin_state, [f"supplier_items:{item['id']}"]),
+        checks = [_check(f'원산지 {preferred}', False, origin_state, [f"supplier_items:{item['id']}"]),
                   _check('기존 거래 이력', False, history_state,
                          [f'purchase_history:{supplier_id}'] if history_state == 'PASS' else [])]
-        score = (ORIGIN_WEIGHT if origin_state == 'PASS' else 0) + (HISTORY_WEIGHT if history_state == 'PASS' else 0)
+        score = (origin_weight if origin_state == 'PASS' else 0) + (history_weight if history_state == 'PASS' else 0)
         result[supplier_id] = (checks, Decimal(score))
     return result
 
@@ -1234,7 +1243,7 @@ def evaluate_candidates(store: CandidateStore, context: RunContext, supplier_ite
         else:
             passed[supplier_id] = (item, checks)
 
-    preferences = _preferences({sid: item for sid, (item, _) in passed.items()}, purchases)
+    preferences = _preferences({sid: item for sid, (item, _) in passed.items()}, purchases, case.get('policy') or {})
     candidates = []
     for supplier_id, (item, checks) in passed.items():
         preference_checks, score = preferences[supplier_id]
@@ -1306,7 +1315,9 @@ def search_supplier_evidence(supplier_item_ids: list[str], runtime: ToolRuntime[
 #   업체별 초안 행을 만든다. 06 mail_drafts에 DRAFT로 저장만 하고, 승인(ON)·자동 발송(OFF)은 백엔드가 발송 직전
 #   설정으로 정한다.
 
-RFQ_REPLY_DAYS = 2                   # 회신기한 = 초안 작성일 + 2일
+RFQ_REPLY_DAYS = 2
+# 날짜를 박지 않는다: 발송 본문은 승인한 초안과 같아야 해서, 늦게 승인하면 지난 기한이 나간다
+REPLY_DEADLINE = f'메일을 받으신 날로부터 {RFQ_REPLY_DAYS}일 이내'
 _DRAFT_HINTS = {
     'UNSUPPORTED_PURPOSE': '지금은 purpose RFQ만 만들 수 있다.',
     'NOT_A_CANDIDATE': 'search_supplier_evidence의 candidates에 있는 supplier_id에만 RFQ를 만든다.',
@@ -1321,7 +1332,7 @@ _DRAFT_HINTS = {
 RFQ_SUBJECT = '{보내는회사}{품목} 견적 요청드립니다'
 RFQ_BODY = ('안녕하세요. {업체명} 담당자님\n'
             '{회사소개}\n\n'
-            '아래 품목의 견적을 요청드립니다. {회신기한}까지 회신 부탁드립니다.\n\n'
+            '아래 품목의 견적을 요청드립니다. {회신기한}에 회신 부탁드립니다.\n\n'
             '<요청 내용>\n'
             '{요청내용}\n\n'
             '<견적서 포함 사항>\n'
@@ -1422,7 +1433,7 @@ def save_mail_drafts(store: MailDraftStore, context: RunContext, purpose: str, s
 
     facts = found['rfq_facts']
     style = _read(lambda: store.current_send_settings(context.case_id)) or {}
-    common = {'회신기한': (date.today() + timedelta(days=RFQ_REPLY_DAYS)).isoformat(), '품목': facts['품목'],
+    common = {'회신기한': REPLY_DEADLINE, '품목': facts['품목'],
               '요청내용': _request_lines(facts), **_style_values(style)}
     drafts, rejected = [], []
     for supplier_id in supplier_ids:
@@ -2020,7 +2031,7 @@ class ClarificationRequest(StrictModel):
 CLARIFY_SUBJECT = '{보내는회사}{품목} 견적 확인 요청드립니다'
 CLARIFY_BODY = ('안녕하세요. {업체명} 담당자님\n'
                 '{회사소개}\n\n'
-                '보내 주신 {품목} 견적 잘 받았습니다. 검토를 위해 아래 내용을 {회신기한}까지 확인 부탁드립니다.\n\n'
+                '보내 주신 {품목} 견적 잘 받았습니다. 검토를 위해 아래 내용을 {회신기한}에 확인 부탁드립니다.\n\n'
                 '<확인 요청 사항>\n'
                 '{질문목록}\n\n'
                 '감사합니다.\n'
@@ -2040,7 +2051,7 @@ def save_clarification_drafts(store: PriorityStore, context: RunContext, request
     suppliers = {s['supplier_id']: s for s in compared['suppliers']}
     case = _read(lambda: store.get_work_case(context.case_id))
     style = _read(lambda: store.current_send_settings(context.case_id)) or {}
-    common = {'회신기한': (date.today() + timedelta(days=RFQ_REPLY_DAYS)).isoformat(),
+    common = {'회신기한': REPLY_DEADLINE,
               '품목': case.get('item_name') or '요청 품목', **_style_values(style)}
     drafts, rejected = [], []
     for request in requests:
@@ -2501,7 +2512,7 @@ COUNTER_BODY = ('안녕하세요. {업체명} 담당자님\n'
                 '- 품목: {품목}\n'
                 '- 단가: {목표단가}원/{단위}\n'
                 '{조건목록}\n\n'
-                '{회신기한}까지 회신 부탁드립니다.\n'
+                '{회신기한}에 회신 부탁드립니다.\n'
                 '감사합니다.\n'
                 '{서명}')
 
@@ -2521,7 +2532,7 @@ def save_counter_offer_draft(store: CounterOfferStore, context: RunContext, targ
     style = _read(lambda: store.current_send_settings(context.case_id)) or {}
     lines = '\n'.join(f'- {text.strip()}' for text in conditions if text.strip())
     subject, body = _mail_text(COUNTER_SUBJECT, COUNTER_BODY, {
-        '회신기한': (date.today() + timedelta(days=RFQ_REPLY_DAYS)).isoformat(), '품목': case.get('item_name') or '요청 품목',
+        '회신기한': REPLY_DEADLINE, '품목': case.get('item_name') or '요청 품목',
         '업체명': contact.get('name') or '담당자', '목표단가': f"{Decimal(checked['target_unit_price']):,}",
         '단위': numbers['unit'] or '', '조건목록': lines, **_style_values(style)})
     key = hashlib.sha256(f"{context.case_id}|{context.input_revision}|COUNTER_OFFER|{numbers['supplier_id']}|"
