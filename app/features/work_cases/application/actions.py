@@ -12,8 +12,8 @@ def validate_action_key(key):
         raise ServiceError('IDEMPOTENCY_KEY_REQUIRED', '유효한 Idempotency-Key가 필요합니다.', 400, retryable=False)
 
 
-def revision_body_hash(revision):
-    body = json.dumps({'expected_revision': revision}, separators=(',', ':'), sort_keys=True)
+def revision_body_hash(revision, conditions=None):
+    body = json.dumps({'expected_revision': revision, **(conditions or {})}, separators=(',', ':'), sort_keys=True)
     return hashlib.sha256(body.encode()).hexdigest()
 
 
@@ -26,12 +26,12 @@ class WorkCaseActions:
     def __init__(self, repo, *, extraction_enabled=False):
         self.repo, self.extraction_enabled = repo, extraction_enabled
 
-    def submit(self, owner, case_id, revision, action, key, *, replay_result=None, reason=None):
+    def submit(self, owner, case_id, revision, action, key, *, replay_result=None, reason=None, conditions=None):
         if action not in {'START', 'RESUME', 'ACCEPT_INCREASE'}:
             raise ServiceError('ACTION_NOT_ALLOWED', '허용하지 않은 업무 동작입니다.', 409, retryable=False)
         validate_action_key(key)
-        if action == 'RESUME' and reason != 'RESUME_HOLD':
-            raise ServiceError('ACTION_NOT_ALLOWED', '현재 재개 API는 추출 보류 업무의 재개만 지원합니다.', 409, retryable=False)
+        if action == 'RESUME' and reason not in {'RESUME_HOLD', 'RETRY_FAILED', 'REOPEN_REVIEW'}:
+            raise ServiceError('ACTION_NOT_ALLOWED', '지원하지 않는 재개 사유입니다.', 409, retryable=False)
         if replay_result is not None:
             if action not in {'START', 'RESUME'} or not isinstance(replay_result, dict) or replay_result.get('kind') != 'REPLAY':
                 raise ServiceError('PROCESSING_UNAVAILABLE', '저장된 요청 결과를 확인할 수 없습니다.', 503)
@@ -43,8 +43,9 @@ class WorkCaseActions:
                 result = self.repo.resume(str(owner), str(case_id), revision, reason, key,
                                           resume_body_hash(revision, reason), current_request_id())
             else:
+                options = {'conditions': conditions} if conditions else {}
                 result = self.repo.action(str(owner), str(case_id), revision, action, key,
-                                          revision_body_hash(revision), current_request_id())
+                                          revision_body_hash(revision, conditions), current_request_id(), **options)
         # The DB must replay before lookup, even if the case was already deleted.
         if not isinstance(result, dict) or result.get('kind') not in {'ACCEPTED', 'REPLAY'}:
             raise ServiceError('PROCESSING_UNAVAILABLE', '업무 접수를 확인할 수 없습니다.', 503)

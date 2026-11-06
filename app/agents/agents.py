@@ -47,11 +47,15 @@ PROMPTS = {
 가장 먼저 지킬 규칙 (위에서부터 순서대로 판단한다):
 1. 저장할지 먼저 정한다. 업무 품목(get_case_context의 item_name)의 단가가 메일·첨부에 숫자로 적혀 있을 때만 저장한다.
    물량별 단가만 있어도 저장한다. 아래면 store_structured_mail을 부르지 않고 HOLD한다.
-   - 단가가 없다 ("추후 안내", "견적서 송부 예정", 접수 안내, 읽을 수 없는 스캔 첨부만 있음)
+   - 단가가 없다 ("추후 안내", "견적서 송부 예정", 접수 안내)
+   본문에 단가가 없고 "첨부 참고"처럼 첨부가 있으면, 첨부를 읽기 전에는 단가가 없다고 정하지 않는다.
+   첨부 status가 NO_TEXT(글자가 없는 스캔본)여도 read_mail_evidence로 그 쪽을 읽는다. 서버가 그림을 글자로 읽어(OCR) 준다.
    - 업무 품목이 아닌 다른 품목의 견적만 있다 (예: 업무가 냉동 딸기인데 냉동 블루베리 견적만 있음)
    업무 품목이 비어 있으면(null) 메일의 품목을 업무 품목으로 본다.
-2. 업체: 메일 목록에 supplier_id가 있는 메일은 업체가 이미 정해져 있다. 이때는 supplier_name을 fields에 아예 넣지 않는다
-   (null로도 넣지 않는다). supplier_id가 없는 메일만 원문의 회사명을 supplier_name으로 보낸다.
+2. 업체: 원문(본문·첨부)에 견적을 보낸 회사명이 있으면 메일에 업체가 연결돼 있든(supplier_id 있음) 없든
+   그 회사명을 supplier_name으로 보낸다. 도구가 연결된 업체와 같은지 대조한다.
+   supplier_id가 있는 메일인데 원문에 회사명이 없으면 supplier_name을 보내지 않는다(null로도 넣지 않는다).
+   우리 회사(수신처, 예: "수신 (주)트루나스")나 발신 주소·도메인에서 지은 이름은 회사명이 아니다.
 3. store_structured_mail이 한 번이라도 STORED를 돌려주면 next_action은 STORED다. 그 quote_version_id를 넣는다.
    unknown_fields·review·NEEDS_REVIEW·UNIT_MISSING이 있어도 저장은 끝났다. reason에 적을 뿐 HOLD 사유가 아니다.
 4. REJECTED는 전체 실패가 아니다. rejected에 나온 항목만 고치거나 빼고, 나머지 fields·cost_terms·price_tiers·item_notes는
@@ -65,6 +69,10 @@ PROMPTS = {
 2. read_mail_evidence(mail_id, part, page)로 mail_ids 메일 중 필요한 본문·첨부 쪽만 골라 읽는다.
    part는 본문이면 'body', 첨부면 메일 목록의 attachment_ref 값(예: 'att-1')이다.
    NOT_FOUND면 돌려받은 available_parts에서 part·쪽을 골라 다시 읽는다.
+   메일 목록의 첨부 status가 NO_TEXT인 쪽도 읽는다(서버가 OCR로 읽는다). 결과의 text_source가 OCR이면 그림을 글자로
+   읽은 것이다. 보이는 글자를 그대로 옮기고, 흐리거나 빠진 글자를 짐작해 채우지 않는다.
+   UNREADABLE이면 그 쪽은 다시 읽지 않는다(다시 불러도 같다). UNREADABLE이거나 OCR 결과도 비었으면(empty) 그 쪽은
+   읽을 수 없는 첨부다. 첨부를 읽어 보지 않고 "첨부를 읽을 수 없음"으로 HOLD하지 않는다.
    도구 호출 수에 한도가 있으니 모든 쪽을 읽지 않는다.
 3. recheck_fields가 비어 있지 않으면 그 항목에 해당하는 구간만 다시 읽는다.
 4. store_structured_mail을 호출한다. 값이 있는 항목은 하나도 빠짐없이 근거 evidence(mail_id, part, page, cell)를 붙인다.
@@ -82,9 +90,17 @@ PROMPTS = {
      ("--" 아래, "○○ 드림", "○○ 영업팀 홍길동", "(주)○○ | 전화")에서 회사명을 찾아 supplier_name으로 다시 보낸다.
      직책·사람 이름·전화번호·"입니다"·"드림"은 빼고 회사명만 옮긴다
      (예: "다온푸드 영업팀 박지훈 과장" → "다온푸드", "한빛유통 드림" → "한빛유통", "제주그린입니다." → "제주그린").
-     처음 보낼 때부터 이렇게 찾아 넣는다.
+     주식회사·(주)·㈜·유한회사 같은 법인 표기도 뺀다. 거래처는 법인 표기 없이 등록되어 있다
+     (예: 공문 머리글 "동해프레시 주식회사" → "동해프레시", "(주)청솔농산" → "청솔농산", "㈜다온푸드" → "다온푸드").
+     본문과 첨부에 회사명이 여러 표기로 있으면 법인 표기가 없는 표기를 고른다.
+     처음 보낼 때부터 이렇게 찾아 넣는다(업체가 연결된 메일도 같은 방법으로 회사명을 찾아 넣는다).
      원문 어디에도 회사명이 없을 때만 HOLD한다.
-   - SUPPLIER_NOT_MATCHED·SUPPLIER_MISMATCH: 저장하지 말고 HOLD를 반환하고 hold.code에 도구의 거절 코드를 넣는다.
+   - SUPPLIER_NOT_MATCHED: 결과의 next를 따른다. 보낸 업체명에 법인 표기(주식회사·(주)·㈜ 등)나 부서·직책이
+     붙어 있었을 때만 그 표기를 빼고 한 번 다시 보낸다. 회사명만 보냈으면 다시 보내지 않고 바로 HOLD한다.
+     업체명을 빼고 다시 보내지 않는다(업체가 연결되지 않은 메일이라 업체명 누락으로 거절된다).
+   - SUPPLIER_MISMATCH: 저장하지 말고 HOLD를 반환한다.
+   - SUPPLY_QUANTITY_MISSING: 기존 업체의 인상 통보인데 공급 물량이 없다. 원문에서 공급 계획·공급 물량을 찾아
+     단위와 함께 available_quantity로 한 번 다시 보낸다. 원문에 없으면 다시 보내지 않고 바로 HOLD한다.
    - REVISION_CHANGED·CASE_NOT_FOUND: 멈추고 HOLD를 반환한다.
    HOLD는 위에서 HOLD로 정한 코드이거나, 두 번 다시 보내도 저장되지 않았을 때만 고른다.
 6. 바로 최종 응답을 낸다(최종 응답이 실행 기록으로 저장된다).
@@ -121,11 +137,13 @@ PROMPTS = {
       "단가는 kg당 9,500원입니다" → unit_price "9,500원", unit "kg"
       "하차비는 박스당 500원" → cost_terms {amount "500원", basis "박스당"}
       "98,000원/박스 (박스당 10kg)" → unit_price "98,000원", unit "박스", quantity_per_order_unit "박스당 10kg"
+      "주문 단위 10kg 박스" → order_unit "박스", quantity_per_order_unit "10kg"
+        (order_unit에는 단위 낱말 하나만 넣는다. "10kg 박스"처럼 수량을 붙이면 INVALID_UNIT으로 거절된다)
       "하차비: 없음" → cost_terms {cost_type HANDLING, source_text "하차비: 없음", amount "없음"}
       표·시트의 셀(예: "A5: 운송비", "B5: 무료")은 값 셀을 그대로 옮기고 셀 위치를 evidence.cell에 적는다
         → cost_terms {cost_type SHIPPING, source_text "무료", amount "무료"}, evidence.cell "B5"
 - cost_terms의 source_text·amount·basis·payer도 원문 그대로다. 번역하거나 바꿔 쓰지 않는다(예: payer "귀사 부담").
-- 메일 목록에 supplier_id가 있는 메일은 업체가 정해져 있다. 본문에 업체명이 없으면 supplier_name을 보내지 않고,
+- 메일 목록에 supplier_id가 있는 메일은 업체가 연결돼 있다. 원문에 업체명이 없으면 supplier_name을 보내지 않고,
   업체명이 없다는 이유로 unknown_fields에 넣거나 HOLD하지 않는다.
 
 값 규칙:
@@ -162,17 +180,48 @@ reason:
 - 업체가 연결된 메일이면 업체명이 메일에 있는지 없는지는 reason에 쓰지 않는다.
 - 구매담당자가 읽는 한국어 한두 문장이다. 영문 낱말을 쓰지 않는다. 금지 예: supplier_name, unknown_fields, item_notes,
   UNIT_MISSING, MISSING_FIELD, NEEDS_REVIEW, REVISION_CHANGED, HOLD, store_structured_mail, 메일 ID(m-05 등), 파일 이름.
+  영문 보류 코드는 reason이 아니라 hold.code에만 쓴다.
   항목은 우리말로 쓴다: 업체명, 품목, 규격, 단가, 단위, 적용일, 유효기간, 납품일, 최소 주문 수량, 운송비 등 비용, 품목 비고.
-- STORED면 무엇을 저장했고 무엇이 원문에 없었는지, HOLD면 왜 저장하지 못했는지 쓴다.
+- STORED면 무엇을 저장했고 무엇이 원문에 없었는지 쓴다.
   예) "가나농산의 냉동 딸기 변경 단가(박스당 54,500원)와 적용일, 운송비 조건을 저장했습니다. 유효기간은 메일에 없습니다."
       "단가는 저장했지만 단위가 메일에 없어 확인이 필요합니다."
-      "견적 요청 접수 안내 메일이라 가격 정보가 없어 저장하지 않았습니다."
-      "업무 정보가 바뀌어 이번 추출을 멈췄습니다."
+- HOLD면 왜 저장하지 못했는지 아래 표의 문장으로 쓴다. ○○만 바꾸고 다른 문장을 덧붙이지 않는다.
+  보류 문장에는 그 이유와 관계없는 항목(단가·단위·품목명·업체명)을 "없다·확인할 수 없다"와 함께 쓰지 않는다.
+
+hold (보류 코드. 서버가 이 코드로 담당자에게 보일 문구를 정한다):
+- STORED면 hold를 비운다(null).
+- HOLD면 아래 표에서 상황에 맞는 hold.code 하나를 고르고 reason은 그 줄의 문장으로 쓴다.
+  도구가 돌려준 코드(SUPPLIER_NOT_MATCHED·SUPPLIER_MISMATCH)는 바꾸지 않고 그대로 hold.code에 옮긴다.
+  hold.field는 MISSING_FIELD일 때만 빠진 항목을 적는다(supplier_name·item_name·unit_price·unit·quantity 중 하나).
+  그 밖에는 null.
+  - NO_QUOTE_DATA — 단가 없음·접수 안내·견적 아님·다른 품목의 견적만 있음:
+    "이 메일에는 업무 품목의 견적 정보가 없어 저장하지 않았습니다."
+  - SOURCE_READ_FAILED — 견적이 있을 첨부 쪽을 read_mail_evidence로 읽었는데 읽을 수 없어 견적을 확인하지 못함.
+    첨부를 읽어 보지 않고 이 코드를 쓰지 않는다:
+    "첨부를 읽을 수 없어 견적을 저장하지 못했습니다."
+  - SUPPLIER_NOT_MATCHED — store_structured_mail이 SUPPLIER_NOT_MATCHED를 돌려줌:
+    "등록된 거래처에서 ○○를 찾지 못해 견적을 저장하지 않았습니다." (○○는 보낸 업체명)
+  - SUPPLIER_MISMATCH — store_structured_mail이 SUPPLIER_MISMATCH를 돌려줌:
+    "메일에 연결된 거래처와 원문의 업체명이 달라 견적을 저장하지 않았습니다."
+  - MISSING_FIELD, field supplier_name — 원문 어디에도 회사명이 없음:
+    "메일에서 업체명을 찾지 못해 견적을 저장하지 않았습니다."
+  - MISSING_FIELD, field unit_price·unit·item_name — 두 번 다시 보내도 그 항목이 거절됨:
+    "○○를 원문에서 확인할 수 없어 견적을 저장하지 못했습니다."
+    (○○는 단가·단위·품목명 중 거절된 항목 하나, 조사는 그 낱말에 맞춘다. field는 그 항목의 이름)
+  - MISSING_FIELD, field quantity — store_structured_mail이 SUPPLY_QUANTITY_MISSING을 돌려줬고 원문에 공급 물량이 없음:
+    "인상 통보에서 공급 물량을 확인할 수 없어 견적을 저장하지 않았습니다."
+  - MISSING_EVIDENCE — 두 번 다시 보내도 근거(MISSING_EVIDENCE·SOURCE_MISMATCH·EVIDENCE_NOT_IN_CASE)로 거절됨:
+    "견적 값의 원문 근거를 확인할 수 없어 저장하지 못했습니다."
+  - REVISION_CHANGED·CASE_NOT_FOUND로 멈춤: hold는 비우고(null) "업무 정보가 바뀌어 이번 추출을 멈췄습니다."라고 쓴다.
+  예) {"next_action": "HOLD", "quote_version_ids": [], "hold": {"code": "SUPPLIER_NOT_MATCHED", "field": null},
+       "reason": "등록된 거래처에서 다온유통을 찾지 못해 견적을 저장하지 않았습니다."}
+      {"next_action": "HOLD", "quote_version_ids": [], "hold": {"code": "MISSING_FIELD", "field": "unit_price"},
+       "reason": "단가를 원문에서 확인할 수 없어 견적을 저장하지 못했습니다."}
 
 next_action:
-- STORED: store_structured_mail이 STORED로 돌려준 quote_version_id가 있다. 그 ID만 quote_version_ids에 넣는다.
+- STORED: store_structured_mail이 STORED로 돌려준 quote_version_id가 있다. 그 ID만 quote_version_ids에 넣고 hold는 비운다.
 - HOLD: 메일에 읽을 수 있는 견적이 없다(가격 없음, 첨부를 읽을 수 없음, 견적이 아님) 또는 위에서 HOLD로 정한 경우다.
-  quote_version_ids는 비우고 무엇이 없었는지 reason에 적는다.
+  quote_version_ids는 비우고 hold에 위 표의 코드를, reason에 그 줄의 문장을 쓴다.
 ''',
     # ② 취급 근거·필수 인증/규격(필수는 가중치로 상쇄 불가)·선호 가중치 체크리스트·업체별 RFQ 초안
     #    SEND_RFQ: 후보별 초안 생성 / HOLD: 후보 없음 (조회 범위·부족한 근거를 reason에)
@@ -196,8 +245,13 @@ next_action:
    후보·제외·체크리스트·선호 점수는 도구가 정한 것이다.
    - CONDITIONS_MISSING·REVISION_CHANGED·CASE_NOT_FOUND면 다른 도구를 부르지 말고 바로 HOLD로 최종 응답한다.
      CONDITIONS_MISSING이면 reason에 결과의 summary 문장을 그대로 쓴다(필드 이름을 쓰지 않는다).
-   - candidates가 비어 있으면 create_rfq_draft를 부르지 말고 바로 HOLD로 최종 응답한다.
-     reason에는 검색 결과의 summary 문장을 그대로 쓴다.
+   - candidates가 비어 있으면 create_rfq_draft를 부르지 않는다. 업무의 원료 품목과 상태에 맞게
+     crawl_supplier_candidates를 최대 한 번 호출해 웹 검색 근거를 수집한 뒤 HOLD한다.
+     생과·냉동 등 명시된 원료 상태와 원산지 조건을 지킨다. 국내 납품 조건을 국내산 원료로 바꾸지 않는다.
+     웹 결과는 아직 등록된 공급처가 아니다. ID를 만들거나 후보·초안에 넣지 않는다.
+     web_observations는 시스템이 도구 결과로 채우므로 직접 작성하지 않는다.
+     업체 홈페이지·취급 여부·국내 소재와 원산지는 검색 결과만으로 확정하지 않는다.
+     검색 차단·오류는 결과 없음과 구분한다. reason에는 웹 검색 상태와 등록 후보가 없음을 알린다.
 4. candidates가 있을 때만 create_rfq_draft(supplier_item_ids, supplier_ids, questions)를 한 번만 부른다.
    메일 문안은 도구가 쓴다.
    - supplier_item_ids는 search_supplier_evidence에 보낸 목록을 하나도 빼지 않고 그대로 보낸다. 인상을 요청한 업체의
@@ -244,8 +298,11 @@ next_action:
   필드 이름(scope.searched·excluded·supplier_item_id 등)은 쓰지 않는다.
 
 next_action:
-- SEND_RFQ: DRAFTED로 받은 초안이 하나 이상 있다.
+- SEND_RFQ: DRAFTED로 받은 초안이 하나 이상 있다. hold는 비운다(null).
 - HOLD: 후보가 없거나, 업무 조건이 없거나, 초안을 하나도 만들지 못했다. candidates를 비우고 이유를 reason에 적는다.
+  hold.code는 결과에 맞춰 쓴다: CONDITIONS_MISSING이면 "CONDITIONS_MISSING", candidates가 비었으면
+  "NO_SUITABLE_CANDIDATES". REVISION_CHANGED·CASE_NOT_FOUND로 멈췄거나 초안을 만들지 못했으면 hold는 비운다.
+  영문 코드는 hold.code에만 쓰고 reason에는 쓰지 않는다.
 
 지켜야 할 것:
 - 필수 조건이 FAIL인 업체는 점수가 높아도 후보가 아니다. 선호 점수로 필수 조건을 상쇄하지 않는다.
@@ -464,9 +521,88 @@ def check_extraction(role: AgentRole, data: AgentInput, context: RunContext, out
     if output.next_action == 'STORED' and not ids:
         raise UngroundedOutputError('STORED needs quote_version_ids stored in this run')
     unknown = [name for name in dict.fromkeys(output.unknown_fields) if name in EXTRACTION_FIELD_NAMES]
-    if unknown != output.unknown_fields:
-        return type(output).model_validate(output.model_dump() | {'unknown_fields': unknown})
-    return output
+    changes = {'unknown_fields': unknown} if unknown != output.unknown_fields else {}
+    hold = _extraction_hold(output, messages) if output.next_action == 'HOLD' else None
+    current = output.hold.model_dump() if output.hold else None
+    if hold != current:
+        changes['hold'] = hold
+    reason = _without_code_prefix(output.reason)
+    if reason != output.reason:
+        changes['reason'] = reason
+    return type(output).model_validate(output.model_dump() | changes) if changes else output
+
+
+# ① 보류 코드 중 도구 결과로만 정하는 코드. LLM이 hold.code에 적어도 이번 실행의 store_structured_mail 거절이 없으면 받지 않는다
+_TOOL_HOLD_CODES = ('SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH')
+_CASE_CHANGED = ('REVISION_CHANGED', 'CASE_NOT_FOUND')
+
+
+def _case_changed(messages: list) -> bool:
+    """이번 실행의 도구 결과 중 업무가 바뀌었거나(REVISION_CHANGED) 없어졌다(CASE_NOT_FOUND)는 것이 있는지.
+    이때 멈춘 HOLD는 견적 문제가 아니라 오래된 버전으로 일한 것이라 보류 코드를 붙이지 않는다(서버가 화면에 쓰지 않는다)."""
+    for message in messages:
+        if not isinstance(message, ToolMessage):
+            continue
+        try:
+            result = json.loads(message.content)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(result, dict) and result.get('status') in _CASE_CHANGED:
+            return True
+    return False
+
+
+def _extraction_hold(output: AgentOutput, messages: list) -> dict | None:
+    """①의 hold {code, field}. 정하는 순서:
+    1. 업무가 바뀌어 멈췄으면 None.
+    2. 이번 실행에서 store_structured_mail이 업체 관련 코드(SUPPLIER_NOT_MATCHED·SUPPLIER_MISMATCH)로 거절했으면 그중
+       마지막 코드. 도구가 남긴 쪽지와 같은 기준이다(업체명을 빼고 다시 보내 생긴 MISSING_FIELD가 앞선 업체 쪽지를
+       덮어쓰지 않는다).
+    3. 마지막 거절이 업체명 누락이면 MISSING_FIELD + supplier_name.
+       마지막 거절이 인상 통보의 공급 물량 누락(SUPPLY_QUANTITY_MISSING)이면 MISSING_FIELD + quantity.
+    4. 그 밖에는 LLM이 적은 hold를 받는다. 업체 관련 코드는 도구 결과 없이 받지 않는다(2에서 정해진다).
+       field는 MISSING_FIELD일 때만 남는다(스키마가 막는다).
+    5. 정하지 못하면 None(서버가 HOLD_REASON_UNAVAILABLE로 본다)."""
+    if _case_changed(messages):
+        return None
+    rejected = [r.get('rejected', []) for r in _tool_results(messages, 'store_structured_mail')
+                if r.get('status') == 'REJECTED']
+    supplier_codes = [item.get('code') for items in rejected for item in items if item.get('code') in _TOOL_HOLD_CODES]
+    if supplier_codes:
+        return {'code': supplier_codes[-1], 'field': None}
+    if _supplier_name_missing(rejected):
+        return {'code': 'MISSING_FIELD', 'field': 'supplier_name'}
+    if rejected and any(item.get('code') == 'SUPPLY_QUANTITY_MISSING' for item in rejected[-1]):
+        return {'code': 'MISSING_FIELD', 'field': 'quantity'}
+    if output.hold is not None and output.hold.code not in _TOOL_HOLD_CODES:
+        return output.hold.model_dump()
+    return None
+
+
+def _supplier_name_missing(rejected: list[list[dict]]) -> bool:
+    """업체가 연결되지 않은 메일에서 업체명을 끝내 확인하지 못했는지. 마지막 거절이 업체명 누락이거나, 업체명 누락 뒤에
+    보낸 업체명이 원문 근거로 거절됐으면(예: 발신 주소에서 지어낸 이름 → SOURCE_MISMATCH) 업체명 누락으로 본다.
+    보류 사유는 MISSING_FIELD·supplier_name으로 유지한다."""
+    if not rejected:
+        return False
+    missing = lambda items: any(i.get('code') == 'MISSING_FIELD' and i.get('field') == 'supplier_name'  # noqa: E731
+                                for i in items)
+    if missing(rejected[-1]):
+        return True
+    name_rejected = any(i.get('field') == 'supplier_name' and i.get('code') in _NAME_EVIDENCE_CODES for i in rejected[-1])
+    return name_rejected and any(missing(items) for items in rejected[:-1])
+
+
+_NAME_EVIDENCE_CODES = ('SOURCE_MISMATCH', 'MISSING_EVIDENCE', 'EVIDENCE_NOT_IN_CASE')
+
+
+# reason 맨 앞의 대괄호 코드("[NO_QUOTE_DATA] …"). 코드는 hold.code에만 쓰므로 LLM이 붙였으면 뗀다
+_CODE_PREFIX = re.compile(r'^\s*\[[A-Z_]+\]\s*')
+
+
+def _without_code_prefix(reason: str) -> str:
+    text = _CODE_PREFIX.sub('', reason).strip()
+    return text or reason
 
 
 # 구매담당자 문장에 나오면 안 되는 내부 표기: 영문 상태·코드, 밑줄 필드 이름, 점 경로(scope.searched)
@@ -500,10 +636,31 @@ def _grounded_caution(output: AgentOutput, candidate: dict) -> dict | None:
     return {'reason': caution.reason, 'evidence_refs': [candidate['notes_ref']]}
 
 
+def _candidate_hold(messages: list) -> dict | None:
+    """②의 hold {code}. LLM이 적은 값 대신 이번 실행의 도구 결과로 정한다. 업무 조건 부족 → CONDITIONS_MISSING,
+    검색 결과 후보 없음 → NO_SUITABLE_CANDIDATES. 업무가 바뀌어 멈췄거나 그 밖(초안 실패 등)은 None."""
+    if _case_changed(messages):
+        return None
+    code = _candidate_hold_code(messages)
+    return {'code': code} if code else None
+
+
+def _candidate_hold_code(messages: list) -> str | None:
+    results = [*_tool_results(messages, 'search_supplier_items'), *_tool_results(messages, 'search_supplier_evidence')]
+    if any(result.get('status') == 'CONDITIONS_MISSING' for result in results):
+        return 'CONDITIONS_MISSING'
+    searched = [r for r in _tool_results(messages, 'search_supplier_evidence') if r.get('status') == 'OK']
+    if searched and not searched[-1].get('candidates'):
+        return 'NO_SUITABLE_CANDIDATES'
+    return None
+
+
 def _check_candidates(output: AgentOutput, messages: list) -> AgentOutput:
     """②: 초안 ID는 이번 실행에서 DRAFTED로 받은 것만, 후보는 search_supplier_evidence 후보만 인정한다.
     체크리스트·점수·근거·잠정 여부·unknown_fields는 LLM이 옮긴 값 대신 도구 값으로 채운다.
     LLM이 정하는 것은 업체별 사유와 등록 비고에 근거한 주의 표시뿐이다."""
+    observations = _tool_results(messages, 'crawl_supplier_candidates')[:3]
+    output = type(output).model_validate(output.model_dump() | {'web_observations': observations})
     searched = [r for r in _tool_results(messages, 'search_supplier_evidence') if r.get('status') == 'OK']
     found = {c['supplier_id']: c for c in (searched[-1]['candidates'] if searched else [])}
     drafted = {d['draft_id']: d['supplier_id'] for r in _tool_results(messages, 'create_rfq_draft')
@@ -514,7 +671,9 @@ def _check_candidates(output: AgentOutput, messages: list) -> AgentOutput:
     if output.next_action == 'SEND_RFQ' and not drafted:
         raise UngroundedOutputError('SEND_RFQ needs drafts created in this run')
     if output.next_action == 'HOLD':     # 후보·초안을 넘기지 않는다
-        return type(output).model_validate(output.model_dump() | {'candidates': [], 'draft_ids': []})
+        return type(output).model_validate(output.model_dump() | {
+            'candidates': [], 'draft_ids': [], 'hold': _candidate_hold(messages),
+            'reason': _without_code_prefix(output.reason)})
     unknown = [c.supplier_id for c in output.candidates if c.supplier_id not in found]
     if unknown:
         raise UngroundedOutputError(f'candidates {unknown} were not found by search_supplier_evidence')

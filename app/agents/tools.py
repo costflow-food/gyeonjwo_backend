@@ -121,7 +121,9 @@ class CaseStore(Protocol):
 
     def read_mail_part(self, case_id: str, mail_id: str, part: str, page: int | None) -> dict | None:
         """업무에 속한 메일의 본문(part='body') 또는 첨부(part=attachment_ref) 한 쪽의 {text, location}.
-        body_text와 normalized_jsonb의 문서 읽기·OCR 결과에서 읽는다. 업무 밖이면 None."""
+        body_text와 normalized_jsonb의 문서 읽기·OCR 결과에서 읽는다. 업무 밖이면 None.
+        선택 키 — text_source: 'TEXT'(텍스트 레이어·본문, 없으면 이것) 또는 'OCR'(documents.ocr_pdf_page 결과)
+          unreadable: true면 그 쪽을 읽지 못했다(text는 ''). attempts·retry_exhausted는 ocr_pdf_page의 시도 기록이다."""
 
 
 _case_store: CaseStore | None = None
@@ -170,10 +172,16 @@ def load_evidence(store: CaseStore, context: RunContext, mail_id: str, part: str
                 {'part': attachment['attachment_ref'], 'pages': attachment['pages']}
                 for attachment in mail.get('attachments') or []]
         return result
+    if item.get('unreadable'):
+        # 기술 오류로 시도를 다 쓴 쪽 등. 다시 불러도 저장소가 같은 결과를 돌려준다
+        return {'status': 'UNREADABLE', 'mail_id': mail_id, 'part': part, 'page': page,
+                'attempts': item.get('attempts'), 'retry_exhausted': bool(item.get('retry_exhausted'))}
     text = item['text']
     # empty: 글자가 없는 쪽(스캔 이미지 등). 이 쪽에서는 어떤 값도 근거가 되지 않는다
+    # text_source OCR: 그림을 글자로 읽은 결과라 잘못 읽은 글자가 있을 수 있다
     return {'status': 'OK', 'mail_id': mail_id, 'part': part, 'page': page, 'text': text[:MAX_EVIDENCE_CHARS],
-            'location': item.get('location'), 'truncated': len(text) > MAX_EVIDENCE_CHARS, 'empty': not text.strip()}
+            'location': item.get('location'), 'truncated': len(text) > MAX_EVIDENCE_CHARS, 'empty': not text.strip(),
+            'text_source': item.get('text_source') or 'TEXT'}
 
 
 @register
@@ -189,14 +197,45 @@ def get_case_context(runtime: ToolRuntime[RunContext]) -> dict:
 
 @register
 @tool
+def crawl_supplier_candidates(query: str, runtime: ToolRuntime[RunContext], limit: int = 5) -> dict:
+    '''업무의 원료 품목·상태에 대한 공개 웹 검색 결과와 홈페이지 연락처를 수집한다.
+    query에는 검색할 품목과 조건만 넣고 메일 본문·개인정보는 넣지 않는다. limit은 1~5이다.
+    검색 결과는 미등록·미검증 자료다. 업체 ID나 견적 초안 대상으로 사용하지 않는다.
+    반환: OK / EMPTY / ERROR / REVISION_CHANGED / CASE_NOT_FOUND.
+    '''
+    from app.features.supplier_crawl.application.tool import SupplierSearchInput
+    from app.features.supplier_crawl.infrastructure.google_search import search_suppliers
+
+    context = _run_context(_case_store, runtime)
+    request = SupplierSearchInput(query=query, limit=limit)
+    if request.limit > 5:
+        return {'status': 'ERROR', 'code': 'LIMIT_EXCEEDED', 'suppliers': []}
+    case = _read(lambda: _case_store.get_work_case(context.case_id))
+    if case is None:
+        return {'status': 'CASE_NOT_FOUND', 'suppliers': []}
+    if case.get('input_revision') != context.input_revision:
+        return {'status': 'REVISION_CHANGED', 'suppliers': []}
+    result = search_suppliers(request.query, request.limit)
+    case = _read(lambda: _case_store.get_work_case(context.case_id))
+    if case is None:
+        return {'status': 'CASE_NOT_FOUND', 'suppliers': []}
+    if case.get('input_revision') != context.input_revision:
+        return {'status': 'REVISION_CHANGED', 'suppliers': []}
+    return result
+
+
+@register
+@tool
 def read_mail_evidence(mail_id: str, runtime: ToolRuntime[RunContext], part: str = 'body',
                        page: int | None = None) -> dict:
     '''이 업무에 속한 메일의 본문 또는 첨부 한 쪽(page)의 원문과 위치를 읽는다.
     part: 본문은 'body', 첨부는 get_case_context 메일 목록의 attachment_ref 값(예: 'att-1'). 'attachment_ref'라는 글자가 아니다.
     page: 첨부의 쪽 번호(1부터). 본문은 비운다.
 
-    반환 status: OK면 text·location·truncated(원문이 길어 앞부분만 줬으면 true)
+    반환 status: OK면 text·location·truncated(원문이 길어 앞부분만 줬으면 true)·empty(글자가 없는 쪽)·
+      text_source(TEXT 또는 OCR: 스캔 그림을 글자로 읽은 쪽. 원문 그대로 옮기되 없는 글자를 짐작해 채우지 않는다)
       / NOT_FOUND(이 업무의 메일인데 part·page가 틀렸으면 available_parts로 읽을 수 있는 part·쪽수를 알려준다)
+      / UNREADABLE(이 쪽을 읽지 못했다. 다시 불러도 같다. 이 쪽의 값은 근거로 쓰지 않는다)
     '''
     return load_evidence(_case_store, _run_context(_case_store, runtime), mail_id, part, page)
 
@@ -279,9 +318,11 @@ _HINTS = {
     'TIER_OVERLAP': '단가 구간의 경계를 원문에서 다시 확인한다.',
     'CURRENCY_MISMATCH': '단가의 통화 표기와 currency가 다르다. 원문을 다시 확인한다.',
     'MISSING_FIELD': '업체가 연결되지 않은 메일이면 원문의 업체명을 supplier_name으로 보낸다. 원문에 없으면 HOLD한다.',
-    'SUPPLIER_NOT_MATCHED': '등록된 업체가 아니다. 저장하지 말고 HOLD한다.',
+    'SUPPLIER_NOT_MATCHED': '등록된 업체명과 글자가 정확히 같지 않다. 결과의 next를 따른다.',
     'SUPPLIER_MISMATCH': '메일에 연결된 업체와 업체명이 다르다. 저장하지 말고 HOLD한다.',
     'SUPPLIER_EVIDENCE_MIXED': '한 업체의 메일 근거만 남기고 다시 보낸다.',
+    'SUPPLY_QUANTITY_MISSING': '인상 통보 메일에는 공급 물량이 있어야 한다. 원문의 공급 계획·공급 물량을 단위와 함께 '
+                               'available_quantity로 다시 보낸다. 원문에 없으면 다시 보내지 않고 HOLD한다.',
     'TAX_BASIS_NOT_TAX_TERMS': 'tax_basis는 field_name이 tax_terms인 항목에만 붙인다.',
     'INSTRUCTION_NOT_NOTE': 'AI·시스템에게 하는 문장이라 비고에서 뺐다. 다시 보내지 않는다.',
 }
@@ -364,6 +405,10 @@ class QuoteStore(CaseStore, Protocol):
 
     def list_supplier_items(self, case_id: str, supplier_id: str) -> list[dict]:
         """그 업체의 등록 품목(supplier_items) {id, item_name, specification, unit, standardized_item_key}."""
+
+    def record_extraction_issue(self, case_id: str, mail_ids: list[str], issue: dict,
+                                supplier_name: str | None) -> None:
+        """현재 그래프 실행의 거래처 미등록·불일치 근거를 업무 범위 안의 메일 ID와 함께 기록한다."""
 
     def insert_quote_version(self, record: QuoteVersionRecord,
                              expected_input_revision: int) -> tuple[str, QuoteVersionRecord] | None:
@@ -594,6 +639,20 @@ def _quote_supplier(store: QuoteStore, case_id: str, case_mails: dict, evidence_
     return supplier_id, None
 
 
+# 업체명에 붙어 등록 이름과 달라지게 하는 표기: 법인 표기, 부서·직책
+_NAME_DECORATION = re.compile(r'주식회사|유한회사|농업회사법인|영농조합법인|\((?:주|유)\)|㈜|'
+                              r'영업[부팀]|구매[부팀]|대표이사|과장|대리|팀장|부장|사원|드림')
+
+
+def _supplier_retry_next(supplier_name: str | None) -> str:
+    """SUPPLIER_NOT_MATCHED 뒤에 할 일. 보낸 업체명에 법인 표기·부서·직책이 붙었을 때만 다시 보내게 한다."""
+    if supplier_name and _NAME_DECORATION.search(supplier_name):
+        return ('업체명에 법인 표기나 부서·직책이 붙어 있다. 그 표기를 빼고 회사명만(예: "동해프레시 주식회사" → '
+                '"동해프레시") 한 번 더 보낸다. 나머지 값은 그대로 보낸다.')
+    return ('회사명만 보냈는데 등록된 거래처에 없다. 다시 보내지 말고(업체명을 빼고 보내지도 않는다) '
+            '바로 HOLD로 최종 응답한다. hold.code는 SUPPLIER_NOT_MATCHED다.')
+
+
 def _carry(previous: tuple[str, QuoteVersionRecord], values: dict, tiers: list, costs: list,
            review: list) -> tuple[list, list, list]:
     """이번 메일에 없는 값을 이전 버전에서 원래 근거와 함께 이어받는다. 반환: (tiers, costs, 이어받은 항목).
@@ -632,14 +691,20 @@ def _letters(text) -> str:
     return re.sub(r'[^0-9a-zA-Z가-힣]', '', str(text or '')).casefold()
 
 
+def _item_key(text) -> str:
+    """등록 품목 대조용 품목명: 띄어쓰기를 모두 빼고 대소문자를 무시한다 ('냉동딸기 (IQF)' → '냉동딸기(iqf)').
+    이 기준은 에이전트가 등록 품목을 고를 때 적용한다."""
+    return re.sub(r'\s+', '', str(text or '')).casefold()
+
+
 def _registered_item(items: list[dict], current: dict) -> dict | None:
-    """이번 메일의 품목과 같은 그 업체의 등록 품목. 품목명이 서로 포함되면 같은 품목으로 보고, 여럿이면 규격으로 좁힌다.
-    하나로 정해질 때만 돌려준다(애매하면 연결하지 않는다)."""
-    name = _letters(current.get('item_name', {}).get('value'))
+    """이번 메일의 품목과 같은 그 업체의 등록 품목. 띄어쓰기·대소문자만 빼고 품목명이 같을 때 같은 품목으로 보고,
+    여럿이면 규격으로 좁힌다. 하나로 정해질 때만 돌려준다(애매하면 연결하지 않는다).
+    이름이 서로 포함되는 정도('냉동딸기'와 '냉동딸기 (IQF)')로는 연결하지 않는다. DB가 같은 품목으로 보지 않아 저장이 거부된다."""
+    name = _item_key(current.get('item_name', {}).get('value'))
     if not name:
         return None
-    found = [item for item in items if (registered := _letters(item.get('item_name'))) and
-             (registered in name or name in registered)]
+    found = [item for item in items if _item_key(item.get('item_name')) == name]
     if len(found) > 1:
         wanted = name + _letters(current.get('specification', {}).get('value'))
         found = [item for item in found if _letters(item.get('specification')) and
@@ -664,6 +729,16 @@ def _case_conditions(case: dict, current: dict, item: dict | None, initial_mails
         if unit:
             conditions |= {'quantity': supply['value'], 'unit': unit}
     return conditions or None
+
+
+def _supply_quantity_missing(case: dict, source_mail: dict, values: dict) -> bool:
+    """기존 업체 인상 통보(INITIAL 메일)인데 업무 비교 수량을 정할 공급 물량·단위가 없는지 (2026-11-06 팀 결정).
+    업무 수량이 비어 있을 때만 본다. 저장한 뒤에는 보류할 수 없으므로(DB가 거부) 저장 전에 거절한다.
+    단위는 공급 물량의 단위, 없으면 같은 메일의 단가 단위로 정한다(_case_conditions와 같은 기준)."""
+    if case.get('quantity') or source_mail.get('message_role') != 'INITIAL':
+        return False
+    supply = values.get('available_quantity')
+    return not supply or not (supply.get('quantity_unit') or values.get('unit', {}).get('value'))
 
 
 def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[QuoteField],
@@ -733,21 +808,29 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
     case_item = case.get('item_name')
     if case_item and 'item_name' in values and _compact(values['item_name']['value']) != _compact(case_item):
         review.append({'field': 'item_name', 'code': 'ITEM_NAME_VARIANT'})
-    if rejected:
-        return _with_hints({'status': 'REJECTED', 'rejected': rejected}, rejected)
-
     # 이번 호출의 모든 근거는 한 업체의 메일이어야 한다
     case_mails = {mail['mail_id']: mail for mail in _read(lambda: store.list_case_mails(case_id))}
     evidence_mails = {entry['mail_id'] for entry in [*values.values(), *tiers, *costs, *notes]}
     supplier_name = values['supplier_name']['value'] if 'supplier_name' in values else None
     supplier_id, issue = _quote_supplier(store, case_id, case_mails, evidence_mails, supplier_name)
+    # 원문 근거가 확인된 업체명이 등록 거래처와 맞지 않으면(미등록·연결 업체와 다름) 다른 항목의 거절보다 먼저 알린다.
+    # 다른 항목을 고쳐도 저장할 수 없는 견적이라, 다시 보내기를 다른 항목에 쓰고 원인을 잃지 않게 한다
+    # (2026-11-06 실제 LLM 재현: 규격 근거 거절로 두 번 다시 보내고 SUPPLIER_MISMATCH에 닿지 못함)
+    if rejected and not (supplier_name and issue and issue['code'] in ('SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH')):
+        return _with_hints({'status': 'REJECTED', 'rejected': rejected}, rejected)
     if issue:
         record_issue = getattr(store, 'record_extraction_issue', None)
         if callable(record_issue) and issue['code'] in {'SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH'}:
             record_issue(case_id, sorted(evidence_mails), issue, supplier_name)
-        return _with_hints({'status': 'REJECTED', 'rejected': [issue]}, [issue])
+        result = _with_hints({'status': 'REJECTED', 'rejected': [issue]}, [issue])
+        if issue['code'] == 'SUPPLIER_NOT_MATCHED':
+            result['next'] = _supplier_retry_next(supplier_name)
+        return result
     # 원문 메일은 근거 메일 중 가장 최근에 받은 메일이다 (회신이 이전 메일의 값을 함께 근거로 써도 회신이 원문)
     source_mail_id = max(evidence_mails, key=lambda mail_id: (case_mails[mail_id].get('received_at') or '', mail_id))
+    if _supply_quantity_missing(case, case_mails[source_mail_id], values):
+        missing = {'field': 'available_quantity', 'code': 'SUPPLY_QUANTITY_MISSING'}
+        return _with_hints({'status': 'REJECTED', 'rejected': [missing]}, [missing])
     if check.instruction_mails & evidence_mails:
         review.append({'field': 'evidence', 'code': 'INSTRUCTION_IN_MAIL'})    # 메일에 AI·시스템에게 하는 문장이 있음
 
@@ -842,7 +925,8 @@ def store_structured_mail(fields: list[QuoteField], runtime: ToolRuntime[RunCont
 
     입력: 모든 값은 원문에 적힌 그대로, 근거 evidence{mail_id, part('body' 또는 attachment_ref), page, cell}와 함께 준다.
     fields: field_name과 raw_value. 원문에서 찾았지만 값이 없으면 raw_value를 null로 둔다.
-      supplier_name(메일이 업체에 연결돼 있지 않으면 필수), item_name, specification, origin, certifications, tax_terms,
+      supplier_name(메일이 업체에 연결돼 있지 않으면 필수. 연결돼 있어도 원문에 회사명이 있으면 보낸다 — 연결된 업체와
+        다른 등록 업체이면 SUPPLIER_MISMATCH), item_name, specification, origin, certifications, tax_terms,
       lead_time, delivery_date(납품·입고일), unit_price, unit, available_quantity, effective_from(적용일),
       valid_until(유효기간), currency, order_unit, quantity_per_order_unit, moq, pack_multiple,
       previous_unit_price(인상 전 단가), increase_reason(인상 사유)
@@ -883,7 +967,7 @@ PREFERRED_ORIGIN, ORIGIN_WEIGHT, HISTORY_WEIGHT = '국내산', Decimal(2), Decim
 
 # RFQ 질문. 고정 질문은 모든 업체에 묻고, 선택 질문은 LLM이 업체마다 고른다(고르지 않으면 RFQ_DEFAULT_OPTIONS).
 # 업체별로 미확인 필수 조건 질문이 더해진다
-RFQ_FIXED_QUESTIONS = ('단가와 단가 기준 단위', '요청 수량 공급 가능 여부', '요청 납기일 납품 가능 여부',
+RFQ_FIXED_QUESTIONS = ('단가와 단가 기준 단위', '공급 가능 수량과 그 단위', '요청 납기일 납품 가능 여부',
                        '운송비 부담 주체와 단가 포함 여부')
 RFQ_OPTIONAL_QUESTIONS = {'MOQ': '최소 주문 수량(MOQ)', 'VALIDITY': '견적 유효기간', 'TAX': '부가세 포함 여부',
                           'PACKING': '포장 단위와 박스당 중량', 'ORIGIN': '원산지',
@@ -1018,7 +1102,8 @@ def search_summary(result: dict, item_name: str, drafted: list[str] | None = Non
     drafted가 있으면(초안 생성 후) 실제로 초안을 만든 업체와 만들지 못한 업체로 쓴다."""
     scope = result['scope']
     if scope['searched'] == 0:
-        return f'{item_name} 취급 등록 업체가 없어 견적을 요청할 후보가 없습니다.'
+        # "등록 … 업체 … 없" 표현은 서버가 '거래처 미연결'로 잘못 읽는다(hold.py). 후보가 없다는 뜻만 쓴다
+        return f'{item_name} 취급 업체를 찾지 못해 견적을 요청할 후보가 없습니다.'
     parts = []
     for code, label in EXCLUDE_LABELS.items():
         rows = [e for e in result['excluded'] if e['code'] == code]
@@ -1188,6 +1273,9 @@ def search_supplier_evidence(supplier_item_ids: list[str], runtime: ToolRuntime[
     '''
     result = evaluate_candidates(_candidate_store, _run_context(_candidate_store, runtime), supplier_item_ids)
     result.pop('rfq_facts', None)       # 메일 문안용 값. LLM이 쓸 일이 없다
+    if result.get('status') == 'OK' and not result.get('candidates'):
+        result['next'] = ('등록 후보가 없다. create_rfq_draft를 부르지 말고 '
+                          'crawl_supplier_candidates로 웹 근거를 한 번 수집한 뒤 HOLD한다.')
     return result
 
 

@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from app.core.errors import ServiceError
 from app.core.leases import LeaseHeartbeat
-from app.features.mail.application.classification import classify_or_raise
+from app.features.mail.application.classification import classify
 from app.features.mailboxes.application.ingestion import determine_link, message_metadata
 from app.features.mailboxes.application.service import watch_result
 from app.features.mailboxes.infrastructure.google import GoogleRejected
@@ -19,12 +19,12 @@ logger = logging.getLogger('uvicorn.error.gmail_receive')
 
 
 class ClassificationNode:
-    """Team rules/prompt shared with the classification API; failures remain failures."""
+    """Use the shared classifier and route model failures to intake."""
     def __init__(self, settings):
         self.settings = settings
 
     def __call__(self, message):
-        result = classify_or_raise(JsonAgent(self.settings), message['subject'][:500], message['body_text'])
+        result = classify(JsonAgent(self.settings), message['subject'][:500], message['body_text'])
         return {'status': {'TRUE': 'BUSINESS', 'FALSE': 'NON_BUSINESS', 'PENDING': 'UNCERTAIN'}[result.status],
                 'reason': result.reason, 'source': result.source}
 
@@ -49,7 +49,7 @@ class ConnectedMailboxWorker:
         sync_id = uuid4().hex
         started = time.monotonic()
         phase = 'authorize'
-        saved = duplicates = deleted = 0
+        saved = duplicates = deleted = quarantined = 0
         logger.info('gmail sync_started sync_id=%s mode=connected', sync_id)
         try:
             with LeaseHeartbeat(lambda: self.repo.heartbeat(job)) as lease:
@@ -71,8 +71,9 @@ class ConnectedMailboxWorker:
                 except ServiceError as error:
                     if error.code != 'GMAIL_NOT_FOUND':
                         raise
-                    ids, latest = self.s.google.message_ids(grant, None)
-                    logger.warning('gmail history_reset sync_id=%s recovery=LIMITED_RECENT_MESSAGES older_history_not_replayed=true', sync_id)
+                    last_synced_at = self.repo.last_synced_at(job)
+                    ids, latest = self.s.google.recover_message_ids(grant, last_synced_at)
+                    logger.warning('gmail history_reset sync_id=%s recovery=PAGINATED_INBOX', sync_id)
                 logger.info('gmail messages_found sync_id=%s count=%d', sync_id, len(ids))
                 for message_id in ids:
                     phase = 'deduplicate'
@@ -84,14 +85,33 @@ class ConnectedMailboxWorker:
                     phase = 'read_message'
                     _, grant = self._access(job)
                     try:
-                        message = message_metadata(self.s.google.message(grant, message_id))
+                        raw = self.s.google.message(grant, message_id)
                     except ServiceError as error:
                         if error.code != 'GMAIL_NOT_FOUND':
                             raise
                         message = {'gmail_message_id': message_id, 'deleted': True}
+                        lease.check()
                         self.repo.ingest(job, message, None, {'kind': 'DELETED', 'case_id': None})
                         deleted += 1
                         logger.info('gmail message_deleted sync_id=%s', sync_id)
+                        continue
+                    if 'SENT' in (raw.get('labelIds') or []):
+                        logger.info('gmail message_skipped sync_id=%s reason=OUTBOUND', sync_id)
+                        continue
+                    phase = 'parse_message'
+                    try:
+                        message = message_metadata(raw)
+                    except ServiceError as error:
+                        if error.code != 'SOURCE_READ_FAILED':
+                            raise
+                        lease.check()
+                        self.repo.quarantine_message(job, message_id, error.code)
+                        quarantined += 1
+                        logger.warning('gmail message_quarantined sync_id=%s code=SOURCE_READ_FAILED', sync_id)
+                        continue
+                    email = row.get('email')
+                    if isinstance(email, str) and email.casefold() in message['sender']:
+                        logger.info('gmail message_skipped sync_id=%s reason=OWN_SENDER', sync_id)
                         continue
                     # Business reply evidence takes precedence over classification of short replies.
                     phase = 'classify_and_link'
@@ -125,14 +145,14 @@ class ConnectedMailboxWorker:
                 lease.check()
                 if self.repo.finish_sync(job, latest, watch) is not True:
                     raise ServiceError('SYNC_OWNERSHIP_LOST', '동기화 커서 저장을 확인할 수 없습니다.', 409)
-            logger.info('gmail sync_completed sync_id=%s saved=%d duplicates=%d deleted=%d elapsed_ms=%d',
-                        sync_id, saved, duplicates, deleted, int((time.monotonic() - started) * 1000))
+            logger.info('gmail sync_completed sync_id=%s saved=%d duplicates=%d deleted=%d quarantined=%d elapsed_ms=%d',
+                        sync_id, saved, duplicates, deleted, quarantined, int((time.monotonic() - started) * 1000))
             return True
         except Exception:
             # Failed/uncertain and no-new-mail are different. Cursor never advances here.
             logger.warning('gmail sync_failed sync_id=%s phase=%s code=GMAIL_SYNC_FAILED saved=%d',
                            sync_id, phase, saved)
-            self.repo.fail_sync(job, 'GMAIL_SYNC_FAILED')
+            self.repo.fail_sync(job, 'GMAIL_SYNC_FAILED', phase=phase)
             return True
 
     def start(self):

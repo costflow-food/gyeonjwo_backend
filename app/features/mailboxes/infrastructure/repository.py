@@ -3,7 +3,11 @@
 See docs/GOOGLE_MAILBOX_DB_CONTRACT.md; never substitute process memory for these
 transactions. Raw provider tokens and request bodies are never RPC parameters.
 """
+import logging
 from app.core.errors import ServiceError
+
+logger = logging.getLogger('uvicorn.error.gmail_receive')
+SYNC_MAX_ATTEMPTS = 5
 
 
 class MailboxRepository:
@@ -64,6 +68,14 @@ class MailboxRepository:
     def claim_sync(self):
         return self.call('claim_connected_gmail_sync')
 
+    def last_synced_at(self, job):
+        rows = (self.client.table('mail_sync_states').select('last_synced_at')
+                .eq('owner_user_id', str(job['user_id'])).eq('mailbox_ref', job['mailbox_ref'])
+                .limit(1).execute().data)
+        if not rows:
+            raise ServiceError('SYNC_OWNERSHIP_LOST', '메일함 동기화 상태를 확인할 수 없습니다.', 409)
+        return rows[0]['last_synced_at']
+
     def heartbeat(self, job):
         result = self.call('heartbeat_connected_gmail_sync', p_job_id=job['job_id'], p_claim_token=job['claim_token'])
         if result is not True:
@@ -73,8 +85,24 @@ class MailboxRepository:
         return self.call('finish_connected_gmail_sync', p_job_id=job['job_id'], p_claim_token=job['claim_token'],
                          p_connection_revision=job['connection_revision'], p_history_id=history_id, p_watch=watch)
 
-    def fail_sync(self, job, code):
-        self.call('fail_connected_gmail_sync', p_job_id=job['job_id'], p_claim_token=job['claim_token'], p_code=code)
+    def fail_sync(self, job, code, *, phase=None):
+        params = {'p_job_id': job['job_id'], 'p_claim_token': job['claim_token'], 'p_code': code}
+        if phase is not None:
+            try:
+                self.call('fail_connected_gmail_sync', **params, p_phase=phase, p_max_attempts=SYNC_MAX_ATTEMPTS)
+                return
+            except ServiceError as error:
+                if error.code != 'MAILBOX_SCHEMA_REQUIRED':
+                    raise
+                logger.warning('gmail sync retry cap unavailable code=MAILBOX_SCHEMA_REQUIRED')
+        self.call('fail_connected_gmail_sync', **params)
+
+    def quarantine_message(self, job, message_id, code):
+        result = self.call('quarantine_connected_gmail_message', p_job_id=job['job_id'],
+                           p_claim_token=job['claim_token'], p_connection_revision=job['connection_revision'],
+                           p_message_id=message_id, p_code=code)
+        if result is not True:
+            raise ServiceError('INGEST_UNAVAILABLE', '수집 실패 기록을 확인할 수 없습니다.', 503)
 
     def message_exists(self, mailbox_ref, message_id):
         return self.call('connected_gmail_message_exists', p_mailbox_ref=mailbox_ref, p_message_id=message_id) is True

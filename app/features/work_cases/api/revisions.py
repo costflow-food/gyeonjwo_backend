@@ -1,12 +1,15 @@
 """Authenticated revision requests with a single atomic persistence boundary."""
 import hashlib
 import json
+import re
 from typing import Annotated
 from uuid import UUID
+from datetime import date
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from app.core.errors import ServiceError
 from app.core.request_context import current_request_id
@@ -25,6 +28,25 @@ class ConditionsRevision(RevisionRequest):
     reason: str | None = None
     evidence_refs: list = Field(default_factory=list)
 
+    @field_validator('changes')
+    @classmethod
+    def validate_comparison_inputs(cls, changes):
+        changes = dict(changes)
+        if 'quantity' in changes:
+            value = changes['quantity']
+            if not isinstance(value, str) or not re.fullmatch(r'[0-9]{1,14}(\.[0-9]{1,6})?', value) or Decimal(value) <= 0:
+                raise ValueError('quantity must be a positive decimal string')
+        if 'unit' in changes:
+            value = changes['unit']
+            if not isinstance(value, str) or not value.strip() or len(value.strip()) > 50:
+                raise ValueError('unit must be nonblank')
+            changes['unit'] = value.strip()
+        if 'due_date' in changes and changes['due_date'] is not None:
+            value = changes['due_date']
+            if not isinstance(value, str) or date.fromisoformat(value).isoformat() != value:
+                raise ValueError('due_date must be YYYY-MM-DD')
+        return changes
+
 
 class QuoteCorrection(RevisionRequest):
     source_quote_id: UUID | None = None
@@ -39,6 +61,11 @@ class DraftRevision(RevisionRequest):
     subject: str = Field(min_length=1)
     body_text: str
     edit_reason: str = Field(min_length=1)
+
+
+class WithdrawDraft(RevisionRequest):
+    expected_snapshot_hash: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
 
 
 def submit(request, owner, target, operation, payload, key, status):
@@ -84,3 +111,9 @@ def correct_quote(quote_id: UUID, payload: QuoteCorrection, request: Request,
 def revise_draft(draft_id: UUID, payload: DraftRevision, request: Request,
                  principal=Depends(require_google_user), key: IdempotencyKey = None):
     return submit(request, principal.user_id, draft_id, 'EDIT_DRAFT', payload, key, 201)
+
+
+@router.post('/mail-drafts/{draft_id}/withdraw')
+def withdraw_draft(draft_id: UUID, payload: WithdrawDraft, request: Request,
+                   principal=Depends(require_google_user), key: IdempotencyKey = None):
+    return submit(request, principal.user_id, draft_id, 'WITHDRAW_DRAFT', payload, key, 200)

@@ -71,12 +71,15 @@ class MailManagementService:
                 attachments = row.get('attachments_jsonb') or []
                 if not isinstance(attachments, list):
                     raise ValueError('Invalid attachment metadata')
+                reason = row.get('classification_reason')
+                reason = ' '.join(reason.split())[:300] if isinstance(reason, str) else ''
                 items.append(IntakeItem(mail_id=row['id'], subject=row['subject'], sender=row['sender'],
                     received_at=iso_z(utc_time(row['sent_or_received_at'])), body_text=row['body_text'],
                     # Frontend's intake reason enum uses AMBIGUOUS here. The
                     # original API-25 still exposes the stored classification.
                     mail_classification='AMBIGUOUS' if ambiguous else 'UNCERTAIN',
-                    reason_detail=('기존 업무와의 연결을 확인해 주세요.' if ambiguous else '업무 요청인지 확인해 주세요.'),
+                    reason_detail=('기존 업무와의 연결을 확인해 주세요.' if ambiguous else
+                                   reason or '업무 요청인지 확인해 주세요.'),
                     attachments=[a['filename'] for a in attachments if isinstance(a, dict) and isinstance(a.get('filename'), str)],
                     candidates=candidates, revision=snapshot_version(mail_snapshot(row))))
             next_cursor = self.codec.encode(scope, snapshot,

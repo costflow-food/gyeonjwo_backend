@@ -1,5 +1,7 @@
 """Graph START's isolated durable queue and service-only transaction boundaries."""
 import logging
+from threading import Lock
+from time import monotonic
 
 from app.core.errors import ServiceError
 from app.features.work_cases.infrastructure.runtime_repository import CaseRuntimeRepository
@@ -16,9 +18,22 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
         super().__init__(client)
         self.review_ready = False
         self.prefer_review = True
+        self._health_lock = Lock()
+        self._health_cache = None
+
+    def read_health(self):
+        with self._health_lock:
+            if self._health_cache is None or monotonic() >= self._health_cache[0]:
+                try:
+                    result = self.call('case_graph_health')
+                except ServiceError:
+                    self._health_cache = (monotonic() + 5, None)
+                else:
+                    self._health_cache = (monotonic() + (60 if self.health_ready(result) else 5), result)
+            return self._health_cache[1]
 
     def available(self):
-        result = self.call('case_graph_health')
+        result = self.read_health()
         return self.health_ready(result)
 
     @staticmethod
@@ -31,15 +46,23 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
                 and all(isinstance(item, str) for item in result['capabilities'])
                 and required <= set(result.get('capabilities') or []))
 
-    def action(self, owner, case_id, revision, action, key, body_hash, request_id):
+    def action(self, owner, case_id, revision, action, key, body_hash, request_id, *, conditions=None):
         if action != 'START':
             return super().action(owner, case_id, revision, action, key, body_hash, request_id)
-        return self.call('submit_case_graph_start', p_owner=str(owner), p_case=str(case_id), p_revision=revision,
-                         p_key=key, p_hash=body_hash, p_request_id=request_id)
+        options = {'p_conditions': conditions} if conditions else {}
+        try:
+            return self.call('submit_case_graph_start', p_owner=str(owner), p_case=str(case_id), p_revision=revision,
+                             p_key=key, p_hash=body_hash, p_request_id=request_id, **options)
+        except ServiceError as error:
+            if not conditions or error.code != 'EXTRACTION_SCHEMA_REQUIRED':
+                raise
+            raise ServiceError('START_CONDITIONS_INTEGRATION_REQUIRED', '시작 조건 저장 기능이 아직 준비되지 않았습니다.',
+                               503, retryable=False) from None
 
     def resume_available(self):
-        # Extraction-only resume jobs must never be silently consumed as graphs.
-        return False
+        health = self.read_health()
+        return (self.health_ready(health) and 'GRAPH_RESUME' in health['capabilities']
+                and super().resume_available())
 
     def context(self, owner, case_id, revision, batch):
         try:
@@ -104,6 +127,13 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
             health = self.call('case_graph_health')
         except ServiceError:
             return result
+        if self.health_ready(health) and 'ORPHAN_RECOVERY' in health['capabilities']:
+            try:
+                count = self.call('recover_orphaned_case_graph_runs', p_limit=25)
+                if type(count) is not int or not 0 <= count <= 25:
+                    raise ValueError('Invalid recovery acknowledgement')
+            except (ServiceError, ValueError):
+                logger.warning('orphan graph recovery unavailable code=ORPHAN_RECOVERY_FAILED')
         if self.health_ready(health) and self.REVIEW_CAPABILITIES <= set(health['capabilities']):
             try:
                 for rpc in ('schedule_case_graph_replies', 'finalize_case_graph_reviews'):

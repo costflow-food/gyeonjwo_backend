@@ -3,12 +3,17 @@
 RPCs in integration_contracts/extraction_runtime.json must be implemented by the
 DB owner before enabling this feature. This adapter never installs SQL.
 """
+from threading import Lock
+from time import monotonic
+
 from app.core.errors import ServiceError
 
 
 class CaseRuntimeRepository:
     def __init__(self, client):
         self.client = client
+        self._schema_lock = Lock()
+        self._schema_cache = None
 
     def call(self, name, **params):
         try:
@@ -98,9 +103,21 @@ class CaseRuntimeRepository:
 
     def rpc_signatures_available(self, expected):
         try:
-            response = self.client.postgrest.session.get('', headers={'Accept': 'application/openapi+json'})
-            response.raise_for_status()
-            paths = response.json()['paths']
+            with self._schema_lock:
+                if self._schema_cache is None or monotonic() >= self._schema_cache[0]:
+                    try:
+                        response = self.client.postgrest.session.get('', headers={'Accept': 'application/openapi+json'})
+                        response.raise_for_status()
+                        paths = response.json()['paths']
+                        if not isinstance(paths, dict):
+                            raise ValueError('Invalid OpenAPI paths')
+                    except Exception:
+                        self._schema_cache = (monotonic() + 5, None)
+                    else:
+                        self._schema_cache = (monotonic() + 120, paths)
+                paths = self._schema_cache[1]
+            if paths is None:
+                raise ValueError('OpenAPI unavailable')
             for name, args in expected.items():
                 parameters = paths.get('/rpc/' + name, {}).get('post', {}).get('parameters', [])
                 body = next((p.get('schema', {}) for p in parameters if p.get('in') == 'body'), {})
@@ -187,11 +204,11 @@ class CaseRuntimeRepository:
             p_prompt_version=metadata.get('prompt_version') or 'agent-owned',
             p_agent_output=metadata.get('agent_output'))
 
-    def start_receipt(self, owner, case_id, revision, key):
+    def start_receipt(self, owner, case_id, revision, key, *, conditions=None):
         from app.features.work_cases.application.actions import revision_body_hash
         try:
             result = self.call('lookup_work_case_start_request', p_owner=str(owner), p_case=str(case_id),
-                               p_key=key, p_hash=revision_body_hash(revision))
+                               p_key=key, p_hash=revision_body_hash(revision, conditions))
         except ServiceError as error:
             # Optional existing Supabase lookup. Absence requires no schema
             # installation: the transactional submit RPC still owns replay.

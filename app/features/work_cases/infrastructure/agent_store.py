@@ -223,7 +223,7 @@ class AgentStore:
         self.final_output=deepcopy(output) if status=='COMPLETED' else None
         if isinstance(self.final_output, dict) and self.final_output.get('next_action') == 'HOLD':
             from app.features.work_cases.domain.hold import from_agent_output
-            self.final_output['hold'] = from_agent_output(self.final_output).model_dump()
+            self.final_output['hold'] = from_agent_output(self.final_output).for_storage()
 
 
 class ScopedStore:

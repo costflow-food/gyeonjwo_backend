@@ -17,6 +17,7 @@ class GraphStore(AgentStore):
         super().__init__(scope, job)
         self.draft_ids, self.role_runs = set(), {}
         self.documents = {}
+        self.ocr_pages = {}
         self.catalog_items, self.draft_records = {}, {}
         self.candidate_set_id = None
         self.extraction_rejections = {}
@@ -56,9 +57,30 @@ class GraphStore(AgentStore):
     def extraction_issue_mail_ids(self):
         return self.scope.mail_ids
 
-    def record_extraction_issue(self, case_id, mail_ids, issue, supplier_name):
+    def record_extraction_issue(self, case_id, agent_run_id, issue, supplier_name=None):
         self.check(case_id)
         run_id = self.active_extraction_run
+        # The deployed tool passes mail IDs and a supplier name. PR #51 passes
+        # the active run ID and a payload containing evidence references.
+        if isinstance(agent_run_id, (list, tuple)):
+            mail_ids = agent_run_id
+        else:
+            if run_id is None or str(agent_run_id) != run_id:
+                raise ServiceError('ACTION_NOT_ALLOWED', '추출 거절 근거의 범위를 확인할 수 없습니다.', 409)
+            if issue.get('code') == 'MISSING_FIELD' and issue.get('field') == 'supplier_name':
+                # The existing DB contract acknowledges supplier matching
+                # rejections only. The structured HOLD still carries MISSING_FIELD.
+                return
+            supplier_name = issue.get('supplier_name')
+            evidence = issue.get('evidence')
+            mail_ids = []
+            for ref in evidence if isinstance(evidence, list) else []:
+                evidence_id = ref.get('evidence_id') if isinstance(ref, dict) else None
+                mail_id, _, location = evidence_id.partition(':') if isinstance(evidence_id, str) else ('', '', '')
+                if not mail_id or not (location == 'body' or (location.startswith('part:') and location[5:])):
+                    raise ServiceError('ACTION_NOT_ALLOWED', '추출 거절 근거의 범위를 확인할 수 없습니다.', 409)
+                mail_ids.append(mail_id)
+            mail_ids = list(dict.fromkeys(mail_ids))
         if (run_id is None or not mail_ids or not set(mail_ids) <= set(self.extraction_issue_mail_ids())
                 or issue.get('field') != 'supplier_name'
                 or issue.get('code') not in {'SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH'}):
@@ -99,13 +121,15 @@ class GraphStore(AgentStore):
         # Failed runner payloads contain partial_tool_calls with raw mail. Drop
         # them; only validated completed role output is private persisted data.
         safe_output = deepcopy(output) if status == 'COMPLETED' else None
+        is_candidate = status == 'COMPLETED' and self.role_runs[str(agent_run_id)] == 'CANDIDATE'
+        if is_candidate:
+            snapshot = self.candidate_snapshot(str(agent_run_id), safe_output)
         if isinstance(safe_output, dict) and safe_output.get('next_action') == 'HOLD':
             from app.features.work_cases.domain.hold import from_agent_output
             safe_output['hold'] = from_agent_output(
                 safe_output, rejection_codes=self.extraction_rejections.get(str(agent_run_id), ()),
-            ).model_dump()
-        if status == 'COMPLETED' and self.role_runs[str(agent_run_id)] == 'CANDIDATE':
-            snapshot = self.candidate_snapshot(str(agent_run_id), safe_output)
+            ).for_storage()
+        if is_candidate:
             result = self.rpc('finish_case_graph_candidate_run', p_run=str(agent_run_id), p_output=safe_output,
                               p_candidate_set=snapshot.model_dump(mode='json'))
         else:
@@ -116,7 +140,7 @@ class GraphStore(AgentStore):
         if self.active_extraction_run == str(agent_run_id):
             self.active_extraction_run = None
             self.extraction_rejections.pop(str(agent_run_id), None)
-        if status == 'COMPLETED' and self.role_runs[str(agent_run_id)] == 'CANDIDATE':
+        if is_candidate:
             self.candidate_set_id = str(agent_run_id)
 
     def candidate_snapshot(self, run_id, output):
@@ -158,7 +182,8 @@ class GraphStore(AgentStore):
             if {self.draft_records[value].supplier_id for value in ids} != {str(item.supplier_id) for item in items}:
                 raise ValueError('Draft/candidate supplier mismatch')
         return CandidateSnapshot(case_id=self.scope.case_id, candidate_set_id=run_id, revision=self.scope.revision,
-            review_batch_id=self.scope.batch_id, items=items, unknown_fields=parsed.unknown_fields)
+            review_batch_id=self.scope.batch_id, items=items, unknown_fields=parsed.unknown_fields,
+            web_observations=parsed.web_observations)
 
     def get_candidate_conditions(self, case_id):
         return self.get_work_case(case_id)
@@ -298,7 +323,9 @@ class GraphStore(AgentStore):
                 or not isinstance(document.get('pages'), list) or any(not isinstance(p, str) for p in document['pages'])):
             raise ValueError('Invalid document result')
         self.documents[(str(mail_id), part)] = deepcopy(document)
-        self.pages[(str(mail_id), part)] = list(document['pages'])
+        key = (str(mail_id), part)
+        self.pages[key] = [self.ocr_pages.get((*key, page), {}).get('text', text)
+                           for page, text in enumerate(document['pages'], 1)]
         self.check_document_budget()
 
     def save_document(self, case_id, mail_id, attachment_ref, document):
@@ -337,6 +364,22 @@ class GraphStore(AgentStore):
         if not doc:
             return None
         self.cache_document(mail_id, part, doc)
-        if doc['status'] == 'READ' and type(page) is int and 1 <= page <= len(doc['pages']):
-            return {'text': doc['pages'][page - 1], 'location': f'{part}:page:{page}'}
-        return None
+        if doc['status'] not in {'READ', 'NO_TEXT'} or type(page) is not int or not 1 <= page <= len(doc['pages']):
+            return None
+        location = f'{part}:page:{page}'
+        text = doc['pages'][page - 1]
+        if text.strip():
+            return {'text': text, 'location': location}
+        key = (str(mail_id), part, page)
+        if key not in self.ocr_pages:
+            from app.features.review.infrastructure.documents import ocr_pdf_page
+            content = self.download_attachment(case_id, mail_id, part)
+            result = (ocr_pdf_page(content, page, remaining_seconds=self.scope.remaining_seconds) if content else
+                      {'status': 'FAILED', 'text': '', 'attempts': 0, 'retry_exhausted': False,
+                       'error_kind': 'SOURCE_READ_FAILED'})
+            self.ocr_pages[key] = {'text': result['text'] if result['status'] == 'READ' else '',
+                                   'location': location, 'text_source': 'OCR',
+                                   'unreadable': result['status'] != 'READ', 'attempts': result['attempts'],
+                                   'retry_exhausted': result['retry_exhausted'], 'error_kind': result['error_kind']}
+            self.cache_document(mail_id, part, doc)
+        return dict(self.ocr_pages[key])

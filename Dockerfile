@@ -3,8 +3,14 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    XDG_CONFIG_HOME=/tmp/.config \
+    XDG_CACHE_HOME=/tmp/.cache
 WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends chromium \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
@@ -16,6 +22,9 @@ ARG BUILD_REVISION=unknown
 ENV APP_BUILD_REVISION=${BUILD_REVISION}
 
 COPY --chown=app:app app ./app
+RUN python -m app.features.review.infrastructure.pdf_worker setup /app/models/ocr \
+    && chmod -R a+rX /app/models/ocr
+ENV OCR_MODEL_DIR=/app/models/ocr
 COPY --chown=app:app scripts ./scripts
 USER 10001:10001
 
