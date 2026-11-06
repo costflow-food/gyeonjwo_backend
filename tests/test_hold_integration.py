@@ -32,6 +32,8 @@ def test_supplier_rejection_records_one_scoped_rpc_and_finishes_hold(linked):
     ])
     store.read_mail_part = Mock(return_value={'text': '가나농산 주식회사', 'location': 'body'})
     store.resolve_supplier = Mock(return_value='other-supplier' if linked else None)
+    store.repo.call = Mock(side_effect=lambda name, **_: {'kind': 'RECORDED'}
+                           if name == 'record_case_graph_extraction_issue' else True)
 
     fields = [
         QuoteField(field_name='supplier_name', raw_value='가나농산 주식회사', evidence=EvidenceRef(mail_id=mail_id)),
@@ -41,11 +43,13 @@ def test_supplier_rejection_records_one_scoped_rpc_and_finishes_hold(linked):
     code = 'SUPPLIER_MISMATCH' if linked else 'SUPPLIER_NOT_MATCHED'
     assert result['rejected'] == [{'field': 'supplier_name', 'code': code}]
     if not linked:
-        assert '한 번 더' in result['next']
+        # S3-7: 법인 표기는 도구가 빼고 다시 찾는다. 그래도 없으면 다시 보내지 않고 HOLD
+        assert [c.args[1] for c in store.resolve_supplier.call_args_list] == ['가나농산 주식회사', '가나농산']
+        assert 'HOLD' in result['next'] and '다시 보내지 말고' in result['next']
     store.repo.call.assert_called_once_with(
         'record_case_graph_extraction_issue', p_job='job', p_token='claim', p_revision=1, p_run=run_id,
-        p_issue={'case_id': scope.case_id, 'mail_id': mail_id, 'batch_id': scope.batch_id,
-                 'input_revision': 1, 'code': code, 'field': 'supplier_name', 'supplier_name': '가나농산 주식회사'},
+        p_issue={'code': code, 'field': 'supplier_name', 'supplier_name': '가나농산 주식회사',
+                 'evidence': [{'evidence_id': f'{mail_id}:body', 'excerpt': '가나농산 주식회사'}]},
     )
 
     store.finish_agent_run(run_id, 'COMPLETED', {
