@@ -1,6 +1,7 @@
 """보류 사유 코드 전달 (2026-11-05 sesackt 테스트 후속): ①② HOLD 출력의 hold {code, field} (KAN-146), 업체 관련 거절 쪽지,
 ② 후보 0곳 문장, 등록 품목 연결의 띄어쓰기 기준. LLM 없이 도구·최종 검사만 확인한다."""
 import json
+from decimal import Decimal
 
 import pytest
 from agent_memory_store import MemoryStore
@@ -279,6 +280,77 @@ def test_stored_clears_hold_and_schema_rejects_mismatch():
         ExtractionOut(next_action='HOLD', reason='x', hold={'code': 'NO_QUOTE_DATA', 'field': 'unit'})
     with pytest.raises(ValueError):
         ExtractionOut(next_action='HOLD', reason='x', hold={'code': 'HOLD_REASON_UNAVAILABLE'})
+
+
+# ── ① 저장 뒤 HOLD는 STORED로 (X-42) ──
+
+def stored(quote_version_id):
+    return tool_message('store_structured_mail', {'status': 'STORED', 'quote_version_id': quote_version_id})
+
+
+def extraction_out(messages, ids=(), hold=None):
+    data = ExtractionIn(case_id=CASE, input_revision=1, mail_ids=[MAIL])
+    output = ExtractionOut(next_action='HOLD', reason='공급 물량을 확인할 수 없어 견적을 저장하지 않았습니다.',
+                           quote_version_ids=list(ids), hold=hold)
+    return check_extraction('INFO_EXTRACTOR', data, ctx(), output, messages)
+
+
+def test_hold_without_ids_after_store_becomes_stored():
+    out = extraction_out([stored('qv-1')], hold={'code': 'MISSING_FIELD', 'field': 'quantity'})
+    assert out.next_action == 'STORED' and out.quote_version_ids == ['qv-1'] and out.hold is None
+    assert out.reason == '견적을 저장했습니다. 확인이 필요한 항목은 검토 화면에서 확인해 주세요.'
+
+
+def test_hold_with_stored_ids_becomes_stored_in_store_order():
+    messages = [stored('qv-2'), stored('qv-1'), stored('qv-2')]
+    out = extraction_out(messages, ids=['qv-1'], hold={'code': 'NO_QUOTE_DATA'})
+    assert out.next_action == 'STORED' and out.quote_version_ids == ['qv-2', 'qv-1'] and out.hold is None
+
+
+def test_hold_without_store_keeps_hold():
+    out = extraction_out([rejected({'field': 'available_quantity', 'code': 'SUPPLY_QUANTITY_MISSING'})])
+    assert out.next_action == 'HOLD' and out.quote_version_ids == []
+    assert out.hold.model_dump() == {'code': 'MISSING_FIELD', 'field': 'quantity'}
+
+
+# ── ① 규격 수량은 공급 물량이 아니다 (S3-15) ──
+
+V1_BODY = ('박 대리님, 안녕하세요. 한결냉동식품 영업팀 최서윤입니다.\n'
+           ' - 냉동딸기(IQF) 특품 10kg/박스: 5,000원/kg → 5,500원/kg\n'
+           ' - 적용일: 2026년 11월 1일 납품분부터\n'
+           '최서윤 드림\n한결냉동식품 영업팀 | 031-555-0142')
+V1_FIELDS = [field('item_name', '냉동딸기(IQF)'), field('specification', '특품 10kg/박스'),
+             field('unit_price', '5,500원'), field('unit', 'kg')]
+
+
+def v1_store(store, body, message_role='INITIAL'):
+    store.add_supplier('sup-hangyeol', '한결냉동식품', 'sales@hangyeol.example')
+    store.add_mail(MAIL, CASE, body, supplier_id='sup-hangyeol', message_role=message_role)
+
+
+def test_spec_quantity_is_not_supply_quantity(store):
+    v1_store(store, V1_BODY)
+    result = save_structured_quote(store, ctx(), V1_FIELDS + [field('available_quantity', '10kg')], [], [], [])
+    assert result['status'] == 'REJECTED'
+    assert result['rejected'] == [{'field': 'available_quantity', 'code': 'SUPPLY_QUANTITY_MISSING'}]
+    assert store.work_cases[CASE]['quantity'] is None
+
+
+def test_supply_plan_quantity_sets_case_quantity(store):
+    v1_store(store, V1_BODY + '\n - 11월 공급 계획 1,000kg')
+    result = save_structured_quote(store, ctx(), V1_FIELDS + [field('available_quantity', '1,000kg')], [], [], [])
+    assert result['status'] == 'STORED'
+    assert Decimal(store.work_cases[CASE]['quantity']) == 1000 and store.work_cases[CASE]['unit'] == 'kg'
+
+
+def test_reply_supply_quantity_is_not_checked(store):
+    body = '냉동딸기(IQF) 특품 10kg/박스 5,300원/kg\n공급 가능 수량 600kg'
+    v1_store(store, body, message_role='QUOTE_REPLY')
+    fields = V1_FIELDS[:2] + [field('unit_price', '5,300원'), field('unit', 'kg'),
+                              field('available_quantity', '600kg')]
+    result = save_structured_quote(store, ctx(), fields, [], [], [])
+    assert result['status'] == 'STORED'
+    assert store.work_cases[CASE]['quantity'] is None       # 대안 업체 회신의 공급 가능량으로는 채우지 않는다
 
 
 # ── ② 보류 코드와 후보 0곳 문장 ──

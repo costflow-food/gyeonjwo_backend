@@ -321,8 +321,10 @@ _HINTS = {
     'SUPPLIER_NOT_MATCHED': '등록된 업체명과 글자가 정확히 같지 않다. 결과의 next를 따른다.',
     'SUPPLIER_MISMATCH': '메일에 연결된 업체와 업체명이 다르다. 저장하지 말고 HOLD한다.',
     'SUPPLIER_EVIDENCE_MIXED': '한 업체의 메일 근거만 남기고 다시 보낸다.',
-    'SUPPLY_QUANTITY_MISSING': '인상 통보 메일에는 공급 물량이 있어야 한다. 원문의 공급 계획·공급 물량을 단위와 함께 '
-                               'available_quantity로 다시 보낸다. 원문에 없으면 다시 보내지 않고 HOLD한다.',
+    'SUPPLY_QUANTITY_MISSING': '인상 통보 메일에는 공급 물량이 있어야 한다. 공급 계획·공급 물량·공급 가능량이라고 적힌 '
+                               '수량만 단위와 함께 available_quantity로 다시 보낸다. 규격·포장·주문 단위의 수량'
+                               '(예: 10kg/박스, 박스당 10kg, 주문 단위 10kg 박스)은 공급 물량이 아니다. '
+                               '그런 수량만 있으면 다시 보내지 말고 HOLD한다.',
     'TAX_BASIS_NOT_TAX_TERMS': 'tax_basis는 field_name이 tax_terms인 항목에만 붙인다.',
     'INSTRUCTION_NOT_NOTE': 'AI·시스템에게 하는 문장이라 비고에서 뺐다. 다시 보내지 않는다.',
 }
@@ -754,14 +756,23 @@ def _case_conditions(case: dict, current: dict, item: dict | None, initial_mails
     return conditions or None
 
 
-def _supply_quantity_missing(case: dict, source_mail: dict, values: dict) -> bool:
+def _supply_quantity_missing(case: dict, source_mail: dict, values: dict, check: _SourceCheck,
+                             refs: dict) -> bool:
     """기존 업체 인상 통보(INITIAL 메일)인데 업무 비교 수량을 정할 공급 물량·단위가 없는지 (2026-11-06 팀 결정).
     업무 수량이 비어 있을 때만 본다. 저장한 뒤에는 보류할 수 없으므로(DB가 거부) 저장 전에 거절한다.
-    단위는 공급 물량의 단위, 없으면 같은 메일의 단가 단위로 정한다(_case_conditions와 같은 기준)."""
+    단위는 공급 물량의 단위, 없으면 같은 메일의 단가 단위로 정한다(_case_conditions와 같은 기준).
+    공급 물량 값이 나온 원문 줄이 모두 규격 줄이면(예: '특품 10kg/박스'의 10kg) 공급 물량이 아니다 (S3-15)."""
     if case.get('quantity') or source_mail.get('message_role') != 'INITIAL':
         return False
     supply = values.get('available_quantity')
-    return not supply or not (supply.get('quantity_unit') or values.get('unit', {}).get('value'))
+    if not supply or not (supply.get('quantity_unit') or values.get('unit', {}).get('value')):
+        return True
+    specs = [values[name]['raw_value'] for name in ('specification', 'quantity_per_order_unit') if name in values]
+    specs += [case['specification']] if case.get('specification') else []
+    # 값이 여러 줄에 걸치면 줄을 찾지 못해(빈 목록) 통과시킨다
+    lines = check.lines(refs['available_quantity'], supply['raw_value'], numeric=True)
+    return bool(lines and specs) and all(
+        any(_contains(_normalized(line, True), _normalized(spec, True), True) for spec in specs) for line in lines)
 
 
 def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[QuoteField],
@@ -850,7 +861,7 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         return result
     # 원문 메일은 근거 메일 중 가장 최근에 받은 메일이다 (회신이 이전 메일의 값을 함께 근거로 써도 회신이 원문)
     source_mail_id = max(evidence_mails, key=lambda mail_id: (case_mails[mail_id].get('received_at') or '', mail_id))
-    if _supply_quantity_missing(case, case_mails[source_mail_id], values):
+    if _supply_quantity_missing(case, case_mails[source_mail_id], values, check, refs):
         missing = {'field': 'available_quantity', 'code': 'SUPPLY_QUANTITY_MISSING'}
         return _with_hints({'status': 'REJECTED', 'rejected': [missing]}, [missing])
     if check.instruction_mails & evidence_mails:
