@@ -801,14 +801,16 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
     case_item = case.get('item_name')
     if case_item and 'item_name' in values and _compact(values['item_name']['value']) != _compact(case_item):
         review.append({'field': 'item_name', 'code': 'ITEM_NAME_VARIANT'})
-    if rejected:
-        return _with_hints({'status': 'REJECTED', 'rejected': rejected}, rejected)
-
     # 이번 호출의 모든 근거는 한 업체의 메일이어야 한다
     case_mails = {mail['mail_id']: mail for mail in _read(lambda: store.list_case_mails(case_id))}
     evidence_mails = {entry['mail_id'] for entry in [*values.values(), *tiers, *costs, *notes]}
     supplier_name = values['supplier_name']['value'] if 'supplier_name' in values else None
     supplier_id, issue = _quote_supplier(store, case_id, case_mails, evidence_mails, supplier_name)
+    # 원문 근거가 확인된 업체명이 등록 거래처와 맞지 않으면(미등록·연결 업체와 다름) 다른 항목의 거절보다 먼저 알린다.
+    # 다른 항목을 고쳐도 저장할 수 없는 견적이라, 다시 보내기를 다른 항목에 쓰고 원인을 잃지 않게 한다
+    # (2026-11-06 실제 LLM 재현: 규격 근거 거절로 두 번 다시 보내고 SUPPLIER_MISMATCH에 닿지 못함)
+    if rejected and not (supplier_name and issue and issue['code'] in ('SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH')):
+        return _with_hints({'status': 'REJECTED', 'rejected': rejected}, rejected)
     if issue:
         if issue['code'] in SUPPLIER_ISSUE_CODES:
             _record_supplier_issue(store, context, issue, values.get('supplier_name'), refs.get('supplier_name'), check)
@@ -912,7 +914,8 @@ def store_structured_mail(fields: list[QuoteField], runtime: ToolRuntime[RunCont
 
     입력: 모든 값은 원문에 적힌 그대로, 근거 evidence{mail_id, part('body' 또는 attachment_ref), page, cell}와 함께 준다.
     fields: field_name과 raw_value. 원문에서 찾았지만 값이 없으면 raw_value를 null로 둔다.
-      supplier_name(메일이 업체에 연결돼 있지 않으면 필수), item_name, specification, origin, certifications, tax_terms,
+      supplier_name(메일이 업체에 연결돼 있지 않으면 필수. 연결돼 있어도 원문에 회사명이 있으면 보낸다 — 연결된 업체와
+        다른 등록 업체이면 SUPPLIER_MISMATCH), item_name, specification, origin, certifications, tax_terms,
       lead_time, delivery_date(납품·입고일), unit_price, unit, available_quantity, effective_from(적용일),
       valid_until(유효기간), currency, order_unit, quantity_per_order_unit, moq, pack_multiple,
       previous_unit_price(인상 전 단가), increase_reason(인상 사유)

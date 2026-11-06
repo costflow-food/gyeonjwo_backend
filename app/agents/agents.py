@@ -50,8 +50,10 @@ PROMPTS = {
    - 단가가 없다 ("추후 안내", "견적서 송부 예정", 접수 안내, 읽을 수 없는 스캔 첨부만 있음)
    - 업무 품목이 아닌 다른 품목의 견적만 있다 (예: 업무가 냉동 딸기인데 냉동 블루베리 견적만 있음)
    업무 품목이 비어 있으면(null) 메일의 품목을 업무 품목으로 본다.
-2. 업체: 메일 목록에 supplier_id가 있는 메일은 업체가 이미 정해져 있다. 이때는 supplier_name을 fields에 아예 넣지 않는다
-   (null로도 넣지 않는다). supplier_id가 없는 메일만 원문의 회사명을 supplier_name으로 보낸다.
+2. 업체: 원문(본문·첨부)에 견적을 보낸 회사명이 있으면 메일에 업체가 연결돼 있든(supplier_id 있음) 없든
+   그 회사명을 supplier_name으로 보낸다. 도구가 연결된 업체와 같은지 대조한다.
+   supplier_id가 있는 메일인데 원문에 회사명이 없으면 supplier_name을 보내지 않는다(null로도 넣지 않는다).
+   우리 회사(수신처, 예: "수신 (주)트루나스")나 발신 주소·도메인에서 지은 이름은 회사명이 아니다.
 3. store_structured_mail이 한 번이라도 STORED를 돌려주면 next_action은 STORED다. 그 quote_version_id를 넣는다.
    unknown_fields·review·NEEDS_REVIEW·UNIT_MISSING이 있어도 저장은 끝났다. reason에 적을 뿐 HOLD 사유가 아니다.
 4. REJECTED는 전체 실패가 아니다. rejected에 나온 항목만 고치거나 빼고, 나머지 fields·cost_terms·price_tiers·item_notes는
@@ -85,7 +87,7 @@ PROMPTS = {
      주식회사·(주)·㈜·유한회사 같은 법인 표기도 뺀다. 거래처는 법인 표기 없이 등록되어 있다
      (예: 공문 머리글 "동해프레시 주식회사" → "동해프레시", "(주)청솔농산" → "청솔농산", "㈜다온푸드" → "다온푸드").
      본문과 첨부에 회사명이 여러 표기로 있으면 법인 표기가 없는 표기를 고른다.
-     처음 보낼 때부터 이렇게 찾아 넣는다.
+     처음 보낼 때부터 이렇게 찾아 넣는다(업체가 연결된 메일도 같은 방법으로 회사명을 찾아 넣는다).
      원문 어디에도 회사명이 없을 때만 HOLD한다.
    - SUPPLIER_NOT_MATCHED: 결과의 next를 따른다. 보낸 업체명에 법인 표기(주식회사·(주)·㈜ 등)나 부서·직책이
      붙어 있었을 때만 그 표기를 빼고 한 번 다시 보낸다. 회사명만 보냈으면 다시 보내지 않고 바로 HOLD한다.
@@ -133,7 +135,7 @@ PROMPTS = {
       표·시트의 셀(예: "A5: 운송비", "B5: 무료")은 값 셀을 그대로 옮기고 셀 위치를 evidence.cell에 적는다
         → cost_terms {cost_type SHIPPING, source_text "무료", amount "무료"}, evidence.cell "B5"
 - cost_terms의 source_text·amount·basis·payer도 원문 그대로다. 번역하거나 바꿔 쓰지 않는다(예: payer "귀사 부담").
-- 메일 목록에 supplier_id가 있는 메일은 업체가 정해져 있다. 본문에 업체명이 없으면 supplier_name을 보내지 않고,
+- 메일 목록에 supplier_id가 있는 메일은 업체가 연결돼 있다. 원문에 업체명이 없으면 supplier_name을 보내지 않고,
   업체명이 없다는 이유로 unknown_fields에 넣거나 HOLD하지 않는다.
 
 값 규칙:
