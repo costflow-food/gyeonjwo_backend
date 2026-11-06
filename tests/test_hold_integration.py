@@ -32,6 +32,7 @@ def test_supplier_rejection_records_one_scoped_rpc_and_finishes_hold(linked):
     ])
     store.read_mail_part = Mock(return_value={'text': '가나농산 주식회사', 'location': 'body'})
     store.resolve_supplier = Mock(return_value='other-supplier' if linked else None)
+    store.repo.call.side_effect = lambda name, **_: {'kind': 'RECORDED'} if name == 'record_case_graph_extraction_issue' else True
 
     fields = [
         QuoteField(field_name='supplier_name', raw_value='가나농산 주식회사', evidence=EvidenceRef(mail_id=mail_id)),
@@ -44,8 +45,8 @@ def test_supplier_rejection_records_one_scoped_rpc_and_finishes_hold(linked):
         assert '한 번 더' in result['next']
     store.repo.call.assert_called_once_with(
         'record_case_graph_extraction_issue', p_job='job', p_token='claim', p_revision=1, p_run=run_id,
-        p_issue={'case_id': scope.case_id, 'mail_id': mail_id, 'batch_id': scope.batch_id,
-                 'input_revision': 1, 'code': code, 'field': 'supplier_name', 'supplier_name': '가나농산 주식회사'},
+        p_issue={'code': code, 'field': 'supplier_name', 'supplier_name': '가나농산 주식회사',
+                 'evidence': [{'evidence_id': f'{mail_id}:body', 'excerpt': '가나농산 주식회사'}]},
     )
 
     store.finish_agent_run(run_id, 'COMPLETED', {

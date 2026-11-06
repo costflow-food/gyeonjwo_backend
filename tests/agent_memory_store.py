@@ -106,11 +106,10 @@ class MemoryStore:
         return [{key: row.get(key) for key in ('id', 'item_name', 'specification', 'unit', 'standardized_item_key')}
                 for row in self.supplier_items.values() if row['supplier_id'] == supplier_id]
 
-    def record_extraction_issue(self, case_id, mail_ids, issue, supplier_name):
-        """업체 미등록·불일치 거절 근거. dev_1.0(BE 통합 7ce9a2a) 형식: 메일 ID와 업체명만 넘긴다(원문 발췌 없음).
-        실서버는 GraphStore가 메일마다 record_case_graph_extraction_issue RPC로 기록한다."""
-        self.extraction_issues.append({'case_id': case_id, 'mail_ids': list(mail_ids), **issue,
-                                       'supplier_name': supplier_name})
+    def record_extraction_issue(self, case_id, agent_run_id, issue):
+        """업체 미등록·불일치 거절 근거. issue는 DB 계약 {code, field, supplier_name, evidence:[{evidence_id, excerpt}]}.
+        실서버는 GraphStore가 record_case_graph_extraction_issue RPC 한 번으로 기록한다."""
+        self.extraction_issues.append({'case_id': case_id, 'agent_run_id': agent_run_id, **issue})
 
     def latest_quote_version(self, case_id, supplier_id):
         rows = [(qid, row) for qid, row in self.quote_versions.items()

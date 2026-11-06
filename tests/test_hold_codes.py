@@ -37,7 +37,7 @@ FIELDS = [field('supplier_name', '동해프레시'), field('item_name', '냉동�
 def store():
     getattr(tools, "_RUN_SUPPLIER_ISSUES", {}).clear()
     memory = MemoryStore()
-    memory.add_case(CASE)
+    memory.add_case(CASE, quantity='1000', unit='kg')   # 업무 수량이 정해진 업무 (공급 물량 보류와 분리)
     memory.add_mail(MAIL, CASE, BODY, supplier_id=None)      # 발신 주소로 업체가 연결되지 않은 메일
     tools.use_case_store(memory)
     tools.use_quote_store(memory)
@@ -50,12 +50,13 @@ def tool_message(name, result):
     return ToolMessage(content=json.dumps(result, ensure_ascii=False), name=name, tool_call_id=f'call-{name}')
 
 
-# ── 등록 품목 연결: 띄어쓰기만 무시 ──
+# ── 등록 품목 연결: DB와 같은 기준 (앞뒤 공백·연속 공백·대소문자만 무시) ──
 
-def test_registered_item_ignores_spaces_only():
+def test_registered_item_matches_db_item_key():
     items = [{'id': 'si-1', 'item_name': '냉동딸기 (IQF)', 'specification': '특품 10kg 박스'}]
-    assert _registered_item(items, {'item_name': {'value': '냉동딸기(IQF)'}})['id'] == 'si-1'
-    assert _registered_item(items, {'item_name': {'value': '냉동딸기(iqf)'}})['id'] == 'si-1'
+    assert _registered_item(items, {'item_name': {'value': ' 냉동딸기  (iqf) '}})['id'] == 'si-1'
+    # 띄어쓰기가 다르면 DB가 다른 품목으로 보고 저장을 거부한다(QUOTE_ITEM_IDENTITY_MISMATCH)
+    assert _registered_item(items, {'item_name': {'value': '냉동딸기(IQF)'}}) is None
     # 이름이 포함되는 정도로는 연결하지 않는다 (DB가 다른 품목으로 보고 저장을 거부한다)
     assert _registered_item(items, {'item_name': {'value': '냉동딸기'}}) is None
 
@@ -68,7 +69,8 @@ def test_unregistered_supplier_records_issue(store):
     assert result['rejected'][0]['code'] == 'SUPPLIER_NOT_MATCHED'
     [issue] = store.extraction_issues
     assert issue['code'] == 'SUPPLIER_NOT_MATCHED' and issue['field'] == 'supplier_name'
-    assert issue['supplier_name'] == '동해프레시' and issue['mail_ids'] == [MAIL]   # dev_1.0: 메일 ID로 기록
+    assert issue['supplier_name'] == '동해프레시' and issue['agent_run_id'] == 'run-1'
+    assert issue['evidence'] == [{'evidence_id': f'{MAIL}:body', 'excerpt': '박 대리님, 안녕하세요. 동해프레시 한도윤입니다.'}]
 
 
 def test_registered_supplier_stores_without_issue(store):
@@ -78,13 +80,13 @@ def test_registered_supplier_stores_without_issue(store):
     assert store.extraction_issues == []
 
 
-def test_issue_recording_failure_propagates_in_dev(store):
-    # dev_1.0(BE 통합 7ce9a2a): 기록 실패는 도구 밖으로 나간다(PR 51 원래 설계는 삼키고 거절 결과 유지). BE 확인 대상
+def test_issue_recording_failure_keeps_rejection(store):
+    # 2069e2a: 기록이 실패해도 거절과 다음 행동 안내를 돌려준다(올리면 ① 실행 전체가 FAILED로 끝난다)
     def refuse(*args):
         raise RuntimeError('SUPPLIER_MATCH_AVAILABLE')
     store.record_extraction_issue = refuse
-    with pytest.raises(RuntimeError):
-        save_structured_quote(store, ctx(), FIELDS, [], [], [])
+    result = save_structured_quote(store, ctx(), FIELDS, [], [], [])
+    assert result['rejected'][0]['code'] == 'SUPPLIER_NOT_MATCHED' and 'next' in result
 
 
 def test_not_matched_next_says_hold_for_bare_name(store):
@@ -326,6 +328,7 @@ V1_FIELDS = [field('item_name', '냉동딸기(IQF)'), field('specification', '�
 def v1_store(store, body, message_role='INITIAL'):
     store.add_supplier('sup-hangyeol', '한결냉동식품', 'sales@hangyeol.example')
     store.add_mail(MAIL, CASE, body, supplier_id='sup-hangyeol', message_role=message_role)
+    store.work_cases[CASE].update(quantity=None, unit=None)    # 업무 수량을 공급 물량으로 정해야 하는 업무
 
 
 def test_spec_quantity_is_not_supply_quantity(store):
