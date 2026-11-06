@@ -1,38 +1,20 @@
 """API-14: stored review card -> frontend card shape.
 
-The card stored by the graph may be the current agent shape (plans without plan_id,
-allocations with quote_version_id only) or the agreed shape (plan_id, supplier_name,
-unit, unit_price, review_outcome attached at save time). Missing values are filled
-here from quote_versions/suppliers so either shape renders. Remove the fill-in once
-the save shape is fixed with the DB review functions.
+The card is written by the DB reply review (commit_reply_review) after review_card_check:
+plans carry plan_id from the RESPONSE_PLAN output, and review_outcome/closure_reason are
+fixed by the DB. Allocations hold quote_version_id only, so supplier names, unit and
+unit price are filled here from suppliers/quote_versions.
 """
 from app.core.errors import ServiceError
 from app.features.work_cases.domain.quotes import decimal_text
-from app.features.work_cases.domain.review_card import REVIEW_ACTIONS, REVIEW_OUTCOMES, ReviewCardResponse
+from app.features.work_cases.domain.review_card import REVIEW_ACTIONS, ReviewCardResponse
 
 UNKNOWN_SUPPLIER = '이름 미확인 업체'
 CLOSED_DECISIONS = {'CONFIRM_REVIEW', 'ACCEPT_INCREASE'}
 
 
-def review_outcome(card):
-    """저장된 결과 값이 합의 값이면 그대로, 아니면 구매안 유무로 정한다.
-    구매안이 하나라도 있으면 OPTIONS_READY(역제안 보류는 counter_offer로만 보인다).
-    구매안이 없으면 확인 항목·미확인 사유가 있을 때 NEEDS_INFO, 없으면 NO_FEASIBLE_PLAN."""
-    stored = card.get('review_outcome')
-    if stored in REVIEW_OUTCOMES:
-        return stored
-    if card.get('plans'):
-        return 'OPTIONS_READY'
-    return 'NEEDS_INFO' if card.get('questions') or card.get('unresolved') else 'NO_FEASIBLE_PLAN'
-
-
-def plan_id(card_plan, review_revision, index):
-    """카드에 plan_id가 없으면 '회차-순번'으로 만든다. 같은 카드에서는 항상 같은 값이다."""
-    return card_plan.get('plan_id') or f'plan-{review_revision}-{index + 1}'
-
-
-def review_actions(case, plans, is_stale):
-    """허용·비활성 판단 동작. 최신 카드이고 업무가 검토 완료 상태일 때만 판단할 수 있다."""
+def review_actions(case, plans, is_stale, changes_ready):
+    """허용·비활성 판단 동작. 최신 카드이고 업무가 검토 완료 상태이며 판단 저장(API-15) 함수가 배포됐을 때만 판단할 수 있다."""
     decision = case.get('decision')
     if case.get('archived_at') or case.get('accepted_at') or decision in CLOSED_DECISIONS:
         return [], []
@@ -43,8 +25,11 @@ def review_actions(case, plans, is_stale):
     if case.get('status') != 'Complete':
         return [], [{'action': action, 'reason_code': 'REVIEW_NOT_CURRENT',
                      'message': '검토가 진행 중이거나 보류된 업무입니다.'} for action in REVIEW_ACTIONS]
+    if not changes_ready:
+        return [], [{'action': action, 'reason_code': 'CASE_CHANGE_INTEGRATION_REQUIRED',
+                     'message': '업무 변경 기능이 아직 준비되지 않았습니다.'} for action in REVIEW_ACTIONS]
     allowed, disabled = [], []
-    if any(plan['validation_status'] == 'VALID' for plan in plans):
+    if any(plan['validation_status'] == 'VALID' and plan['plan_id'] for plan in plans):
         allowed.append('SELECT_PLAN')
     else:
         disabled.append({'action': 'SELECT_PLAN', 'reason_code': 'NO_SELECTABLE_PLAN',
@@ -69,21 +54,21 @@ class ReviewCardService:
     def __init__(self, repo):
         self.repo = repo
 
-    def get(self, owner, case_id):
-        """업무의 최신 검토 카드. 카드가 없으면 404 REVIEW_NOT_READY."""
+    def get(self, owner, case_id, changes_ready=False):
+        """업무의 최신 검토 카드. 카드가 없으면 404 REVIEW_NOT_READY. changes_ready는 판단 저장 함수 배포 여부."""
         case = self.repo.case(owner, case_id)
         card = case.get('latest_review_jsonb')
         if card is None:
             raise ServiceError('REVIEW_NOT_READY', '검토 카드가 아직 준비되지 않았습니다.', 404)
         try:
-            return self.build(owner, case, card)
+            return self.build(owner, case, card, changes_ready)
         except ServiceError:
             raise
         except (ValueError, KeyError, TypeError, AttributeError):
             raise ServiceError('PROCESSING_UNAVAILABLE', '저장된 검토 카드 형식을 확인할 수 없습니다.', 503) from None
 
-    def build(self, owner, case, card):
-        """저장된 카드에 업체 이름·단가·plan_id·판단·동작을 채워 응답으로 만든다."""
+    def build(self, owner, case, card, changes_ready=False):
+        """저장된 카드에 업체 이름·단가·판단·동작을 채워 응답으로 만든다."""
         if not isinstance(card, dict):
             raise ValueError('Invalid card')
         plans = card.get('plans') or []
@@ -110,12 +95,12 @@ class ReviewCardService:
                     'unit': item.get('unit') or quote.get('unit'),
                     'unit_price': decimal_text(item.get('unit_price') or quote.get('unit_price'))}
 
-        response_plans = [{'plan_id': plan_id(plan, revision, index), 'plan_type': plan['plan_type'],
+        response_plans = [{'plan_id': plan.get('plan_id'), 'plan_type': plan['plan_type'],
                            'validation_status': plan.get('validation_status') or 'VALID',
                            'total_amount': decimal_text(plan.get('total_amount')), 'currency': plan.get('currency') or 'KRW',
                            'allocations': [allocation(item) for item in plan['allocations']],
                            'conditions': plan.get('conditions') or [], 'adjustments': plan.get('adjustments') or [],
-                           'reason': plan.get('reason')} for index, plan in enumerate(plans)]
+                           'reason': plan.get('reason')} for plan in plans]
         response_counter = None
         if counter:
             target, reference = counter.get('target'), counter.get('reference')
@@ -131,12 +116,13 @@ class ReviewCardService:
                               'allowed_range': [decimal_text(value) for value in reference.get('allowed_range') or []]}
                 if reference else None}
         is_stale = card['input_revision'] < case['input_revision']
-        allowed, disabled = review_actions(case, response_plans, is_stale)
+        allowed, disabled = review_actions(case, response_plans, is_stale, changes_ready)
         return ReviewCardResponse(
             case_id=case['id'], review_revision=revision, input_revision=card['input_revision'], is_stale=is_stale,
             created_at=card.get('created_at'),
             source_quote_ids=card.get('source_quote_ids') or card.get('quote_version_ids') or [],
-            review_outcome=review_outcome(card), plans=response_plans, counter_offer=response_counter,
+            review_outcome=card['review_outcome'], closure_reason=card.get('closure_reason'),
+            plans=response_plans, counter_offer=response_counter,
             questions=[{'supplier_id': q['supplier_id'], 'supplier_name': name(q['supplier_id'], q.get('supplier_name')),
                         'field': q['field'], 'priority': q['priority'], 'reason': q['reason'],
                         'break_even_amount': decimal_text(q.get('break_even_amount')), 'formula': q.get('formula')}

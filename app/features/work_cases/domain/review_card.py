@@ -4,8 +4,8 @@ from uuid import UUID
 from pydantic import Field
 from app.shared.domain.schemas import StrictModel
 
-ReviewOutcome = Literal['OPTIONS_READY', 'NO_FEASIBLE_PLAN', 'NEEDS_INFO', 'ON_HOLD']
-REVIEW_OUTCOMES = frozenset(ReviewOutcome.__args__)
+# DB(review_card_check)가 카드 저장 때 정해 강제하는 종료 코드를 그대로 보낸다 (2026-11-06 결정)
+ReviewOutcome = Literal['COMPLETED', 'REVIEW_REQUIRED_CLOSED', 'NO_VALID_PLAN']
 REVIEW_ACTIONS = ('SELECT_PLAN', 'HOLD', 'CONFIRM_REVIEW')
 
 
@@ -19,7 +19,7 @@ class PlanAllocation(StrictModel):
 
 
 class ReviewPlan(StrictModel):
-    plan_id: str
+    plan_id: str | None = None   # 없으면 선택할 수 없는 안 (예전 형식 카드)
     plan_type: Literal['KEEP', 'SWITCH', 'SPLIT']
     validation_status: Literal['VALID', 'CONDITIONAL', 'INVALID', 'NEEDS_INFO']
     total_amount: str | None = None
@@ -86,6 +86,7 @@ class ReviewCardResponse(StrictModel):
     created_at: str | None = None
     source_quote_ids: list[UUID] = Field(default_factory=list)
     review_outcome: ReviewOutcome
+    closure_reason: str | None = None   # REVIEW_REQUIRED_CLOSED의 종료 사유
     plans: list[ReviewPlan] = Field(default_factory=list)
     counter_offer: CounterOffer | None = None
     questions: list[ReviewQuestion] = Field(default_factory=list)

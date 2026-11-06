@@ -1,39 +1,41 @@
 {
-  "contract_version": 1,
-  "date": "2026-11-05",
+  "contract_version": 2,
+  "date": "2026-11-06",
   "api": "API-14 GET /api/v1/work-cases/{case_id}/review-card",
   "status": "BACKEND_IMPLEMENTED_READ_ONLY",
   "auth": "Google-login bearer (require_google_user). Read only: no agent run, no mail, no DB write.",
   "owner_scope": "work_cases, quote_versions and suppliers are filtered by the caller's owner_user_id. A missing or another user's case returns the same 404 RESOURCE_NOT_FOUND.",
-  "source": "work_cases.latest_review_jsonb (card), work_cases.review_revision, input_revision, status, decision, selected_plan_id, selected_plan_jsonb, selected_at, archived_at, accepted_at.",
+  "source": "work_cases.latest_review_jsonb written by DB commit_reply_review after review_card_check (migration kan172), work_cases.review_revision, input_revision, status, decision, selected_plan_id, selected_plan_jsonb, selected_at, archived_at, accepted_at.",
   "response": [
-    "case_id, review_revision, input_revision (card's), is_stale, created_at (card's; null if not stored), source_quote_ids[]",
-    "review_outcome: OPTIONS_READY / NO_FEASIBLE_PLAN / NEEDS_INFO / ON_HOLD",
-    "plans[]{plan_id, plan_type, validation_status, total_amount, currency, allocations[]{supplier_id, supplier_name, quote_id, quantity, unit, unit_price}, conditions[], adjustments[], reason}",
+    "case_id, review_revision, input_revision (card's), is_stale, created_at (not stored by the DB: null), source_quote_ids[]",
+    "review_outcome: COMPLETED / REVIEW_REQUIRED_CLOSED / NO_VALID_PLAN (stored value as is), closure_reason (string for REVIEW_REQUIRED_CLOSED, else null)",
+    "plans[]{plan_id (null on a card without one: not selectable), plan_type, validation_status, total_amount, currency, allocations[]{supplier_id, supplier_name, quote_id, quantity, unit, unit_price}, conditions[], adjustments[], reason}",
     "counter_offer{status, reason, target{supplier_id, supplier_name, target_unit_price, conditions[]} or null, reference{status, unit, requested_unit_price, previous_unit_price, ceiling_unit_price, alternative_total, allowed_range[]} or null, draft_ids[]} or null",
     "questions[]{supplier_id, supplier_name, field, priority, reason, break_even_amount, formula}",
     "unresolved[], decision{decision, plan_id, note, decided_at} or null, allowed_actions[], disabled_actions[]{action, reason_code, message}"
   ],
   "numbers": "Amounts, quantities and unit prices are Decimal strings without trailing zeros or exponent.",
-  "decisions_2026_11_05": {
-    "review_outcome": "A stored agreed value is returned as is. Otherwise: any plan -> OPTIONS_READY (a held counter-offer shows only in counter_offer.status); no plan -> NEEDS_INFO when questions or unresolved exist, else NO_FEASIBLE_PLAN.",
-    "cards_without_plans": "Accepted (plans: []); the graph will store them for role 3/4 HOLD.",
-    "question_priority": "Agent values MUST_CONFIRM / CAN_CHANGE_CHOICE / LOW_VALUE are passed through; the frontend maps labels."
-  },
-  "stored_shape_compatibility": "Either the current agent shape (no plan_id; allocations with quote_version_id only; old review_outcome COMPLETED/REVIEW_REQUIRED_CLOSED) or the agreed shape (plan_id, supplier_name, unit, unit_price, review_outcome, created_at fixed at save time). Missing values are filled at read time: plan_id = plan-{review_revision}-{index}, names from suppliers, unit/unit_price from the referenced quote. Remove the fill-in once the save shape is fixed with the DB review functions.",
+  "stored_shape_compatibility": "Allocations hold supplier_id, quote_version_id and quantity only, so supplier_name comes from suppliers and unit/unit_price from the referenced quote. A stored supplier_name/unit/unit_price is kept as is.",
   "is_stale": "card.input_revision < work_cases.input_revision.",
   "actions": {
     "closed": "archived, accepted, or decision CONFIRM_REVIEW/ACCEPT_INCREASE: allowed [] and disabled [].",
     "stale": "All of SELECT_PLAN, HOLD, CONFIRM_REVIEW disabled with REVIEW_STALE.",
-    "not_complete": "Case status other than Complete (e.g. ON_HOLD card without plans, review running): all disabled with REVIEW_NOT_CURRENT.",
-    "complete": "SELECT_PLAN when at least one VALID plan (else disabled NO_SELECTABLE_PLAN); HOLD unless the decision is already HOLD; CONFIRM_REVIEW.",
-    "pending_agreement": "Default rules follow the frontend preview; confirm with frontend. Saving decisions is API-15 (separate ticket)."
+    "not_complete": "Case status other than Complete (review running, or a counter-offer draft still waiting: the card is not committed yet so the API returns REVIEW_NOT_READY): all disabled with REVIEW_NOT_CURRENT.",
+    "complete": "SELECT_PLAN when at least one VALID plan with a plan_id (else disabled NO_SELECTABLE_PLAN); HOLD unless the decision is already HOLD; CONFIRM_REVIEW.",
+    "pending_agreement": "Default rules follow the frontend preview; confirm with frontend. Saving decisions is API-15 (separate ticket).",
+    "not_ready": "API-15 change functions (lookup_work_case_change_request, submit_work_case_change) not deployed: all of SELECT_PLAN, HOLD, CONFIRM_REVIEW disabled with CASE_CHANGE_INTEGRATION_REQUIRED (same check as the list and detail views)."
   },
   "decision": "decision from work_cases.decision; plan_id from selected_plan_id; note from selected_plan_jsonb.note; decided_at from selected_at (null for HOLD/CONFIRM until API-15 defines its storage).",
   "errors": {
     "RESOURCE_NOT_FOUND": "404: case missing or outside the owner scope",
     "REVIEW_NOT_READY": "404: the case has no stored card",
-    "PROCESSING_UNAVAILABLE": "503: storage unavailable or the stored card shape is invalid",
+    "PROCESSING_UNAVAILABLE": "503: storage unavailable or the stored card shape is invalid (including a review_outcome the DB does not store)",
     "AUTH_REQUIRED": "401: missing or invalid login token"
+  },
+  "decisions_2026_11_06": {
+    "review_outcome": "Return the DB value unchanged. The DB derives it: REVIEW_REQUIRED_CLOSED when the counter-offer is HOLD or any plan is CONDITIONAL (closure_reason required), else COMPLETED. The frontend already shows both codes; Notion 08 is to follow the 06 closure codes.",
+    "cards_without_plans": "Not stored: review_card_check needs 1-5 plans. A role 3/4 HOLD ends the review as Pending/ON_HOLD without a card.",
+    "plan_id": "Set by the RESPONSE_PLAN final check (P1, P2, ...). API-15 SELECT_PLAN finds the plan by this ID in that run output, so it is never invented at read time.",
+    "question_priority": "Agent values MUST_CONFIRM / CAN_CHANGE_CHOICE / LOW_VALUE are passed through; the frontend maps labels."
   }
 }
