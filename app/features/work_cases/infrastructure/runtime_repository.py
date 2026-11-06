@@ -108,16 +108,18 @@ class CaseRuntimeRepository:
                     try:
                         response = self.client.postgrest.session.get('', headers={'Accept': 'application/openapi+json'})
                         response.raise_for_status()
-                        paths = response.json()['paths']
+                        schema = response.json()
+                        paths = schema['paths']
                         if not isinstance(paths, dict):
                             raise ValueError('Invalid OpenAPI paths')
                     except Exception:
                         self._schema_cache = (monotonic() + 5, None)
                     else:
-                        self._schema_cache = (monotonic() + 120, paths)
-                paths = self._schema_cache[1]
-            if paths is None:
+                        self._schema_cache = (monotonic() + 120, schema)
+                schema = self._schema_cache[1]
+            if schema is None:
                 raise ValueError('OpenAPI unavailable')
+            paths = schema['paths']
             for name, args in expected.items():
                 parameters = paths.get('/rpc/' + name, {}).get('post', {}).get('parameters', [])
                 body = next((p.get('schema', {}) for p in parameters if p.get('in') == 'body'), {})
@@ -126,6 +128,14 @@ class CaseRuntimeRepository:
             return True
         except Exception:
             raise ServiceError('PROCESSING_UNAVAILABLE', '재개 저장소의 연결 상태를 확인할 수 없습니다.', 503) from None
+
+    def cached_column_missing(self, table, column):
+        cached = self._schema_cache
+        if cached is None or cached[1] is None or monotonic() >= cached[0]:
+            return False
+        schema = cached[1]
+        properties = (schema.get('definitions') or {}).get(table, {}).get('properties')
+        return isinstance(properties, dict) and bool(properties) and column not in properties
 
     def resume_receipt(self, owner, case_id, revision, reason, key):
         from app.features.work_cases.application.actions import resume_body_hash
