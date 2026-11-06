@@ -989,7 +989,9 @@ PREFERRED_ORIGIN, ORIGIN_WEIGHT, HISTORY_WEIGHT = '국내산', Decimal(2), Decim
 
 # RFQ 질문. 고정 질문은 모든 업체에 묻고, 선택 질문은 LLM이 업체마다 고른다(고르지 않으면 RFQ_DEFAULT_OPTIONS).
 # 업체별로 미확인 필수 조건 질문이 더해진다
-RFQ_FIXED_QUESTIONS = ('단가와 단가 기준 단위', '공급 가능 수량과 그 단위', '요청 납기일 납품 가능 여부',
+RFQ_DUE_QUESTION = '요청 납기일 납품 가능 여부'
+RFQ_NO_DUE_QUESTION = '납품 가능 일정(발주 후 납품까지 걸리는 기간)'    # 업무 납기일이 없을 때 대신 묻는다
+RFQ_FIXED_QUESTIONS = ('단가와 단가 기준 단위', '공급 가능 수량과 그 단위', RFQ_DUE_QUESTION,
                        '운송비 부담 주체와 단가 포함 여부')
 RFQ_OPTIONAL_QUESTIONS = {'MOQ': '최소 주문 수량(MOQ)', 'VALIDITY': '견적 유효기간', 'TAX': '부가세 포함 여부',
                           'PACKING': '포장 단위와 박스당 중량', 'ORIGIN': '원산지',
@@ -1099,11 +1101,13 @@ def _preferences(rows: dict[str, dict], purchases: dict[str, dict]) -> dict[str,
     return result
 
 
-def _questions(checks: list[dict], options: list[str] | None = None) -> list[str]:
-    """업체 한 곳의 RFQ 질문 목록. 고정 질문, 고른 선택 질문(없으면 기본 선택), 미확인 필수 조건 질문 순서다."""
+def _questions(checks: list[dict], options: list[str] | None = None, has_due_date: bool = True) -> list[str]:
+    """업체 한 곳의 RFQ 질문 목록. 고정 질문, 고른 선택 질문(없으면 기본 선택), 미확인 필수 조건 질문 순서다.
+    업무 납기일이 없으면 본문에 없는 '요청 납기일'을 묻지 않고 납품 가능 일정을 묻는다."""
     chosen = RFQ_DEFAULT_OPTIONS if options is None else options
     extra = [f"{check['condition']} 충족 여부(증빙)" for check in checks if check['required'] and check['state'] == 'UNKNOWN']
-    return list(RFQ_FIXED_QUESTIONS) + [RFQ_OPTIONAL_QUESTIONS[key] for key in RFQ_OPTIONAL_QUESTIONS
+    fixed = [q if has_due_date or q != RFQ_DUE_QUESTION else RFQ_NO_DUE_QUESTION for q in RFQ_FIXED_QUESTIONS]
+    return fixed + [RFQ_OPTIONAL_QUESTIONS[key] for key in RFQ_OPTIONAL_QUESTIONS
                                         if key in chosen] + extra
 
 
@@ -1196,9 +1200,11 @@ def evaluate_candidates(store: CandidateStore, context: RunContext, supplier_ite
     if case.get('input_revision') != context.input_revision:
         return {'status': 'REVISION_CHANGED'}
     item_name = case.get('item_name')
-    if not item_name:
-        return {'status': 'CONDITIONS_MISSING', 'missing': ['item_name'],
-                'summary': '요청 품목이 아직 확정되지 않아 견적을 요청할 후보 업체를 찾을 수 없습니다.',
+    missing = [key for key in ('item_name', 'quantity', 'unit') if not case.get(key)]
+    if missing:     # 품목·수량·단위 없이 RFQ를 만들지 않는다
+        labels = '·'.join({'item_name': '품목', 'quantity': '수량', 'unit': '단위'}[key] for key in missing)
+        return {'status': 'CONDITIONS_MISSING', 'missing': missing,
+                'summary': f'확정되지 않은 요청 조건({labels})이 있어 견적을 요청할 후보 업체를 찾을 수 없습니다.',
                 'next': '다시 검색해도 결과가 같다. 다른 도구를 부르지 말고 바로 HOLD로 최종 응답한다. reason에는 summary를 쓴다.'}
     ids = list(dict.fromkeys(supplier_item_ids))
     items = _read(lambda: store.get_supplier_items(context.case_id, ids)) if ids else []
@@ -1257,11 +1263,12 @@ def evaluate_candidates(store: CandidateStore, context: RunContext, supplier_ite
     over = candidates[MAX_CANDIDATES:]
     candidates = candidates[:MAX_CANDIDATES]
     excluded += [{'supplier_id': c['supplier_id'], 'code': 'OVER_LIMIT'} for c in over]
+    quantity = _amount(case['quantity'])        # DB numeric 문자열 '600.000000' → 600
     result = {'status': 'OK',
               'scope': {'searched': len({item['supplier_id'] for item in items}),
                         'candidates': len(candidates), 'excluded': len(excluded)},
               'rfq_facts': {'품목': item_name, '규격': case.get('specification'),
-                            '수량': f"{case['quantity']}{case.get('unit') or ''}" if case.get('quantity') else None,
+                            '수량': f"{_amount_text(quantity) if quantity is not None else case['quantity']}{case['unit']}",
                             '납기일': case.get('due_date')},
               'candidates': candidates, 'excluded': excluded,
               'question_options': dict(RFQ_OPTIONAL_QUESTIONS), 'default_question_options': list(RFQ_DEFAULT_OPTIONS)}
@@ -1290,7 +1297,7 @@ def search_supplier_evidence(supplier_item_ids: list[str], runtime: ToolRuntime[
       question_options(업체마다 고를 수 있는 선택 질문 {ID: 질문}), default_question_options(고르지 않을 때 묻는 ID),
       summary(구매담당자가 읽는 조회 결과 문장. HOLD면 reason에 이 문장을 쓴다)
     - REJECTED: code UNKNOWN_ITEMS(search_supplier_items에 없던 ID)
-    - CONDITIONS_MISSING: 업무 품목이 정해지지 않았다 / REVISION_CHANGED / CASE_NOT_FOUND
+    - CONDITIONS_MISSING: 업무 품목·수량·단위 중 비어 있는 것이 있다(missing) / REVISION_CHANGED / CASE_NOT_FOUND
     메일에 들어갈 품목·수량·납기 값은 돌려주지 않는다. 메일 문안은 create_rfq_draft가 쓴다.
     '''
     result = evaluate_candidates(_candidate_store, _run_context(_candidate_store, runtime), supplier_item_ids)
@@ -1409,7 +1416,7 @@ def save_mail_drafts(store: MailDraftStore, context: RunContext, purpose: str, s
         return _draft_rejected('NO_SUPPLIERS')
     found = evaluate_candidates(store, context, supplier_item_ids)
     if found['status'] != 'OK':
-        return {key: found[key] for key in ('status', 'code', 'hint') if key in found}
+        return {key: found[key] for key in ('status', 'code', 'hint', 'missing') if key in found}
     candidates = {c['supplier_id']: c for c in found['candidates']}
     excluded = {e['supplier_id']: e['code'] for e in found['excluded']}
 
@@ -1438,7 +1445,7 @@ def save_mail_drafts(store: MailDraftStore, context: RunContext, purpose: str, s
             continue
         values = {**common, '업체명': supplier.get('name') or '담당자',
                   '질문목록': '\n'.join(f'{n}. {q}' for n, q in enumerate(
-                      _questions(candidate['checklist'], chosen.get(supplier_id)), 1))}
+                      _questions(candidate['checklist'], chosen.get(supplier_id), bool(facts.get('납기일'))), 1))}
         subject, body = _rfq_text(values)
         key = hashlib.sha256(f'{context.case_id}|{context.input_revision}|RFQ|{supplier_id}'.encode()).hexdigest()
         record = MailDraftRecord(
@@ -1476,7 +1483,8 @@ def create_rfq_draft(supplier_item_ids: list[str], supplier_ids: list[str], runt
     - DRAFTED: drafts(supplier_id·draft_id), rejected(supplier_id·code: 초안을 만들지 않은 업체),
       summary(실제로 초안을 만든 업체 기준 구매담당자용 문장. 최종 응답 reason에 쓴다),
       adjusted(UNKNOWN_QUESTION: 기본 선택 질문으로 저장한 업체. 다시 보내지 않는다), hints
-    - REJECTED: code(NO_SUPPLIERS) 또는 모든 업체가 rejected / REVISION_CHANGED / CASE_NOT_FOUND
+    - REJECTED: code(NO_SUPPLIERS) 또는 모든 업체가 rejected / CONDITIONS_MISSING(missing) / REVISION_CHANGED /
+      CASE_NOT_FOUND
     '''
     return save_mail_drafts(_draft_store, _run_context(_draft_store, runtime), 'RFQ', supplier_item_ids, supplier_ids,
                             questions)

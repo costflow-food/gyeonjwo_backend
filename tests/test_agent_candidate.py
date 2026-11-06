@@ -209,7 +209,7 @@ def test_one_call_makes_a_draft_per_supplier_from_the_code_template(store):
         '안녕하세요. 다온푸드 담당자님\n건강한 동결건조 식품을 만드는 (주)트루나스입니다.\n\n'
         f'아래 품목의 견적을 요청드립니다. {deadline}까지 회신 부탁드립니다.\n\n'
         '<요청 내용>\n- 품목: 냉동 딸기\n- 규격: 10kg/박스\n- 수량: 600kg\n- 납기일: 2026-12-01\n\n'
-        '<견적서 포함 사항>\n1. 단가와 단가 기준 단위\n2. 요청 수량 공급 가능 여부\n3. 요청 납기일 납품 가능 여부\n'
+        '<견적서 포함 사항>\n1. 단가와 단가 기준 단위\n2. 공급 가능 수량과 그 단위\n3. 요청 납기일 납품 가능 여부\n'
         '4. 운송비 부담 주체와 단가 포함 여부\n5. 최소 주문 수량(MOQ)\n6. 견적 유효기간\n\n'
         '빠른 회신 주시면 내부 검토 후 신속히 연락드리겠습니다.\n감사합니다.\n트루나스 드림')
     # 확인되지 않은 필수 조건은 증빙 질문으로 더한다
@@ -258,6 +258,30 @@ def test_no_draft_at_all_is_rejected(store):
     assert draft(store, ['sup-old'])['status'] == 'REJECTED'
     assert draft(store, [])['code'] == 'NO_SUPPLIERS'
     assert draft(store, purpose='COUNTER_OFFER')['code'] == 'UNSUPPORTED_PURPOSE'
+    assert store.mail_drafts == {}
+
+
+def test_db_numeric_quantity_is_written_without_trailing_zeros(store):
+    store.work_cases[CASE]['quantity'] = '600.000000'      # DB numeric을 text로 읽은 값
+    draft(store)
+    assert '- 수량: 600kg\n' in store.mail_drafts['draft-1'].body_text
+
+
+def test_without_due_date_rfq_does_not_ask_requested_due_date(store):
+    store.work_cases[CASE]['due_date'] = None
+    draft(store)
+    body = store.mail_drafts['draft-1'].body_text
+    assert '납기일' not in body and '3. 납품 가능 일정(발주 후 납품까지 걸리는 기간)\n' in body
+
+
+@pytest.mark.parametrize('field', ['quantity', 'unit'])
+def test_missing_quantity_or_unit_blocks_evidence_and_draft(store, field):
+    store.work_cases[CASE][field] = None
+    found = search_supplier_evidence.func(supplier_item_ids=ITEMS, runtime=SimpleNamespace(context=ctx()))
+    assert found['status'] == 'CONDITIONS_MISSING' and found['missing'] == [field]
+    drafted = create_rfq_draft.func(supplier_item_ids=ITEMS, supplier_ids=['sup-a'],
+                                    runtime=SimpleNamespace(context=ctx()))
+    assert drafted == {'status': 'CONDITIONS_MISSING', 'missing': [field]}
     assert store.mail_drafts == {}
 
 
@@ -334,12 +358,13 @@ def test_caution_is_kept_only_with_registered_notes(store):
 
 def test_hold_with_conditions_missing_gets_code_and_no_candidates(store):
     store.work_cases[CASE]['item_name'] = None
-    summary = '요청 품목이 아직 확정되지 않아 견적을 요청할 후보 업체를 찾을 수 없습니다.'
+    summary = '확정되지 않은 요청 조건(품목)이 있어 견적을 요청할 후보 업체를 찾을 수 없습니다.'
     out = run_agent(store, [
         evidence(1),
         call('CandidateOut', {'next_action': 'HOLD', 'reason': summary, 'candidates': [candidate('sup-a')]}, 2)])
     assert out.next_action == 'HOLD' and out.candidates == [] and out.draft_ids == []
     assert out.hold.code == 'CONDITIONS_MISSING' and out.reason == summary
+    assert out.unknown_fields == ['item_name']          # 빠진 조건은 도구 결과로 넘긴다
 
 
 def test_hold_without_candidates_gets_code(store):
@@ -405,7 +430,8 @@ SYNTHETIC_CANDIDATE_CASES = [
                          ids=[c[0] for c in SYNTHETIC_CANDIDATE_CASES])
 def test_synthetic_candidate_cases(name, items, expected, excluded):
     memory = MemoryStore()
-    memory.add_case(CASE, item_name=ITEM, specification='10kg/박스', mandatory_conditions=[{'condition': 'HACCP'}])
+    memory.add_case(CASE, item_name=ITEM, specification='10kg/박스', mandatory_conditions=[{'condition': 'HACCP'}],
+                    quantity='600', unit='kg')
     memory.add_supplier('sup-old', '가나농산', 'g@example.com')
     memory.add_supplier_item('si-old', 'sup-old', ITEM, '10kg/박스', ['HACCP'])
     memory.add_incumbent(CASE, 'sup-old')

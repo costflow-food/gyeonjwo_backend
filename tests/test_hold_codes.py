@@ -298,11 +298,12 @@ def test_candidate_hold_gets_code_from_search_result():
 
 
 def test_candidate_hold_conditions_missing_overrides_llm():
-    summary = '요청 품목이 아직 확정되지 않아 견적을 요청할 후보 업체를 찾을 수 없습니다.'
-    messages = [tool_message('search_supplier_evidence', {'status': 'CONDITIONS_MISSING', 'summary': summary})]
+    summary = '확정되지 않은 요청 조건(수량)이 있어 견적을 요청할 후보 업체를 찾을 수 없습니다.'
+    messages = [tool_message('search_supplier_evidence', {'status': 'CONDITIONS_MISSING', 'missing': ['quantity'],
+                                                          'summary': summary})]
     out = _check_candidates(CandidateOut(next_action='HOLD', reason=summary,
                                          hold={'code': 'NO_SUITABLE_CANDIDATES'}), messages)
-    assert out.hold.code == 'CONDITIONS_MISSING'
+    assert out.hold.code == 'CONDITIONS_MISSING' and out.unknown_fields == ['quantity']
     assert from_agent_output(out.model_dump(mode='json')).code == 'CONDITIONS_MISSING'
 
 
