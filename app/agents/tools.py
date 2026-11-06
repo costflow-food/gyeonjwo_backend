@@ -406,9 +406,9 @@ class QuoteStore(CaseStore, Protocol):
     def list_supplier_items(self, case_id: str, supplier_id: str) -> list[dict]:
         """그 업체의 등록 품목(supplier_items) {id, item_name, specification, unit, standardized_item_key}."""
 
-    def record_extraction_issue(self, case_id: str, mail_ids: list[str], issue: dict,
-                                supplier_name: str | None) -> None:
-        """현재 그래프 실행의 거래처 미등록·불일치 근거를 업무 범위 안의 메일 ID와 함께 기록한다."""
+    def record_extraction_issue(self, case_id: str, agent_run_id: str, issue: dict) -> None:
+        """현재 ① 실행의 업체 거절(미등록·불일치)을 기록한다. issue는 {code, field, supplier_name, evidence:[{evidence_id, excerpt}]}.
+        서버가 근거 원문과 다시 대조하고 보류 사유로 쓴다."""
 
     def insert_quote_version(self, record: QuoteVersionRecord,
                              expected_input_revision: int) -> tuple[str, QuoteVersionRecord] | None:
@@ -691,14 +691,37 @@ def _letters(text) -> str:
     return re.sub(r'[^0-9a-zA-Z가-힣]', '', str(text or '')).casefold()
 
 
+_ISSUE_EXCERPT_LIMIT = 300
+
+
+def _record_supplier_issue(store: QuoteStore, context: RunContext, check: _SourceCheck, issue: dict,
+                           supplier: dict | None, ref: EvidenceRef | None) -> None:
+    """업체 거절을 업체명이 적힌 원문 줄과 함께 서버에 남긴다(서버가 원문과 다시 대조해 보류 사유로 쓴다).
+    기록이 실패해도 도구 결과(거절과 다음 행동 안내)는 그대로 돌려준다. 실패를 올리면 ① 실행 전체가 실패로 끝나고,
+    기록이 없을 때 서버는 보류 사유만 '확인 불가'로 보인다."""
+    record = getattr(store, 'record_extraction_issue', None)
+    if not callable(record) or supplier is None or ref is None:
+        return
+    lines = check.lines(ref, supplier['raw_value'])
+    excerpt = (lines[0].strip() if lines else supplier['raw_value'])[:_ISSUE_EXCERPT_LIMIT]
+    where = 'body' if ref.part == 'body' else f'part:{ref.part}'
+    payload = {'code': issue['code'], 'field': 'supplier_name', 'supplier_name': supplier['value'],
+               'evidence': [{'evidence_id': f'{ref.mail_id}:{where}', 'excerpt': excerpt}]}
+    try:
+        record(context.case_id, context.agent_run_id, payload)
+    except Exception:
+        pass
+
+
 def _item_key(text) -> str:
-    """등록 품목 대조용 품목명: 띄어쓰기를 모두 빼고 대소문자를 무시한다 ('냉동딸기 (IQF)' → '냉동딸기(iqf)').
-    이 기준은 에이전트가 등록 품목을 고를 때 적용한다."""
-    return re.sub(r'\s+', '', str(text or '')).casefold()
+    """등록 품목 대조용 품목명: 앞뒤 공백을 빼고 연속 공백을 한 칸으로 줄인 뒤 소문자로 ('냉동  딸기' → '냉동 딸기').
+    DB(store_case_graph_quote·kan109_resolve_item_key)와 같은 기준이다. 띄어쓰기가 다르면 다른 품목으로 보는데,
+    더 넓게 연결하면 DB가 QUOTE_ITEM_IDENTITY_MISMATCH로 저장을 거부해 실행이 실패로 끝난다."""
+    return ' '.join(str(text or '').split()).lower()
 
 
 def _registered_item(items: list[dict], current: dict) -> dict | None:
-    """이번 메일의 품목과 같은 그 업체의 등록 품목. 띄어쓰기·대소문자만 빼고 품목명이 같을 때 같은 품목으로 보고,
+    """이번 메일의 품목과 같은 그 업체의 등록 품목. _item_key 기준으로 품목명이 같을 때 같은 품목으로 보고,
     여럿이면 규격으로 좁힌다. 하나로 정해질 때만 돌려준다(애매하면 연결하지 않는다).
     이름이 서로 포함되는 정도('냉동딸기'와 '냉동딸기 (IQF)')로는 연결하지 않는다. DB가 같은 품목으로 보지 않아 저장이 거부된다."""
     name = _item_key(current.get('item_name', {}).get('value'))
@@ -819,9 +842,8 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
     if rejected and not (supplier_name and issue and issue['code'] in ('SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH')):
         return _with_hints({'status': 'REJECTED', 'rejected': rejected}, rejected)
     if issue:
-        record_issue = getattr(store, 'record_extraction_issue', None)
-        if callable(record_issue) and issue['code'] in {'SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH'}:
-            record_issue(case_id, sorted(evidence_mails), issue, supplier_name)
+        if issue['code'] in {'SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH'}:
+            _record_supplier_issue(store, context, check, issue, values.get('supplier_name'), refs.get('supplier_name'))
         result = _with_hints({'status': 'REJECTED', 'rejected': [issue]}, [issue])
         if issue['code'] == 'SUPPLIER_NOT_MATCHED':
             result['next'] = _supplier_retry_next(supplier_name)
