@@ -63,13 +63,14 @@ def extraction_available(request):
 
 
 def get_list_service(request: Request):
+    runtime = get_runtime_repository(request)
     with request.app.state.service_lock:
         service = getattr(request.app.state, 'work_case_list_service', None)
         if service is None:
             settings = request.app.state.settings
             client = make_server_client(settings)
             service = WorkCaseListService(WorkCaseListRepository(client,
-                                         extraction_fields=True),
+                                         extraction_fields=True, column_missing=runtime.cached_column_missing),
                                          CursorCodec(settings.google_token_encryption_key.get_secret_value()))
             request.app.state.work_case_list_service = service
     return service
