@@ -112,5 +112,10 @@
     "claim": "Only claim_case_graph_run(p_start_from=START). Unified START/REPLY/PLAN claim and review scheduling deferred until DB owner agreement; not called by this runtime.",
     "steps": "Steps follow the deployed DB work_cases_check5 (2026-11-05) and agent schemas.ProcessingStep. Running graph steps: EXTRACTING (INFO_EXTRACTOR), SELECTING_CANDIDATES (CANDIDATE running), GENERATING_PLANS (INFO_PRIORITY/RESPONSE_PLAN/COUNTER_OFFER). CANDIDATES is the post-graph user-selection wait set by complete_case_graph_run. Terminal: REVIEW_READY/ON_HOLD/FAILED. BUILDING_PLANS and BUILDING_COUNTER_OFFER are not written (DB rejects them).",
     "deployment": "After DB functions are deployed restart server to attach graph worker; missing graph does not prevent mail/API startup. API START still requires readiness/live worker. /ready reports mail readiness and degraded review separately."
+  },
+  "current_runtime": {
+    "status": "LOCAL_ADAPTER_TESTED_DEPLOYMENT_UNVERIFIED",
+    "claim": "Keep START claim separate. When case_graph_health advertises all review capabilities, recover, schedule replies, finalize pending reviews, and alternate START and review claims. No PLAN scheduler is added.",
+    "verification": "Run python -m scripts.check_review_queue. Confirm health capabilities and deployed RPC signatures with KAN-133 before live acceptance."
   }
 }

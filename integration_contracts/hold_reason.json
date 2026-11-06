@@ -36,8 +36,17 @@
     "Latest completed run takes precedence; never reuse stale holds.",
     "Legacy reason is normalized to fixed templates, never forwarded. Unknown reason uses HOLD_REASON_UNAVAILABLE.",
     "Exception to frontend-copy ownership: hold.message is safe server-owned display copy.",
-    "No schema migration or new RPC; no model text or internal field interpolation."
+    "Public read endpoints use fixed text and do not expose model text or internal fields."
   ],
+  "graph_extraction": {
+    "status": "BACKEND_ADAPTER_LOCAL_TESTED_DB_SIGNATURE_UNVERIFIED",
+    "rpc": "record_case_graph_extraction_issue",
+    "proposed_arguments": ["p_job", "p_token", "p_revision", "p_run", "p_issue"],
+    "issue_fields": ["case_id", "mail_id", "batch_id", "input_revision", "code", "field", "supplier_name"],
+    "database_checks": "Verify service-role access, live claim, owner, case, extraction run, batch, revision and mail membership. Deduplicate identical evidence and acknowledge with true. Confirm deployed signature and acknowledgement with KAN-133.",
+    "priority": "One acknowledged supplier rejection code from this role run overrides agent output. Conflicting acknowledged codes fall back to HOLD_REASON_UNAVAILABLE. Otherwise use the closed structured hold.code, then legacy reason extraction. DB remains authoritative for supplier codes and must verify stored evidence.",
+    "reason_storage": "Role finish receives the original reason in p_output.reason. KAN-133 must preserve it before normalization in a restricted internal record keyed by run, expose it only to authorized internal staff and retain fixed public copy. The graph completion payload omits the original HOLD reason."
+  },
   "validation": {
     "date": "2026-11-02",
     "normalization_assertions": 20,

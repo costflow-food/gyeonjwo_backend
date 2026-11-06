@@ -1,9 +1,22 @@
 """Graph START's isolated durable queue and service-only transaction boundaries."""
+import logging
+
 from app.core.errors import ServiceError
 from app.features.work_cases.infrastructure.runtime_repository import CaseRuntimeRepository
 
 
+logger = logging.getLogger('uvicorn.error.case_graph')
+
+
 class GraphRuntimeRepository(CaseRuntimeRepository):
+    REVIEW_CAPABILITIES = {'REPLY', 'PLAN', 'REVIEW_STORES', 'REVIEW_CARD_STAGE',
+                           'REVIEW_CARD_COMMIT', 'REVIEW_OUTBOUND_GUARD'}
+
+    def __init__(self, client):
+        super().__init__(client)
+        self.review_ready = False
+        self.prefer_review = True
+
     def available(self):
         result = self.call('case_graph_health')
         return self.health_ready(result)
@@ -52,8 +65,25 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
         return row
 
     def claim(self):
-        # Do not assume an unagreed review claim RPC also owns START jobs.
-        return self.call('claim_case_graph_run', p_start_from='START')
+        review_first = self.review_ready and self.prefer_review
+        if self.review_ready:
+            self.prefer_review = not self.prefer_review
+        if review_first:
+            job = self.claim_review()
+            if job is not None:
+                return job
+        job = self.call('claim_case_graph_run', p_start_from='START')
+        if job is None and self.review_ready and not review_first:
+            return self.claim_review()
+        return job
+
+    def claim_review(self):
+        try:
+            return self.call('claim_case_graph_review_run')
+        except ServiceError:
+            self.review_ready = False
+            logger.warning('review claim unavailable code=REVIEW_RPC_UNAVAILABLE')
+            raise
 
     def heartbeat(self, job):
         if self.call('heartbeat_case_graph_run', p_job=job['job_id'], p_token=job['claim_token']) is not True:
@@ -69,14 +99,35 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
         scheduled = self.call('schedule_case_graph_continuations', p_limit=25)
         if type(scheduled) is not int or not 0 <= scheduled <= 25:
             raise ServiceError('PROCESSING_UNAVAILABLE', '추출 완료 업무의 그래프 연결을 확인할 수 없습니다.', 503)
-        # REPLY/PLAN scheduling/claim contract must be agreed with DB owner
-        # before enabling consumers; START never falls back to a review claim.
+        self.review_ready = False
+        try:
+            health = self.call('case_graph_health')
+        except ServiceError:
+            return result
+        if self.health_ready(health) and self.REVIEW_CAPABILITIES <= set(health['capabilities']):
+            try:
+                for rpc in ('schedule_case_graph_replies', 'finalize_case_graph_reviews'):
+                    count = self.call(rpc, p_limit=25)
+                    if type(count) is not int or not 0 <= count <= 25:
+                        raise ServiceError('PROCESSING_UNAVAILABLE', '회신 검토 예약 상태를 확인할 수 없습니다.', 503)
+                self.review_ready = True
+            except ServiceError:
+                logger.warning('review queue unavailable code=REVIEW_RPC_UNAVAILABLE')
         return result
 
     def finish_graph(self, job, output):
         name = 'complete_case_graph_review' if job.get('execution_mode') == 'GRAPH_REVIEW_V1' else 'complete_case_graph_run'
+        payload = output.model_dump(mode='json')
+        # The role-finish RPC receives the private original separately. Do not
+        # duplicate it in the terminal payload that can feed progress displays.
+        for step in payload['steps']:
+            if step['next_action'] == 'HOLD':
+                original = step['reason']
+                step['reason'] = '검토를 보류했어요.'
+                payload['unresolved'] = [value for value in payload['unresolved']
+                                         if original not in value]
         return self.call(name, p_job=job['job_id'], p_token=job['claim_token'],
-                         p_revision=job['input_revision'], p_batch=job['batch_id'], p_output=output.model_dump(mode='json'))
+                         p_revision=job['input_revision'], p_batch=job['batch_id'], p_output=payload)
 
 
 def runtime_repository(client, settings):
