@@ -34,7 +34,7 @@ class CursorCodec:
         signature = hmac.digest(self.key, payload, 'sha256')
         return base64.urlsafe_b64encode(payload + signature).decode().rstrip('=')
 
-    def decode(self, token, scope):
+    def decode(self, token, scope, *, normalize_position=None):
         try:
             if len(token) > 2048:
                 raise ValueError('Cursor too long')
@@ -47,7 +47,8 @@ class CursorCodec:
                 raise ValueError('Cursor scope changed')
             snapshot = iso_z(utc_time(data['snapshot']))
             after_time, after_id = data['after']
-            return snapshot, (iso_z(utc_time(after_time)), str(UUID(after_id)))
+            position = normalize_position(after_time) if normalize_position else iso_z(utc_time(after_time))
+            return snapshot, (position, str(UUID(after_id)))
         except (ValueError, TypeError, KeyError, IndexError, UnicodeError):
             raise ServiceError('INVALID_CURSOR', '검색·필터를 변경했다면 첫 페이지부터 조회해 주세요.',
                                422, fields=['query.cursor'], retryable=False) from None

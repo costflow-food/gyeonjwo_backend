@@ -118,7 +118,7 @@ async def gmail_webhook(request: Request, credentials: Annotated[HTTPAuthorizati
     return Response(status_code=204)
 
 
-@router.post('/api/v1/llm/classify-mail', dependencies=protected)
+@router.post('/api/v1/llm/classify-mail', dependencies=protected, deprecated=True, tags=['legacy-mail'])
 def classify_mail(payload: MailClassificationRequest, request: Request):
     """Authenticated, bounded LLM call; does not create work or send mail."""
     settings = request.app.state.settings

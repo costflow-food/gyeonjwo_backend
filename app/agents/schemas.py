@@ -323,7 +323,15 @@ class AgentOutput(StrictModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class ExtractionHold(StrictModel):
+    code: Literal['SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH', 'MISSING_FIELD',
+                  'MISSING_EVIDENCE', 'SOURCE_READ_FAILED', 'NO_QUOTE_DATA',
+                  'CONDITIONS_MISSING', 'HOLD_REASON_UNAVAILABLE']
+    field: str | None = None
+
+
 class ExtractionOut(AgentOutput):
+    hold: ExtractionHold | None = None
     next_action: Literal[N.STORED, N.HOLD]
     quote_version_ids: list[str] = []
 

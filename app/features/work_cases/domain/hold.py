@@ -57,7 +57,7 @@ def _field(reason, explicit=None):
     return None
 
 
-def from_agent_output(output):
+def from_agent_output(output, *, rejection_codes=()):
     """Prefer a fixed structured code; support old HOLD rows containing reason only.
 
     Free text is inspected only to select a closed code/template. Unrecognized or
@@ -65,12 +65,15 @@ def from_agent_output(output):
     """
     if not isinstance(output, dict):
         return hold_info(None)
+    verified = set(rejection_codes) & {'SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH'}
+    if verified:
+        return hold_info(next(iter(verified)) if len(verified) == 1 else None)
     reason = output.get('reason')
     reason = reason[:4000] if isinstance(reason, str) else ''
     structured = output.get('hold')
     if (isinstance(structured, dict) and isinstance(structured.get('code'), str)
             and structured['code'] in MESSAGES):
-        return hold_info(structured['code'], _field(reason, structured.get('field')))
+        return hold_info(structured['code'], structured.get('field'))
     for key in ('hold_code', 'reason_code'):
         code = output.get(key)
         if isinstance(code, str) and code in MESSAGES:

@@ -23,6 +23,9 @@ from app.features.review.api.router import router as review_router
 from app.features.mailboxes.api.router import router as mailbox_router, make_mailbox_service
 from app.features.mailboxes.application.worker import ConnectedMailboxWorker
 from app.features.work_cases.api.router import router as work_cases_router
+from app.features.work_cases.api.revisions import router as work_revisions_router
+from app.features.workflow_logs.router import router as workflow_logs_router
+from app.features.suppliers.router import router as suppliers_router
 from app.features.work_cases.api.mail_drafts import router as mail_drafts_router
 from app.features.work_cases.api.candidates import router as candidates_router
 from app.features.work_cases.api.quotes import router as quotes_router
@@ -225,6 +228,9 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     app.include_router(review_router)
     app.include_router(mailbox_router)
     app.include_router(work_cases_router)
+    app.include_router(work_revisions_router)
+    app.include_router(workflow_logs_router)
+    app.include_router(suppliers_router)
     app.include_router(mail_drafts_router)
     app.include_router(candidates_router)
     app.include_router(quotes_router)
