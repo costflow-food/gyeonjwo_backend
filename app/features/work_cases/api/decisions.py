@@ -34,6 +34,13 @@ class DecisionRequest(RevisionRequest):
         return self
 
 
+def case_changes_ready(repo):
+    try:
+        return repo.case_changes_available()
+    except ServiceError:
+        return False
+
+
 def submit_case_change(repo, owner, case_id: UUID, operation, payload, key):
     validate_action_key(key)
     body = payload.model_dump(mode='json')
@@ -42,6 +49,9 @@ def submit_case_change(repo, owner, case_id: UUID, operation, payload, key):
     ).hexdigest()
     result = repo.case_change_receipt(owner, case_id, operation, key, body_hash)
     if isinstance(result, dict) and result.get('kind') == 'NONE':
+        if not case_changes_ready(repo):
+            raise ServiceError('CASE_CHANGE_INTEGRATION_REQUIRED', '업무 변경 기능이 아직 준비되지 않았습니다.',
+                               503, retryable=False)
         result = repo.submit_case_change(
             owner, case_id, operation, body, key, body_hash, current_request_id())
     if isinstance(result, dict) and result.get('kind') in {'ACCEPTED', 'REPLAY'} and result.get('http_status') == 200:

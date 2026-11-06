@@ -10,7 +10,7 @@ from app.core.errors import ServiceError
 from app.features.work_cases.application.actions import WorkCaseActions, validate_action_key
 from app.features.work_cases.infrastructure.graph_repository import runtime_repository
 from app.features.work_cases.domain.actions import DeletedCase, StartedCase
-from app.features.work_cases.api.decisions import DecisionRequest, RevisionRequest, submit_case_change
+from app.features.work_cases.api.decisions import DecisionRequest, RevisionRequest, case_changes_ready, submit_case_change
 
 from app.api.responses import Envelope, api_json
 from app.features.mailboxes.api.router import require_google_user
@@ -130,7 +130,8 @@ def list_work_cases(
     replies in the current request round. Sidebar totals belong to the frontend.
     """
     result = service.list(principal.user_id, status=status, archived=archived, q=q, limit=limit, cursor=cursor,
-                          start_readiness=extraction_readiness(request), resume_readiness=resume_readiness(request))
+                          start_readiness=extraction_readiness(request), resume_readiness=resume_readiness(request),
+                          case_changes_ready=case_changes_ready(get_runtime_repository(request)))
     return api_json(result.model_dump(mode='json'), headers={'Cache-Control': 'private, no-store'})
 
 
@@ -296,7 +297,8 @@ def case_progress(case_id: UUID, principal=Depends(require_google_user), repo=De
 @router.get('/{case_id}', summary='업무의 저장 상태 조회: 실행 없음')
 def get_case(case_id: UUID, request: Request, principal=Depends(require_google_user), repo=Depends(get_runtime_repository)):
     row = load_action_case(repo, principal.user_id, case_id)
-    actions, disabled = case_actions(row, extraction_readiness(request, repo), resume_readiness(request, repo))
+    actions, disabled = case_actions(row, extraction_readiness(request, repo), resume_readiness(request, repo),
+                                     case_changes_ready=case_changes_ready(repo))
     if 'RESUME' in actions:
         from app.features.work_cases.infrastructure.resume_repository import ResumeEligibilityRepository
         block = ResumeEligibilityRepository(repo.client).blocks(principal.user_id, [row]).get(str(case_id))

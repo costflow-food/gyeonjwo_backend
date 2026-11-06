@@ -63,6 +63,15 @@ class CaseRuntimeRepository:
             'submit_work_case_resume': {'p_owner', 'p_case', 'p_revision', 'p_reason', 'p_key', 'p_hash', 'p_request_id'},
             'lookup_work_case_resume_request': {'p_owner', 'p_case', 'p_key', 'p_hash'},
         }
+        return self.rpc_signatures_available(expected)
+
+    def case_changes_available(self):
+        return self.rpc_signatures_available({
+            'lookup_work_case_change_request': {'p_owner', 'p_case', 'p_operation', 'p_key', 'p_hash'},
+            'submit_work_case_change': {'p_owner', 'p_case', 'p_operation', 'p_body', 'p_key', 'p_hash', 'p_request_id'},
+        })
+
+    def rpc_signatures_available(self, expected):
         try:
             response = self.client.postgrest.session.get('', headers={'Accept': 'application/openapi+json'})
             response.raise_for_status()

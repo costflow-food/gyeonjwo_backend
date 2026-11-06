@@ -53,19 +53,28 @@ class GraphStore(AgentStore):
         self.saved_ids.add(qid)
         return qid, saved
 
+    def extraction_issue_mail_ids(self):
+        return self.scope.mail_ids
+
     def record_extraction_issue(self, case_id, mail_ids, issue, supplier_name):
         self.check(case_id)
         run_id = self.active_extraction_run
-        if (run_id is None or not mail_ids or not set(mail_ids) <= set(self.scope.mail_ids)
+        if (run_id is None or not mail_ids or not set(mail_ids) <= set(self.extraction_issue_mail_ids())
                 or issue.get('field') != 'supplier_name'
                 or issue.get('code') not in {'SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH'}):
             raise ServiceError('ACTION_NOT_ALLOWED', '추출 거절 근거의 범위를 확인할 수 없습니다.', 409)
         for mail_id in mail_ids:
-            result = self.rpc('record_case_graph_extraction_issue', p_run=run_id, p_issue={
-                'case_id': self.scope.case_id, 'mail_id': mail_id, 'batch_id': self.scope.batch_id,
-                'input_revision': self.scope.revision, 'code': issue['code'],
-                'field': issue['field'], 'supplier_name': supplier_name,
-            })
+            try:
+                result = self.rpc('record_case_graph_extraction_issue', p_run=run_id, p_issue={
+                    'case_id': self.scope.case_id, 'mail_id': mail_id, 'batch_id': self.scope.batch_id,
+                    'input_revision': self.scope.revision, 'code': issue['code'],
+                    'field': issue['field'], 'supplier_name': supplier_name,
+                })
+            except ServiceError as error:
+                if error.code == 'EXTRACTION_SCHEMA_REQUIRED':
+                    # Optional evidence storage may deploy after the HOLD path.
+                    return
+                raise
             if result is not True:
                 raise ServiceError('PROCESSING_UNAVAILABLE', '추출 거절 근거 저장을 확인할 수 없습니다.', 503)
         self.extraction_rejections.setdefault(run_id, set()).add(issue['code'])

@@ -2,14 +2,14 @@
 from app.features.work_cases.application.start_readiness import StartReadiness
 
 
-def case_actions(case, readiness: StartReadiness, resume_readiness: StartReadiness | None = None):
+def case_actions(case, readiness: StartReadiness, resume_readiness: StartReadiness | None = None,
+                 *, case_changes_ready=False):
     actions = ['VIEW_ORIGINAL']
     reason = None
     archived = case.get('archived_at') is not None
     decision = case.get('decision')
     review_ready = case.get('status') == 'Complete' and case.get('processing_step') == 'REVIEW_READY'
-    if case.get('archived_at') is not None:
-        actions.append('RESTORE')
+    if archived:
         reason = ('CASE_ARCHIVED', '보관된 업무는 먼저 복원해야 합니다.')
     elif (case.get('status') == 'Waiting' and case.get('processing_step') == 'PENDING_START'
           and case.get('decision') is None and case.get('current_batch_id') is None):
@@ -46,15 +46,22 @@ def case_actions(case, readiness: StartReadiness, resume_readiness: StartReadine
         if blocked:
             disabled.append({'action': 'RESUME', 'reason_code': blocked[0], 'message': blocked[1]})
     can_archive = not archived and case.get('status') in {'Waiting', 'Pending', 'Complete'}
+    pending_actions = ['RESTORE'] if archived else []
     if can_archive:
-        actions.append('ARCHIVE')
+        pending_actions.append('ARCHIVE')
     elif not archived:
         disabled.append({'action': 'ARCHIVE', 'reason_code': 'ACTION_NOT_ALLOWED',
                          'message': '현재 상태에서는 업무를 보관할 수 없습니다.'})
     for action in ('SELECT_PLAN', 'HOLD', 'CONFIRM_REVIEW'):
         if review_ready and not archived and decision not in {'ACCEPT_INCREASE', 'CONFIRM_REVIEW'}:
-            actions.append(action)
+            pending_actions.append(action)
         else:
             disabled.append({'action': action, 'reason_code': 'CASE_ARCHIVED' if archived else 'ACTION_NOT_ALLOWED',
                              'message': '최신 검토 카드에서 판단할 수 있습니다.'})
+    if case_changes_ready:
+        actions.extend(pending_actions)
+    else:
+        for action in pending_actions:
+            disabled.append({'action': action, 'reason_code': 'CASE_CHANGE_INTEGRATION_REQUIRED',
+                             'message': '업무 변경 기능이 아직 준비되지 않았습니다.'})
     return actions, disabled
