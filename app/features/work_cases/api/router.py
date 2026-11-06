@@ -5,7 +5,6 @@ from fastapi.responses import JSONResponse
 from uuid import UUID
 from datetime import date
 from decimal import Decimal
-import time
 from pydantic import Field, model_validator
 from app.shared.domain.schemas import StrictModel
 from app.core.errors import ServiceError
@@ -35,19 +34,12 @@ def resume_readiness(request, repo=None, *, fresh=False):
     readiness = extraction_readiness(request, repo, fresh=fresh)
     if not readiness.available:
         return readiness
-    with request.app.state.service_lock:
-        cached = getattr(request.app.state, 'resume_availability', None)
-        now = time.monotonic()
-        if not fresh and cached is not None and now < cached[0]:
-            return cached[1]
-        try:
-            repository = repo or runtime_repository(make_server_client(request.app.state.settings), request.app.state.settings)
-            result = (StartReadiness() if repository.resume_available() else
-                      StartReadiness('RESUME_INTEGRATION_REQUIRED', '보류 업무의 재개 저장 기능이 아직 연결되지 않았습니다.'))
-        except Exception:
-            result = StartReadiness('PROCESSING_UNAVAILABLE', '재개 저장소의 연결 상태를 확인할 수 없습니다.')
-        request.app.state.resume_availability = (now + 5, result)
-        return result
+    try:
+        repository = repo or get_runtime_repository(request)
+        return (StartReadiness() if repository.resume_available() else
+                StartReadiness('RESUME_INTEGRATION_REQUIRED', '그래프 재개 저장 기능이 아직 준비되지 않았습니다.'))
+    except Exception:
+        return StartReadiness('PROCESSING_UNAVAILABLE', '재개 저장소의 연결 상태를 확인할 수 없습니다.')
 
 
 def extraction_readiness(request, repo=None, *, fresh=False):
@@ -56,18 +48,10 @@ def extraction_readiness(request, repo=None, *, fresh=False):
         result = probe()
         if not result.available:
             return result
-    with request.app.state.service_lock:
-        cached = getattr(request.app.state, 'extraction_availability', None)
-        now = time.monotonic()
-        if not fresh and cached is not None and now < cached[0]:
-            result = cached[1]
-        else:
-            try:
-                repository = repo or runtime_repository(make_server_client(settings), settings)
-                result = database_readiness(repository)
-            except Exception:
-                result = StartReadiness('PROCESSING_UNAVAILABLE', '검토 실행 저장소에 연결할 수 없습니다.')
-            request.app.state.extraction_availability = (now + 5, result)
+    try:
+        result = database_readiness(repo or get_runtime_repository(request))
+    except Exception:
+        result = StartReadiness('PROCESSING_UNAVAILABLE', '검토 실행 저장소에 연결할 수 없습니다.')
     if not result.available:
         return result
     # Worker liveness is never cached: a stopped thread must immediately hide START.

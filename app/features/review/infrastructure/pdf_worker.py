@@ -89,11 +89,14 @@ def _lines(boxes, texts) -> str:
 
 def ocr_page(raw, number: int, model_dir: str, dpi: int) -> str:
     """number쪽(1부터)을 렌더링해 OCR한 텍스트."""
-    import pypdfium2 as pdfium
-    if not all((Path(model_dir) / name).is_file() for name in OCR_MODEL_FILES):
-        raise OcrUnavailable()
     if not 1 <= number <= len(_reader(raw).pages):
         raise ContentError('PDF page out of range')
+    if not all((Path(model_dir) / name).is_file() for name in OCR_MODEL_FILES):
+        raise OcrUnavailable()
+    try:
+        import pypdfium2 as pdfium
+    except ImportError:
+        raise OcrUnavailable() from None
     try:
         pdf = pdfium.PdfDocument(raw)
     except pdfium.PdfiumError:

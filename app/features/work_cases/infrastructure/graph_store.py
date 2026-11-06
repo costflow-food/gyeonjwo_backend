@@ -17,6 +17,7 @@ class GraphStore(AgentStore):
         super().__init__(scope, job)
         self.draft_ids, self.role_runs = set(), {}
         self.documents = {}
+        self.ocr_pages = {}
         self.catalog_items, self.draft_records = {}, {}
         self.candidate_set_id = None
         self.extraction_rejections = {}
@@ -322,7 +323,9 @@ class GraphStore(AgentStore):
                 or not isinstance(document.get('pages'), list) or any(not isinstance(p, str) for p in document['pages'])):
             raise ValueError('Invalid document result')
         self.documents[(str(mail_id), part)] = deepcopy(document)
-        self.pages[(str(mail_id), part)] = list(document['pages'])
+        key = (str(mail_id), part)
+        self.pages[key] = [self.ocr_pages.get((*key, page), {}).get('text', text)
+                           for page, text in enumerate(document['pages'], 1)]
         self.check_document_budget()
 
     def save_document(self, case_id, mail_id, attachment_ref, document):
@@ -361,6 +364,22 @@ class GraphStore(AgentStore):
         if not doc:
             return None
         self.cache_document(mail_id, part, doc)
-        if doc['status'] == 'READ' and type(page) is int and 1 <= page <= len(doc['pages']):
-            return {'text': doc['pages'][page - 1], 'location': f'{part}:page:{page}'}
-        return None
+        if doc['status'] not in {'READ', 'NO_TEXT'} or type(page) is not int or not 1 <= page <= len(doc['pages']):
+            return None
+        location = f'{part}:page:{page}'
+        text = doc['pages'][page - 1]
+        if text.strip():
+            return {'text': text, 'location': location}
+        key = (str(mail_id), part, page)
+        if key not in self.ocr_pages:
+            from app.features.review.infrastructure.documents import ocr_pdf_page
+            content = self.download_attachment(case_id, mail_id, part)
+            result = (ocr_pdf_page(content, page, remaining_seconds=self.scope.remaining_seconds) if content else
+                      {'status': 'FAILED', 'text': '', 'attempts': 0, 'retry_exhausted': False,
+                       'error_kind': 'SOURCE_READ_FAILED'})
+            self.ocr_pages[key] = {'text': result['text'] if result['status'] == 'READ' else '',
+                                   'location': location, 'text_source': 'OCR',
+                                   'unreadable': result['status'] != 'READ', 'attempts': result['attempts'],
+                                   'retry_exhausted': result['retry_exhausted'], 'error_kind': result['error_kind']}
+            self.cache_document(mail_id, part, doc)
+        return dict(self.ocr_pages[key])
