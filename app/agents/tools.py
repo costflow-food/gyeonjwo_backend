@@ -308,7 +308,7 @@ _HINTS = {
     'TIER_OVERLAP': '단가 구간의 경계를 원문에서 다시 확인한다.',
     'CURRENCY_MISMATCH': '단가의 통화 표기와 currency가 다르다. 원문을 다시 확인한다.',
     'MISSING_FIELD': '업체가 연결되지 않은 메일이면 원문의 업체명을 supplier_name으로 보낸다. 원문에 없으면 HOLD한다.',
-    'SUPPLIER_NOT_MATCHED': '등록된 업체가 아니다. 저장하지 말고 HOLD한다.',
+    'SUPPLIER_NOT_MATCHED': '등록된 업체명과 글자가 정확히 같지 않다. 결과의 next를 따른다.',
     'SUPPLIER_MISMATCH': '메일에 연결된 업체와 업체명이 다르다. 저장하지 말고 HOLD한다.',
     'SUPPLIER_EVIDENCE_MIXED': '한 업체의 메일 근거만 남기고 다시 보낸다.',
     'TAX_BASIS_NOT_TAX_TERMS': 'tax_basis는 field_name이 tax_terms인 항목에만 붙인다.',
@@ -393,6 +393,10 @@ class QuoteStore(CaseStore, Protocol):
 
     def list_supplier_items(self, case_id: str, supplier_id: str) -> list[dict]:
         """그 업체의 등록 품목(supplier_items) {id, item_name, specification, unit, standardized_item_key}."""
+
+    def record_extraction_issue(self, case_id: str, mail_ids: list[str], issue: dict,
+                                supplier_name: str | None) -> None:
+        """현재 그래프 실행의 거래처 미등록·불일치 근거를 업무 범위 안의 메일 ID와 함께 기록한다."""
 
     def insert_quote_version(self, record: QuoteVersionRecord,
                              expected_input_revision: int) -> tuple[str, QuoteVersionRecord] | None:
@@ -623,6 +627,20 @@ def _quote_supplier(store: QuoteStore, case_id: str, case_mails: dict, evidence_
     return supplier_id, None
 
 
+# 업체명에 붙어 등록 이름과 달라지게 하는 표기: 법인 표기, 부서·직책
+_NAME_DECORATION = re.compile(r'주식회사|유한회사|농업회사법인|영농조합법인|\((?:주|유)\)|㈜|'
+                              r'영업[부팀]|구매[부팀]|대표이사|과장|대리|팀장|부장|사원|드림')
+
+
+def _supplier_retry_next(supplier_name: str | None) -> str:
+    """SUPPLIER_NOT_MATCHED 뒤에 할 일. 보낸 업체명에 법인 표기·부서·직책이 붙었을 때만 다시 보내게 한다."""
+    if supplier_name and _NAME_DECORATION.search(supplier_name):
+        return ('업체명에 법인 표기나 부서·직책이 붙어 있다. 그 표기를 빼고 회사명만(예: "동해프레시 주식회사" → '
+                '"동해프레시") 한 번 더 보낸다. 나머지 값은 그대로 보낸다.')
+    return ('회사명만 보냈는데 등록된 거래처에 없다. 다시 보내지 말고(업체명을 빼고 보내지도 않는다) '
+            '바로 HOLD로 최종 응답한다. hold.code는 SUPPLIER_NOT_MATCHED다.')
+
+
 def _carry(previous: tuple[str, QuoteVersionRecord], values: dict, tiers: list, costs: list,
            review: list) -> tuple[list, list, list]:
     """이번 메일에 없는 값을 이전 버전에서 원래 근거와 함께 이어받는다. 반환: (tiers, costs, 이어받은 항목).
@@ -661,14 +679,20 @@ def _letters(text) -> str:
     return re.sub(r'[^0-9a-zA-Z가-힣]', '', str(text or '')).casefold()
 
 
+def _item_key(text) -> str:
+    """등록 품목 대조용 품목명: 띄어쓰기를 모두 빼고 대소문자를 무시한다 ('냉동딸기 (IQF)' → '냉동딸기(iqf)').
+    이 기준은 에이전트가 등록 품목을 고를 때 적용한다."""
+    return re.sub(r'\s+', '', str(text or '')).casefold()
+
+
 def _registered_item(items: list[dict], current: dict) -> dict | None:
-    """이번 메일의 품목과 같은 그 업체의 등록 품목. 품목명이 서로 포함되면 같은 품목으로 보고, 여럿이면 규격으로 좁힌다.
-    하나로 정해질 때만 돌려준다(애매하면 연결하지 않는다)."""
-    name = _letters(current.get('item_name', {}).get('value'))
+    """이번 메일의 품목과 같은 그 업체의 등록 품목. 띄어쓰기·대소문자만 빼고 품목명이 같을 때 같은 품목으로 보고,
+    여럿이면 규격으로 좁힌다. 하나로 정해질 때만 돌려준다(애매하면 연결하지 않는다).
+    이름이 서로 포함되는 정도('냉동딸기'와 '냉동딸기 (IQF)')로는 연결하지 않는다. DB가 같은 품목으로 보지 않아 저장이 거부된다."""
+    name = _item_key(current.get('item_name', {}).get('value'))
     if not name:
         return None
-    found = [item for item in items if (registered := _letters(item.get('item_name'))) and
-             (registered in name or name in registered)]
+    found = [item for item in items if _item_key(item.get('item_name')) == name]
     if len(found) > 1:
         wanted = name + _letters(current.get('specification', {}).get('value'))
         found = [item for item in found if _letters(item.get('specification')) and
@@ -762,19 +786,24 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
     case_item = case.get('item_name')
     if case_item and 'item_name' in values and _compact(values['item_name']['value']) != _compact(case_item):
         review.append({'field': 'item_name', 'code': 'ITEM_NAME_VARIANT'})
-    if rejected:
-        return _with_hints({'status': 'REJECTED', 'rejected': rejected}, rejected)
-
     # 이번 호출의 모든 근거는 한 업체의 메일이어야 한다
     case_mails = {mail['mail_id']: mail for mail in _read(lambda: store.list_case_mails(case_id))}
     evidence_mails = {entry['mail_id'] for entry in [*values.values(), *tiers, *costs, *notes]}
     supplier_name = values['supplier_name']['value'] if 'supplier_name' in values else None
     supplier_id, issue = _quote_supplier(store, case_id, case_mails, evidence_mails, supplier_name)
+    # 원문 근거가 확인된 업체명이 등록 거래처와 맞지 않으면(미등록·연결 업체와 다름) 다른 항목의 거절보다 먼저 알린다.
+    # 다른 항목을 고쳐도 저장할 수 없는 견적이라, 다시 보내기를 다른 항목에 쓰고 원인을 잃지 않게 한다
+    # (2026-11-06 실제 LLM 재현: 규격 근거 거절로 두 번 다시 보내고 SUPPLIER_MISMATCH에 닿지 못함)
+    if rejected and not (supplier_name and issue and issue['code'] in ('SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH')):
+        return _with_hints({'status': 'REJECTED', 'rejected': rejected}, rejected)
     if issue:
         record_issue = getattr(store, 'record_extraction_issue', None)
         if callable(record_issue) and issue['code'] in {'SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH'}:
             record_issue(case_id, sorted(evidence_mails), issue, supplier_name)
-        return _with_hints({'status': 'REJECTED', 'rejected': [issue]}, [issue])
+        result = _with_hints({'status': 'REJECTED', 'rejected': [issue]}, [issue])
+        if issue['code'] == 'SUPPLIER_NOT_MATCHED':
+            result['next'] = _supplier_retry_next(supplier_name)
+        return result
     # 원문 메일은 근거 메일 중 가장 최근에 받은 메일이다 (회신이 이전 메일의 값을 함께 근거로 써도 회신이 원문)
     source_mail_id = max(evidence_mails, key=lambda mail_id: (case_mails[mail_id].get('received_at') or '', mail_id))
     if check.instruction_mails & evidence_mails:
@@ -871,7 +900,8 @@ def store_structured_mail(fields: list[QuoteField], runtime: ToolRuntime[RunCont
 
     입력: 모든 값은 원문에 적힌 그대로, 근거 evidence{mail_id, part('body' 또는 attachment_ref), page, cell}와 함께 준다.
     fields: field_name과 raw_value. 원문에서 찾았지만 값이 없으면 raw_value를 null로 둔다.
-      supplier_name(메일이 업체에 연결돼 있지 않으면 필수), item_name, specification, origin, certifications, tax_terms,
+      supplier_name(메일이 업체에 연결돼 있지 않으면 필수. 연결돼 있어도 원문에 회사명이 있으면 보낸다 — 연결된 업체와
+        다른 등록 업체이면 SUPPLIER_MISMATCH), item_name, specification, origin, certifications, tax_terms,
       lead_time, delivery_date(납품·입고일), unit_price, unit, available_quantity, effective_from(적용일),
       valid_until(유효기간), currency, order_unit, quantity_per_order_unit, moq, pack_multiple,
       previous_unit_price(인상 전 단가), increase_reason(인상 사유)
@@ -1047,7 +1077,8 @@ def search_summary(result: dict, item_name: str, drafted: list[str] | None = Non
     drafted가 있으면(초안 생성 후) 실제로 초안을 만든 업체와 만들지 못한 업체로 쓴다."""
     scope = result['scope']
     if scope['searched'] == 0:
-        return f'{item_name} 취급 등록 업체가 없어 견적을 요청할 후보가 없습니다.'
+        # "등록 … 업체 … 없" 표현은 서버가 '거래처 미연결'로 잘못 읽는다(hold.py). 후보가 없다는 뜻만 쓴다
+        return f'{item_name} 취급 업체를 찾지 못해 견적을 요청할 후보가 없습니다.'
     parts = []
     for code, label in EXCLUDE_LABELS.items():
         rows = [e for e in result['excluded'] if e['code'] == code]
