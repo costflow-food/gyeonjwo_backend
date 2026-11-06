@@ -47,7 +47,9 @@ PROMPTS = {
 가장 먼저 지킬 규칙 (위에서부터 순서대로 판단한다):
 1. 저장할지 먼저 정한다. 업무 품목(get_case_context의 item_name)의 단가가 메일·첨부에 숫자로 적혀 있을 때만 저장한다.
    물량별 단가만 있어도 저장한다. 아래면 store_structured_mail을 부르지 않고 HOLD한다.
-   - 단가가 없다 ("추후 안내", "견적서 송부 예정", 접수 안내, 읽을 수 없는 스캔 첨부만 있음)
+   - 단가가 없다 ("추후 안내", "견적서 송부 예정", 접수 안내)
+   본문에 단가가 없고 "첨부 참고"처럼 첨부가 있으면, 첨부를 읽기 전에는 단가가 없다고 정하지 않는다.
+   첨부 status가 NO_TEXT(글자가 없는 스캔본)여도 read_mail_evidence로 그 쪽을 읽는다. 서버가 그림을 글자로 읽어(OCR) 준다.
    - 업무 품목이 아닌 다른 품목의 견적만 있다 (예: 업무가 냉동 딸기인데 냉동 블루베리 견적만 있음)
    업무 품목이 비어 있으면(null) 메일의 품목을 업무 품목으로 본다.
 2. 업체: 메일 목록에 supplier_id가 있는 메일은 업체가 이미 정해져 있다. 이때는 supplier_name을 fields에 아예 넣지 않는다
@@ -65,6 +67,10 @@ PROMPTS = {
 2. read_mail_evidence(mail_id, part, page)로 mail_ids 메일 중 필요한 본문·첨부 쪽만 골라 읽는다.
    part는 본문이면 'body', 첨부면 메일 목록의 attachment_ref 값(예: 'att-1')이다.
    NOT_FOUND면 돌려받은 available_parts에서 part·쪽을 골라 다시 읽는다.
+   메일 목록의 첨부 status가 NO_TEXT인 쪽도 읽는다(서버가 OCR로 읽는다). 결과의 text_source가 OCR이면 그림을 글자로
+   읽은 것이다. 보이는 글자를 그대로 옮기고, 흐리거나 빠진 글자를 짐작해 채우지 않는다.
+   UNREADABLE이면 그 쪽은 다시 읽지 않는다(다시 불러도 같다). UNREADABLE이거나 OCR 결과도 비었으면(empty) 그 쪽은
+   읽을 수 없는 첨부다. 첨부를 읽어 보지 않고 "첨부를 읽을 수 없음"으로 HOLD하지 않는다.
    도구 호출 수에 한도가 있으니 모든 쪽을 읽지 않는다.
 3. recheck_fields가 비어 있지 않으면 그 항목에 해당하는 구간만 다시 읽는다.
 4. store_structured_mail을 호출한다. 값이 있는 항목은 하나도 빠짐없이 근거 evidence(mail_id, part, page, cell)를 붙인다.

@@ -2,7 +2,9 @@
 
 각 노드는 CaseState를 받아 바꿀 필드만 dict로 돌려준다. graph.build_graph(nodes=Nodes(...))로 교체·주입한다.
 구매안·가격 검증은 app.agents.tools의 공통 계산(plan_total 등)을 에이전트 도구와 함께 쓴다(같은 숫자가 나온다).
-문서 읽기는 app.features.review.infrastructure.documents를 재사용한다(텍스트 PDF·텍스트·HTML·xlsx, OCR은 하지 않는다).
+문서 읽기는 app.features.review.infrastructure.documents를 재사용한다(텍스트 PDF·텍스트·HTML·xlsx).
+전처리에서는 OCR하지 않는다. 스캔 PDF의 빈 쪽은 에이전트가 그 쪽을 읽을 때 저장소(read_mail_part)가
+documents.ocr_pdf_page로 읽는다(저장소 연결은 서버 저장소 작업에서 한다).
 """
 import io
 import json
@@ -61,7 +63,9 @@ _EXTENSION_TYPES = {'.pdf': 'application/pdf', '.txt': 'text/plain', '.csv': 'te
 # 읽지 못한 첨부를 담당자에게 알리는 문장 (status → 사유)
 DOCUMENT_ISSUES = {'NO_TEXT': '글자가 없는 PDF(스캔본)라 읽지 못했습니다', 'UNSUPPORTED': '지원하지 않는 첨부 형식입니다',
                    'TOO_LARGE': '첨부가 너무 커서 읽지 않았습니다', 'FAILED': '첨부를 읽는 중 오류가 났습니다',
-                   'DOWNLOAD_FAILED': '첨부를 받아오지 못했습니다'}
+                   'DOWNLOAD_FAILED': '첨부를 받아오지 못했습니다',
+                   'PDF_CONTENT': 'PDF가 손상됐거나 암호·쪽수 한도 때문에 읽을 수 없습니다'}
+PDF_RETRY_EXHAUSTED = '첨부를 읽는 중 오류가 나 {attempts}번 시도했지만 읽지 못했습니다'
 
 
 def _decode(content: bytes) -> str:
@@ -92,16 +96,28 @@ def _sheet_pages(content: bytes) -> list[str]:
 
 def read_document(filename: str, content_type: str | None, content: bytes) -> dict:
     """첨부 하나를 쪽 단위 텍스트로 읽는다. 반환: {status: READ·NO_TEXT·UNSUPPORTED·TOO_LARGE·FAILED, pages}.
-    PDF는 쪽마다, xlsx는 시트마다 한 쪽이다. 글자가 없는 PDF(스캔본)는 OCR하지 않고 NO_TEXT로 둔다."""
+    PDF는 쪽마다, xlsx는 시트마다 한 쪽이다. 여기서는 OCR하지 않는다. 글자가 없는 PDF(스캔본)는 NO_TEXT이고
+    pages는 쪽수만큼의 ''다(빈 쪽의 OCR은 저장소 read_mail_part 몫이다).
+    PDF 기술 오류는 documents.PDF_MAX_ATTEMPTS번까지 시도한다. 저장 형식이라 시도 기록은 넣지 않는다(_read_document)."""
+    return _read_document(filename, content_type, content)[0]
+
+
+def _read_document(filename: str, content_type: str | None, content: bytes) -> tuple[dict, dict | None]:
+    """(read_document 결과, PDF 시도 기록 {attempts, error_kind, retry_exhausted} 또는 None)"""
     kind = (content_type or '').split(';')[0].strip().lower()
     if kind not in _EXTENSION_TYPES.values():
         kind = _EXTENSION_TYPES.get(Path(filename or '').suffix.lower(), kind)
     if len(content) > MAX_ATTACHMENT_BYTES:
-        return {'status': 'TOO_LARGE', 'pages': []}
+        return {'status': 'TOO_LARGE', 'pages': []}, None
+    if kind == 'application/pdf':
+        result = documents.read_pdf_document(content)
+        log = {key: result[key] for key in ('attempts', 'error_kind', 'retry_exhausted')}
+        return {'status': result['status'], 'pages': result['pages']}, log
+    return _read_other(kind, content), None
+
+
+def _read_other(kind: str, content: bytes) -> dict:
     try:
-        if kind == 'application/pdf':
-            pages = documents.read_pdf_pages(content)
-            return {'status': 'READ', 'pages': pages} if pages else {'status': 'NO_TEXT', 'pages': []}
         if kind in ('text/plain', 'text/csv'):
             return {'status': 'READ', 'pages': [_decode(content)]}
         if kind == 'text/html':
@@ -128,11 +144,21 @@ def preprocess(state) -> dict:
         if content is None:
             issues.append(f"{item['mail_id']} {item['filename']}: {DOCUMENT_ISSUES['DOWNLOAD_FAILED']}")
             continue
-        document = read_document(item['filename'], item.get('content_type'), content)
+        document, log = _read_document(item['filename'], item.get('content_type'), content)
         _document_store.save_document(state['case_id'], item['mail_id'], item['attachment_ref'], document)
         if document['status'] != 'READ':
-            issues.append(f"{item['mail_id']} {item['filename']}: {DOCUMENT_ISSUES[document['status']]}")
+            issues.append(f"{item['mail_id']} {item['filename']}: {_document_issue(document['status'], log)}")
     return {'unresolved': issues} if issues else {}
+
+
+def _document_issue(status: str, log: dict | None) -> str:
+    """읽지 못한 사유. PDF는 내용 문제와 기술 오류(재시도 소진)를 나눠 적는다."""
+    if status == 'FAILED' and log:
+        if log['retry_exhausted']:
+            return PDF_RETRY_EXHAUSTED.format(attempts=log['attempts'])
+        if log['error_kind'] == 'CONTENT':
+            return DOCUMENT_ISSUES['PDF_CONTENT']
+    return DOCUMENT_ISSUES[status]
 
 
 def plan_validation(state) -> dict:
