@@ -34,7 +34,8 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import ToolMessage
 from langchain_openai import ChatOpenAI
 
-from app.agents.schemas import (AGENT_IO, MAX_TOOL_CALLS_PER_AGENT_CALL, TOOL_CALL_LIMITS, AgentInput, AgentOutput,
+from app.agents.schemas import (AGENT_IO, EXTRACTION_TOOL_CALL_CAP, EXTRACTION_TOOL_CALLS_PER_EXTRA_MAIL,
+                                MAX_TOOL_CALLS_PER_AGENT_CALL, TOOL_CALL_LIMITS, AgentInput, AgentOutput,
                                 AgentRole, RunContext)
 from app.agents.tools import EXTRACTION_FIELD_NAMES, candidate_summary, tools_for
 
@@ -480,14 +481,23 @@ def system_prompt(role: AgentRole) -> str:
     return AGENT_POLICY.format(output=AGENT_IO[role][1].__name__) + '\nRole: ' + role + '\n' + PROMPTS[role]
 
 
-def build_agent(role: AgentRole, model: BaseChatModel):
+def tool_call_limit(role: AgentRole, data: AgentInput | None = None) -> int:
+    """이번 호출의 도구 호출 한도. ①은 받은 메일 수에 따라 늘린다(두 번째 메일부터 메일마다, 상한까지)."""
+    base = TOOL_CALL_LIMITS.get(role, MAX_TOOL_CALLS_PER_AGENT_CALL)
+    if role != AgentRole.INFO_EXTRACTOR or data is None:
+        return base
+    extra = max(len(data.mail_ids) - 1, 0) * EXTRACTION_TOOL_CALLS_PER_EXTRA_MAIL
+    return min(base + extra, max(base, EXTRACTION_TOOL_CALL_CAP))
+
+
+def build_agent(role: AgentRole, model: BaseChatModel, limit: int | None = None):
+    """역할 에이전트. limit을 주지 않으면 역할 기본 도구 호출 한도를 쓴다."""
     _, output = AGENT_IO[role]
     return create_agent(
         model, tools_for(role), system_prompt=system_prompt(role),
         response_format=ToolStrategy(output),
         context_schema=RunContext,
-        middleware=[ToolCallLimitMiddleware(run_limit=TOOL_CALL_LIMITS.get(role, MAX_TOOL_CALLS_PER_AGENT_CALL),
-                                            exit_behavior='error')],
+        middleware=[ToolCallLimitMiddleware(run_limit=limit or tool_call_limit(role), exit_behavior='error')],
         name=role.lower(),
     )
 
@@ -953,12 +963,19 @@ class AgentRunner:
         """이 역할에 쓰는 모델."""
         return self.role_models.get(role, self.model)
 
+    def agent_for(self, role: AgentRole, data: AgentInput):
+        """이번 호출에 쓸 에이전트. 기본 한도면 역할마다 하나, 한도가 다르면(①의 메일 여러 통) 한도별로 만든다."""
+        limit = tool_call_limit(role, data)
+        key = role if limit == tool_call_limit(role) else (role, limit)
+        if key not in self.agents:
+            self.agents[key] = build_agent(role, self.model_for(role), limit)
+        return self.agents[key]
+
     def __call__(self, role: AgentRole, data: AgentInput) -> AgentOutput:
         expected_in, _ = AGENT_IO[role]
         if not isinstance(data, expected_in):
             raise TypeError(f'{role} expects {expected_in.__name__}')
-        if role not in self.agents:
-            self.agents[role] = build_agent(role, self.model_for(role))
+        agent = self.agent_for(role, data)
         context = RunContext(str(data.case_id), data.input_revision)
         if self.runs is not None:
             model = self.model_for(role)
@@ -970,7 +987,7 @@ class AgentRunner:
                                  started['review_batch_id'])
         log = ToolCallLog()
         try:
-            result = self.agents[role].invoke({'messages': [('user', data.model_dump_json())]}, context=context,
+            result = agent.invoke({'messages': [('user', data.model_dump_json())]}, context=context,
                                               config={'callbacks': [log]})
             output = check_final_output(role, data, context, result['structured_response'], result['messages'])
         except Exception as error:
