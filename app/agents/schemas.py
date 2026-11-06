@@ -323,17 +323,40 @@ class AgentOutput(StrictModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+# 보류 코드 (KAN-146). 서버(work_cases/domain/hold.py)가 이 코드로 화면 문구를 정한다. reason은 한국어 문장만 쓴다.
+# HOLD인데 hold가 None이면 서버가 HOLD_REASON_UNAVAILABLE로 본다. 실행 중 업무가 바뀌어 멈춘 경우
+# (REVISION_CHANGED·CASE_NOT_FOUND)와 원인을 정하지 못한 경우만 None이다(2026-11-06 결정).
+ExtractionHoldCode = Literal['SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH', 'MISSING_FIELD', 'MISSING_EVIDENCE',
+                             'SOURCE_READ_FAILED', 'NO_QUOTE_DATA']
+HoldField = Literal['supplier_name', 'item_name', 'unit_price', 'unit']   # MISSING_FIELD에서 빠진 항목
+CandidateHoldCode = Literal['NO_SUITABLE_CANDIDATES', 'CONDITIONS_MISSING']
+
+
 class ExtractionHold(StrictModel):
-    code: Literal['SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH', 'MISSING_FIELD',
-                  'MISSING_EVIDENCE', 'SOURCE_READ_FAILED', 'NO_QUOTE_DATA',
-                  'CONDITIONS_MISSING', 'HOLD_REASON_UNAVAILABLE']
-    field: str | None = None
+    code: ExtractionHoldCode
+    field: HoldField | None = None       # MISSING_FIELD일 때만
+
+    @model_validator(mode='after')
+    def field_only_for_missing(self):
+        if self.field is not None and self.code != 'MISSING_FIELD':
+            raise ValueError('hold.field is only for MISSING_FIELD')
+        return self
+
+
+class CandidateHold(StrictModel):
+    code: CandidateHoldCode
 
 
 class ExtractionOut(AgentOutput):
-    hold: ExtractionHold | None = None
     next_action: Literal[N.STORED, N.HOLD]
     quote_version_ids: list[str] = []
+    hold: ExtractionHold | None = None   # HOLD일 때만. STORED면 비운다
+
+    @model_validator(mode='after')
+    def hold_only_when_hold(self):
+        if self.hold is not None and self.next_action != N.HOLD:
+            raise ValueError('hold is only for next_action HOLD')
+        return self
 
 
 class CandidateOut(AgentOutput):
@@ -341,6 +364,13 @@ class CandidateOut(AgentOutput):
     candidates: list[Candidate] = []
     draft_ids: list[str] = []
     web_observations: list[dict] = Field(default_factory=list, max_length=3)
+    hold: CandidateHold | None = None    # HOLD일 때만. SEND_RFQ면 비운다
+
+    @model_validator(mode='after')
+    def hold_only_when_hold(self):
+        if self.hold is not None and self.next_action != N.HOLD:
+            raise ValueError('hold is only for next_action HOLD')
+        return self
 
 
 class PriorityOut(AgentOutput):

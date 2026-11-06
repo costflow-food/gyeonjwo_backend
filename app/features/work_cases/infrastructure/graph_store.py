@@ -99,13 +99,15 @@ class GraphStore(AgentStore):
         # Failed runner payloads contain partial_tool_calls with raw mail. Drop
         # them; only validated completed role output is private persisted data.
         safe_output = deepcopy(output) if status == 'COMPLETED' else None
+        is_candidate = status == 'COMPLETED' and self.role_runs[str(agent_run_id)] == 'CANDIDATE'
+        if is_candidate:
+            snapshot = self.candidate_snapshot(str(agent_run_id), safe_output)
         if isinstance(safe_output, dict) and safe_output.get('next_action') == 'HOLD':
             from app.features.work_cases.domain.hold import from_agent_output
             safe_output['hold'] = from_agent_output(
                 safe_output, rejection_codes=self.extraction_rejections.get(str(agent_run_id), ()),
-            ).model_dump()
-        if status == 'COMPLETED' and self.role_runs[str(agent_run_id)] == 'CANDIDATE':
-            snapshot = self.candidate_snapshot(str(agent_run_id), safe_output)
+            ).for_storage()
+        if is_candidate:
             result = self.rpc('finish_case_graph_candidate_run', p_run=str(agent_run_id), p_output=safe_output,
                               p_candidate_set=snapshot.model_dump(mode='json'))
         else:
@@ -116,7 +118,7 @@ class GraphStore(AgentStore):
         if self.active_extraction_run == str(agent_run_id):
             self.active_extraction_run = None
             self.extraction_rejections.pop(str(agent_run_id), None)
-        if status == 'COMPLETED' and self.role_runs[str(agent_run_id)] == 'CANDIDATE':
+        if is_candidate:
             self.candidate_set_id = str(agent_run_id)
 
     def candidate_snapshot(self, run_id, output):

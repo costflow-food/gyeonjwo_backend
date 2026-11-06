@@ -1,6 +1,7 @@
 """Closed hold codes and server-owned Korean copy. Never forward model text."""
 import re
 from typing import Literal
+from pydantic import PrivateAttr
 from app.shared.domain.schemas import StrictModel
 
 HoldCode = Literal['SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH', 'MISSING_FIELD',
@@ -30,12 +31,21 @@ MISSING_MESSAGES = {
 class HoldInfo(StrictModel):
     code: HoldCode
     message: str
+    _field: str | None = PrivateAttr(default=None)
+
+    def for_storage(self) -> dict:
+        result = self.model_dump()
+        if self._field is not None:
+            result['field'] = self._field
+        return result
 
 
 def hold_info(code, field=None):
     code = code if isinstance(code, str) and code in MESSAGES else 'HOLD_REASON_UNAVAILABLE'
-    message = MISSING_MESSAGES.get(field, MESSAGES[code]) if code == 'MISSING_FIELD' and isinstance(field, str) else MESSAGES[code]
-    return HoldInfo(code=code, message=message)
+    field = field if code == 'MISSING_FIELD' and isinstance(field, str) and field in MISSING_MESSAGES else None
+    hold = HoldInfo(code=code, message=MISSING_MESSAGES.get(field, MESSAGES[code]))
+    hold._field = field
+    return hold
 
 
 _ABSENT = r'(?:없(?!지(?:는)?\s*않|는\s*(?:것은|것이|건|게)\s*아니)|누락(?!되지\s*않)|부족(?!하지\s*않)|찾지\s*못|확인\s*(?:할\s*수\s*없|되지\s*않|되지\s*못|이\s*어려)|특정.{0,10}없|불명확)'
