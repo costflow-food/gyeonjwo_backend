@@ -7,7 +7,7 @@ from app.features.work_cases.application.cursor import iso_z
 
 SOURCE_TYPES = ('REGISTERED', 'VERIFIED_WEB')
 CERTIFICATION_STATES = {'CONFIRMED', 'UNCONFIRMED', 'NOT_MET'}
-SUPPLIER_COLUMNS = ('id,name,source_type,contact_email,location,contact_name,contact_phone,'
+SUPPLIER_COLUMNS = ('id,name,source_type,contact_email,location,contact_jsonb,'
                     'business_registration_no,evidence_jsonb')
 ITEM_COLUMNS = ('id,supplier_id,item_name,specification,unit,origin,certifications_jsonb,notes,'
                 'notes_evidence_jsonb,units_per_box::text,weight_per_box::text')
@@ -51,10 +51,18 @@ def supplier_summary(row, item_names):
 
 
 def price_record(row, date_key):
-    return {'unit_price': decimal_text(row['unit_price']), 'unit': row['unit'],
-            date_key: row.get(date_key), 'quantity': decimal_text(row.get('quantity')),
-            **{key: row.get(key) for key in ('conditions', 'source_type', 'source_label', 'source_mail_id')
-               if isinstance(row.get(key), str)}}
+    reference = date_key == 'effective_from'
+    result = {'unit_price': decimal_text(row['unit_price']), 'unit': row['unit'],
+              date_key: row.get(date_key), 'quantity': decimal_text(row.get('quantity'))}
+    if reference:
+        result['source_type'] = 'MAIL_QUOTE'
+        result['source_mail_id'] = row['source_mail_id']
+        conditions = row.get('conditions_jsonb')
+        if isinstance(conditions, dict) and isinstance(conditions.get('summary'), str):
+            result['conditions'] = conditions['summary']
+    else:
+        result['source_label'] = '실제 거래'
+    return result
 
 
 class SupplierRepository:
@@ -109,8 +117,11 @@ class SupplierRepository:
         matches = []
         for row in suppliers:
             item_names = names.get(row['id'], [])
+            contact = row.get('contact_jsonb')
             fields = [row.get(key) for key in ('name', 'business_registration_no', 'contact_email',
-                                               'contact_name', 'location')] + item_names
+                                               'location')] + item_names
+            if isinstance(contact, dict):
+                fields.append(contact.get('name'))
             if not needle or any(needle in value.casefold() for value in fields if isinstance(value, str)):
                 matches.append(supplier_summary(row, item_names))
 
@@ -124,13 +135,17 @@ class SupplierRepository:
                 'next_cursor': codec.encode(scope, snapshot, position(items[-1])) if len(remaining) > limit else None}
 
     def prices(self, table, item, date_key, *, latest=False):
-        columns = (f'id,unit_price::text,unit,{date_key},quantity::text,conditions,source_type,'
-                   'source_label,source_mail_id')
+        reference = table == 'price_history'
+        fields = 'conditions_jsonb,source_mail_id' if reference else 'quantity::text'
+        columns = f'id,unit_price::text,unit,{date_key},{fields}'
 
         def query():
-            return (self.query(table, columns).eq('supplier_item_id', item['id'])
-                    .eq('supplier_id', item['supplier_id']).not_.is_('unit_price', 'null')
-                    .not_.is_('unit', 'null').order(date_key, desc=True, nullsfirst=False).order('id', desc=True))
+            scoped = self.query(table, columns).eq('supplier_item_id', item['id'])
+            # Reference prices are linked to the supplier through the owned item.
+            if not reference:
+                scoped = scoped.eq('supplier_id', item['supplier_id'])
+            return (scoped.not_.is_('unit_price', 'null').not_.is_('unit', 'null')
+                    .order(date_key, desc=True, nullsfirst=False).order('id', desc=True))
 
         rows = self.rows(query().limit(1)) if latest else self.scan(query)
         return [price_record(row, date_key) for row in rows]
@@ -140,7 +155,11 @@ class SupplierRepository:
         items = self.scan(lambda: self.query('supplier_items', ITEM_COLUMNS)
                           .eq('supplier_id', supplier_id).order('item_name').order('id'))
         result = supplier_summary(row, [item['item_name'] for item in items])
-        result.update(contact={'name': row.get('contact_name'), 'phone': row.get('contact_phone')},
+        contact = row.get('contact_jsonb')
+        if not isinstance(contact, dict):
+            contact = {}
+        result.update(contact={key: contact.get(key) if isinstance(contact.get(key), str) else None
+                               for key in ('name', 'phone')},
                       business_registration_no=row.get('business_registration_no'),
                       evidence=evidence(row.get('evidence_jsonb')), items=[])
         for item in items:

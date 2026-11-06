@@ -8,7 +8,7 @@ from app.shared.domain.schemas import EmptyRequest
 from app.features.review.domain.schemas import NotesRequest
 from app.features.review.domain.responses import AnalysisResponse, FileListResponse, NotesResponse, QueueChangeResponse, WorkDetailResponse
 
-router = APIRouter(tags=['review'])
+router = APIRouter(tags=['legacy-work-items'], deprecated=True)
 protected = [Depends(require_member)]
 WorkId = Annotated[str, Path(pattern=r'^W-[0-9]{8}-[0-9]{3,}$', max_length=64)]
 
