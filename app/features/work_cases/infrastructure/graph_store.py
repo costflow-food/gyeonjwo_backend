@@ -56,9 +56,30 @@ class GraphStore(AgentStore):
     def extraction_issue_mail_ids(self):
         return self.scope.mail_ids
 
-    def record_extraction_issue(self, case_id, mail_ids, issue, supplier_name):
+    def record_extraction_issue(self, case_id, agent_run_id, issue, supplier_name=None):
         self.check(case_id)
         run_id = self.active_extraction_run
+        # The deployed tool passes mail IDs and a supplier name. PR #51 passes
+        # the active run ID and a payload containing evidence references.
+        if isinstance(agent_run_id, (list, tuple)):
+            mail_ids = agent_run_id
+        else:
+            if run_id is None or str(agent_run_id) != run_id:
+                raise ServiceError('ACTION_NOT_ALLOWED', '추출 거절 근거의 범위를 확인할 수 없습니다.', 409)
+            if issue.get('code') == 'MISSING_FIELD' and issue.get('field') == 'supplier_name':
+                # The existing DB contract acknowledges supplier matching
+                # rejections only. The structured HOLD still carries MISSING_FIELD.
+                return
+            supplier_name = issue.get('supplier_name')
+            evidence = issue.get('evidence')
+            mail_ids = []
+            for ref in evidence if isinstance(evidence, list) else []:
+                evidence_id = ref.get('evidence_id') if isinstance(ref, dict) else None
+                mail_id, _, location = evidence_id.partition(':') if isinstance(evidence_id, str) else ('', '', '')
+                if not mail_id or not (location == 'body' or (location.startswith('part:') and location[5:])):
+                    raise ServiceError('ACTION_NOT_ALLOWED', '추출 거절 근거의 범위를 확인할 수 없습니다.', 409)
+                mail_ids.append(mail_id)
+            mail_ids = list(dict.fromkeys(mail_ids))
         if (run_id is None or not mail_ids or not set(mail_ids) <= set(self.extraction_issue_mail_ids())
                 or issue.get('field') != 'supplier_name'
                 or issue.get('code') not in {'SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH'}):

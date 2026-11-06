@@ -181,7 +181,7 @@ class GoogleAPI:
 
     def message_headers(self, grant, message_id):
         query = urlencode([('format', 'metadata')] + [('metadataHeaders', name)
-                           for name in ('Message-ID', 'From', 'To', 'Cc', 'Subject')])
+                           for name in ('Message-ID', 'From', 'To', 'Cc', 'Subject', 'X-Gyeonjwo-Dispatch-ID')])
         return self.gmail(grant, 'messages/' + quote(message_id, safe='') + '?' + query)
 
     def send_claimed(self, grant, claim):
@@ -192,6 +192,7 @@ class GoogleAPI:
         message = EmailMessage(policy=SMTP)
         message['From'], message['To'] = grant.email, claim.recipient
         message['Subject'], message['Message-ID'] = claim.subject, claim.rfc_message_id
+        message['X-Gyeonjwo-Dispatch-ID'] = claim.draft_id
         message['Date'] = format_datetime(datetime.now(timezone.utc))
         message.set_content(claim.body_text)
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode().rstrip('=')
@@ -199,6 +200,10 @@ class GoogleAPI:
         # caller has claimed SENDING; transport is one-shot with no POST retry.
         return self._call('POST', 'gmail.googleapis.com', '/gmail/v1/users/me/messages/send',
                           token=grant.access_token, payload={'raw': raw})
+
+    def recent_sent_ids(self, grant):
+        page = self.gmail(grant, 'messages?' + urlencode({'labelIds': 'SENT', 'maxResults': 100}))
+        return [row['id'] for row in page.get('messages', [])]
 
     def sent_by_message_id(self, grant, rfc_message_id):
         data = self.gmail(grant, 'messages?' + urlencode({'q': 'in:sent rfc822msgid:' + rfc_message_id,
@@ -216,7 +221,7 @@ class GoogleAPI:
         Sample the history cursor BEFORE listing so arrivals during import remain
         eligible for the next incremental pass. Do not follow initial nextPageToken:
         maxResults alone is only a page size and otherwise imports the whole inbox.
-        The same bound applies when the caller recovers an expired history cursor.
+        Expired cursors use the separate paginated recovery path.
         """
         ids, token, seen_tokens = set(), None, set()
         if history_id is None:
@@ -248,3 +253,25 @@ class GoogleAPI:
             if token in seen_tokens:
                 raise ServiceError('GOOGLE_UNAVAILABLE', '메일 목록의 페이지를 확인할 수 없습니다.', 503)
             seen_tokens.add(token)
+
+    def recover_message_ids(self, grant, last_synced_at):
+        latest = str(self.profile(grant)['historyId'])
+        params = {'labelIds': 'INBOX', 'maxResults': 100}
+        if last_synced_at is not None:
+            timestamp = datetime.fromisoformat(last_synced_at.replace('Z', '+00:00'))
+            if timestamp.tzinfo is None:
+                raise ValueError('Recovery timestamp must include a timezone')
+            # A sync finishes after sampling its cursor. Re-read an overlap
+            # around that finish time and rely on durable message deduplication.
+            params['q'] = f'after:{int(timestamp.timestamp()) - 86400}'
+        ids, seen_tokens = {}, set()
+        while True:
+            page = self.gmail(grant, 'messages?' + urlencode(params))
+            ids.update(dict.fromkeys(row['id'] for row in page.get('messages', [])))
+            token = page.get('nextPageToken')
+            if not token:
+                return list(ids), latest
+            if token in seen_tokens:
+                raise ServiceError('GOOGLE_UNAVAILABLE', '메일 복구 페이지를 확인할 수 없습니다.', 503)
+            seen_tokens.add(token)
+            params['pageToken'] = token

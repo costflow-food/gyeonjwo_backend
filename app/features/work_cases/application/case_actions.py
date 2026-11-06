@@ -28,14 +28,14 @@ def case_actions(case, readiness: StartReadiness, resume_readiness: StartReadine
     if case.get('status') == 'Waiting' and case.get('decision') == 'ACCEPT_INCREASE':
         disabled.append({'action': 'RESUME', 'reason_code': 'ACTION_NOT_ALLOWED',
                          'message': '현재 재개 API는 추출 보류 업무의 재개만 지원합니다.'})
-    # Only extraction HOLD is supported here; approval/UNKNOWN and archive
-    # cannot be bypassed by resuming. The transaction rechecks all guards.
-    if case.get('processing_step') == 'ON_HOLD':
+    # Approval/UNKNOWN and archive cannot be bypassed by resuming.
+    if case.get('processing_step') in {'ON_HOLD', 'FAILED'} or review_ready:
         blocked = None
         if case.get('archived_at') is not None:
             blocked = ('CASE_ARCHIVED', '보관된 업무는 먼저 복원해야 합니다.')
-        elif case.get('status') != 'Pending' or case.get('decision') is not None or not case.get('current_batch_id'):
-            blocked = ('ACTION_NOT_ALLOWED', '현재 상태에서는 추출 보류 업무를 재개할 수 없습니다.')
+        elif ((not review_ready and case.get('status') not in {'Pending', 'Running'})
+              or case.get('decision') is not None or not case.get('current_batch_id')):
+            blocked = ('ACTION_NOT_ALLOWED', '현재 상태에서는 검토를 재개할 수 없습니다.')
         else:
             resume = resume_readiness or StartReadiness('RESUME_INTEGRATION_REQUIRED', '보류 업무의 재개 저장 기능이 아직 연결되지 않았습니다.')
             unavailable = readiness if not readiness.available else resume

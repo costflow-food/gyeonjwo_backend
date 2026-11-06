@@ -1,16 +1,16 @@
 {
   "contract_version": 1,
   "date": "2026-11-05",
-  "status": "AGENT_IMPLEMENTED_DB_PENDING",
+  "status": "HTTP_IMPLEMENTED_DB_AND_FE_PENDING",
   "scope": "Where work_cases comparison conditions come from: quantity/unit, mandatory conditions, company policy. Agents read only work_cases (get_work_case); DB functions fill it.",
   "quantity": {
     "source": "Incumbent increase notice (INITIAL mail) supply quantity extracted by INFO_EXTRACTOR as available_quantity, e.g. \"11월 공급 계획 1,000kg에 대해 5,000원에서 5,500원으로 인상\" -> quantity 1000, unit kg.",
     "rules": [
-      "Team decision 2026-11-05: there is no separate buyer order quantity. Test mails always state the supply quantity.",
+      "KAN-131: explicitly entered buyer quantity and unit override the supply quantity. If omitted, preserve the existing extraction fallback.",
       "store_case_graph_quote fills work_cases.quantity/unit from record.case_conditions only when they are empty.",
       "unit is the quantity unit; if absent, the same mail price unit.",
       "Alternative supplier replies never set the case quantity; their available_quantity is only a supply capacity check.",
-      "Missing quantity: INFO_PRIORITY returns CONDITIONS_MISSING and holds. A user correction path (API-06) is required before production but deferred."
+      "Missing quantity may produce CONDITIONS_MISSING. API-06 HTTP is available; actual recovery requires atomic DB revision and job scheduling."
     ]
   },
   "company_items": {
@@ -56,8 +56,14 @@
       "PREVIOUS_UNKNOWN / COSTS_UNKNOWN / NOT_COMPUTABLE": "recheck source, ask evidence, or HOLD"
     }
   },
-  "not_in_scope": [
-    "API-04 request body is unchanged (no quantity input).",
-    "API-06 PATCH /work-cases/{id}/conditions and its RPC are deferred."
-  ]
+  "api_04": {
+    "request": "expected_revision, optional quantity (positive decimal string, 14 integer and 6 fractional digits), unit, due_date (ISO date). Quantity and unit are paired.",
+    "storage": "Existing submit_case_graph_start signature for revision-only requests. When conditions are present, send p_conditions JSONB to the extended signature; missing signature returns 503 START_CONDITIONS_INTEGRATION_REQUIRED. Save explicit conditions and immutable START receipt atomically before enqueue. No overwrite by extraction.",
+    "idempotency": "Canonical quantity/unit/date included in submit and lookup hashes. Revision-only hashes remain compatible."
+  },
+  "api_06": {
+    "request": "PATCH conditions with expected_revision, changes (quantity, unit, due_date and permitted other fields), optional reason/evidence_refs, Idempotency-Key.",
+    "storage": "Reuse KAN-136 submit_work_revision EDIT_CONDITIONS. Check ownership and revision, persist change, invalidate stale review and queue permitted reprocessing atomically.",
+    "resume": "For missing conditions before dispatch, reselect candidates using the new snapshot. DB and product must confirm safe retirement of old unsent drafts and rules for active or unresolved sends. Preserve sent records; never replay external sends."
+  }
 }

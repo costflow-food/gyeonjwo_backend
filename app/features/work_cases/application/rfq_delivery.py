@@ -8,6 +8,18 @@ from app.features.work_cases.domain.candidates import selected_for_dispatch
 logger = logging.getLogger('uvicorn.error.rfq_send')
 
 
+def reconciliation_method(raw, reference):
+    if 'SENT' not in (raw.get('labelIds') or []):
+        return None
+    headers = (raw.get('payload') or {}).get('headers', [])
+    dispatch = [header.get('value') for header in headers
+                if header.get('name', '').casefold() == 'x-gyeonjwo-dispatch-id']
+    if dispatch:
+        return 'DISPATCH_HEADER_AND_SNAPSHOT_MATCH' if dispatch == [reference.draft_id] else None
+    message_ids = [header.get('value') for header in headers if header.get('name', '').casefold() == 'message-id']
+    return 'RFC_MESSAGE_AND_SNAPSHOT_MATCH' if message_ids == [reference.rfc_message_id] else None
+
+
 class RfqDelivery:
     def __init__(self, repo, mailbox):
         self.repo, self.mailbox = repo, mailbox
@@ -88,20 +100,25 @@ class RfqDelivery:
             'recipient': draft['recipient'], 'subject': draft['subject'], 'body_text': draft['body_text']})
         # Absence is never evidence of failure. Only exact sent-mail evidence
         # can resolve UNKNOWN here; no automatic FAILED or replacement send.
-        ids = self.mailbox.google.sent_by_message_id(grant, reference.rfc_message_id)
+        ids = dict.fromkeys(self.mailbox.google.sent_by_message_id(grant, reference.rfc_message_id)
+                           + self.mailbox.google.recent_sent_ids(grant))
         matches = []
         for message_id in ids:
+            metadata = self.mailbox.google.message_headers(grant, message_id)
+            if reconciliation_method(metadata, reference) is None:
+                continue
             raw = self.mailbox.google.message(grant, message_id)
-            if 'SENT' not in raw.get('labelIds', []):
+            method = reconciliation_method(raw, reference)
+            if method is None or raw.get('id') != message_id:
                 continue
             mail = message_metadata(raw)
-            if (mail['message_id_header'] == reference.rfc_message_id
-                    and mail['sender'] == [grant.email.casefold()]
+            if (mail['sender'] == [grant.email.casefold()]
                     and mail['recipients'] == [reference.recipient]
                     and mail['subject'] == reference.subject
                     and mail['body_text'].replace('\r\n', '\n').rstrip('\n') == reference.body_text.replace('\r\n', '\n').rstrip('\n')):
-                matches.append(message_id)
+                matches.append((message_id, method))
         if len(matches) == 1:
-            self.repo.reconcile_sent(owner, draft_id, matches[0], {'method': 'RFC_MESSAGE_AND_SNAPSHOT_MATCH'})
+            message_id, method = matches[0]
+            self.repo.reconcile_sent(owner, draft_id, message_id, {'method': method})
             return {'status': 'SENT'}
         return {'status': 'UNKNOWN'}
