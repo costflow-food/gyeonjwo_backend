@@ -1,0 +1,12 @@
+{
+  "status": "LOCAL_BACKEND_ADAPTER_DB_COLUMNS_UNVERIFIED",
+  "frontend": "dev supplier_data_source.dart and supplier_repository_impl.dart use q and API-29/30/31 shapes. Team agreement on q remains pending.",
+  "ownership": "Every table read filters owner_user_id. Supplier source_type is restricted to REGISTERED and VERIFIED_WEB. Price history also matches supplier and item identifiers.",
+  "database": {
+    "existing_repository_references": ["suppliers", "supplier_items", "purchase_history", "price_history", "mail_sync_states"],
+    "confirm_with_KAN_133": "Check selected columns in suppliers/repository.py and mailbox sync status, especially contact/location/evidence, price conditions and source fields, and mailbox status/last_synced_at. Confirm the public sync-status route and enum.",
+    "reference_quote": "Only persist confirmed supplier-item quotes or separately verified reference prices with explicit evidence, source identity, unit and effective date where known. Validate money and units before write. Use owner plus immutable quote-version/source record identity as the database deduplication key.",
+    "purchase": "Only persist confirmed actual transactions with receipt or buyer confirmation. Use owner plus immutable transaction source and line identity as the database deduplication key. Do not promote a reference price into purchase history.",
+    "writes": "This feature reads existing rows. The DB owner and price verification owner must confirm historical eligibility and enforce atomic write/deduplication in KAN-133."
+  }
+}

@@ -104,18 +104,13 @@ class ReviewGraphStore(GraphStore):
         return {'mail_id': row['id'], 'previous_unit_price': value('previous_unit_price'),
                 'increase_reason': value('increase_reason')}
 
+    def extraction_issue_mail_ids(self):
+        return self.evidence_ids
+
     def start_agent_run(self, case_id, role, input_revision, input_snapshot, model_id, prompt_version):
-        self.check(case_id)
-        if input_revision != self.scope.revision:
-            raise ServiceError('REVISION_CONFLICT', '역할 실행 중 업무 입력이 변경됐습니다.', 409)
-        result = self.rpc('begin_case_graph_agent_run', p_role=str(role), p_input=input_snapshot,
-                          p_model=model_id, p_prompt_version=prompt_version)
-        run_id = str(UUID(result['agent_run_id']))
-        if str(result.get('review_batch_id')) != self.scope.batch_id or run_id in self.role_runs:
-            raise ValueError('Review role identity mismatch')
-        self.role_runs[run_id] = str(role)
-        self.role_order.append(run_id)
-        return {'agent_run_id': run_id, 'review_batch_id': self.scope.batch_id}
+        result = super().start_agent_run(case_id, role, input_revision, input_snapshot, model_id, prompt_version)
+        self.role_order.append(result['agent_run_id'])
+        return result
 
     def finish_agent_run(self, agent_run_id, status, output, error):
         super().finish_agent_run(agent_run_id, status, output, error)

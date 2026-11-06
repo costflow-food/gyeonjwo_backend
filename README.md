@@ -62,3 +62,15 @@ VS Code에서는 `gyeonjwo-backend.code-workspace`를 열면 됩니다.
 
 
 테스트 파일과 테스트 전용 의존성은 사용자 요청으로 제거했습니다. 문서의 테스트 통과 수치는 제거 전 검증 기록입니다. 실행 설정 진단 scripts/check_integration.py는 유지합니다.
+
+### 백엔드 로컬 회귀 점검
+
+저장소 루트에서 다음 스크립트를 실행한다. Supabase·Gmail·LLM 실호출 없이
+보류 코드, 로그 커서, 회신 큐 분기와 실패 경로를 확인한다.
+
+```bash
+python -m unittest scripts.check_graph_hold scripts.check_workflow_logs scripts.check_review_queue
+```
+
+전체 앱을 실행하려면 `requirements.txt`를 설치한다. 배포 후 검증은
+[메일 발송·회신·검토 통합 검증](docs/mvp1-mail-review-integration.md)을 따른다.

@@ -84,7 +84,7 @@ PROMPTS = {
      (예: "다온푸드 영업팀 박지훈 과장" → "다온푸드", "한빛유통 드림" → "한빛유통", "제주그린입니다." → "제주그린").
      처음 보낼 때부터 이렇게 찾아 넣는다.
      원문 어디에도 회사명이 없을 때만 HOLD한다.
-   - SUPPLIER_NOT_MATCHED·SUPPLIER_MISMATCH: 저장하지 말고 HOLD를 반환한다.
+   - SUPPLIER_NOT_MATCHED·SUPPLIER_MISMATCH: 저장하지 말고 HOLD를 반환하고 hold.code에 도구의 거절 코드를 넣는다.
    - REVISION_CHANGED·CASE_NOT_FOUND: 멈추고 HOLD를 반환한다.
    HOLD는 위에서 HOLD로 정한 코드이거나, 두 번 다시 보내도 저장되지 않았을 때만 고른다.
 6. 바로 최종 응답을 낸다(최종 응답이 실행 기록으로 저장된다).

@@ -32,7 +32,8 @@ class WorkCaseListService:
         self.extraction_enabled = extraction_enabled
         self.now = now or (lambda: datetime.now(timezone.utc))
 
-    def list(self, owner, *, status=None, archived=False, q='', limit=25, cursor=None, start_readiness=None, resume_readiness=None):
+    def list(self, owner, *, status=None, archived=False, q='', limit=25, cursor=None, start_readiness=None, resume_readiness=None,
+             case_changes_ready=False):
         readiness = start_readiness if start_readiness is not None else (StartReadiness()
             if self.extraction_enabled else StartReadiness('EXTRACTION_DISABLED', '서버의 검토 실행 설정이 꺼져 있습니다.'))
         query = q.strip().casefold()
@@ -62,7 +63,7 @@ class WorkCaseListService:
                 if after is not None and key >= after:
                     continue
                 archived_at = iso_z(utc_time(case['archived_at'])) if case['archived_at'] else None
-                actions, disabled = case_actions(case, readiness, resume_readiness)
+                actions, disabled = case_actions(case, readiness, resume_readiness, case_changes_ready=case_changes_ready)
                 step = case['processing_step']
                 attachments = mail.get('attachments_jsonb') or []
                 if not isinstance(attachments, list):

@@ -19,6 +19,8 @@ class GraphStore(AgentStore):
         self.documents = {}
         self.catalog_items, self.draft_records = {}, {}
         self.candidate_set_id = None
+        self.extraction_rejections = {}
+        self.active_extraction_run = None
 
     def current_input_revision(self, case_id):
         # Graph's changed() must be able to observe the NEW revision. Other
@@ -51,6 +53,32 @@ class GraphStore(AgentStore):
         self.saved_ids.add(qid)
         return qid, saved
 
+    def extraction_issue_mail_ids(self):
+        return self.scope.mail_ids
+
+    def record_extraction_issue(self, case_id, mail_ids, issue, supplier_name):
+        self.check(case_id)
+        run_id = self.active_extraction_run
+        if (run_id is None or not mail_ids or not set(mail_ids) <= set(self.extraction_issue_mail_ids())
+                or issue.get('field') != 'supplier_name'
+                or issue.get('code') not in {'SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH'}):
+            raise ServiceError('ACTION_NOT_ALLOWED', '추출 거절 근거의 범위를 확인할 수 없습니다.', 409)
+        for mail_id in mail_ids:
+            try:
+                result = self.rpc('record_case_graph_extraction_issue', p_run=run_id, p_issue={
+                    'case_id': self.scope.case_id, 'mail_id': mail_id, 'batch_id': self.scope.batch_id,
+                    'input_revision': self.scope.revision, 'code': issue['code'],
+                    'field': issue['field'], 'supplier_name': supplier_name,
+                })
+            except ServiceError as error:
+                if error.code == 'EXTRACTION_SCHEMA_REQUIRED':
+                    # Optional evidence storage may deploy after the HOLD path.
+                    return
+                raise
+            if result is not True:
+                raise ServiceError('PROCESSING_UNAVAILABLE', '추출 거절 근거 저장을 확인할 수 없습니다.', 503)
+        self.extraction_rejections.setdefault(run_id, set()).add(issue['code'])
+
     def start_agent_run(self, case_id, role, input_revision, input_snapshot, model_id, prompt_version):
         self.check(case_id)
         if input_revision != self.scope.revision:
@@ -61,6 +89,8 @@ class GraphStore(AgentStore):
         if str(result.get('review_batch_id')) != self.scope.batch_id or run_id in self.role_runs:
             raise ValueError('Invalid graph role identity')
         self.role_runs[run_id] = str(role)
+        if str(role) == 'INFO_EXTRACTOR':
+            self.active_extraction_run = run_id
         return {'agent_run_id': run_id, 'review_batch_id': self.scope.batch_id}
 
     def finish_agent_run(self, agent_run_id, status, output, error):
@@ -71,7 +101,9 @@ class GraphStore(AgentStore):
         safe_output = deepcopy(output) if status == 'COMPLETED' else None
         if isinstance(safe_output, dict) and safe_output.get('next_action') == 'HOLD':
             from app.features.work_cases.domain.hold import from_agent_output
-            safe_output['hold'] = from_agent_output(safe_output).model_dump()
+            safe_output['hold'] = from_agent_output(
+                safe_output, rejection_codes=self.extraction_rejections.get(str(agent_run_id), ()),
+            ).model_dump()
         if status == 'COMPLETED' and self.role_runs[str(agent_run_id)] == 'CANDIDATE':
             snapshot = self.candidate_snapshot(str(agent_run_id), safe_output)
             result = self.rpc('finish_case_graph_candidate_run', p_run=str(agent_run_id), p_output=safe_output,
@@ -81,6 +113,9 @@ class GraphStore(AgentStore):
                               p_output=safe_output, p_error={'code': 'AGENT_FAILED'} if status == 'FAILED' else None)
         if result is not True:
             raise ServiceError('PROCESSING_UNAVAILABLE', '그래프 역할 결과 저장을 확인할 수 없습니다.', 503)
+        if self.active_extraction_run == str(agent_run_id):
+            self.active_extraction_run = None
+            self.extraction_rejections.pop(str(agent_run_id), None)
         if status == 'COMPLETED' and self.role_runs[str(agent_run_id)] == 'CANDIDATE':
             self.candidate_set_id = str(agent_run_id)
 
