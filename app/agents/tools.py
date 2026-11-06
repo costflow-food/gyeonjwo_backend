@@ -1624,7 +1624,8 @@ def _cost_line(record: QuoteVersionRecord, cost: dict, quantity: Decimal, case_u
     if cost.get('included_in_price') is None:
         return None, 'INCLUSION_UNCLEAR'
     basis = (cost.get('basis') or '').replace(' ', '')
-    if not basis or basis.removesuffix('당').removeprefix('1') in _PER_ORDER:
+    # '1회 배송당'처럼 횟수 표기가 앞에 붙은 기준도 주문(배송) 한 번의 비용으로 본다
+    if not basis or (basis.removesuffix('당').removeprefix('1').removeprefix('회') or '회') in _PER_ORDER:
         return amount, None
     ratio = unit_ratio(record, case_unit, _unit_key(basis))
     return (amount * quantity * ratio, None) if ratio is not None else (None, 'BASIS_UNCLEAR')
@@ -1974,7 +1975,8 @@ def check_comparability(runtime: ToolRuntime[RunContext]) -> dict:
 
 def break_even_for(store: ComparisonStore, context: RunContext, supplier_id: str) -> dict:
     """calculate_break_even의 본체. supplier_id의 미확인 비용을 다른 업체 각각과 비교한다.
-    deciding: 확인 총액이 가장 낮은 다른 업체와의 결과 (질문의 역전 기준 금액·산식으로 쓴다)."""
+    deciding: 확인 총액이 가장 낮은 다른 업체와의 결과 (질문의 역전 기준 금액·산식으로 쓴다).
+    업체 하나가 업무 수량 전부를 맡는 비교라서, 공급 가능 수량이 업무 수량보다 적은 업체(SUPPLY_SHORT)는 상대로 두지 않는다."""
     case, stop = _priority_case(store, context)
     if stop:
         return stop
@@ -1983,7 +1985,7 @@ def break_even_for(store: ComparisonStore, context: RunContext, supplier_id: str
     if supplier_id not in sheets:
         return {'status': 'REJECTED', 'code': 'NOT_IN_COMPARISON', 'hint': 'check_comparability의 supplier_id만 보낸다.'}
     target = sheets[supplier_id]
-    rivals = sorted((sheet for sid, sheet in sheets.items() if sid != supplier_id),
+    rivals = sorted((sheet for sid, sheet in sheets.items() if sid != supplier_id and 'SUPPLY_SHORT' not in sheet.warnings),
                     key=lambda sheet: (sheet.known_total is None, sheet.known_total or 0))
     results = [break_even(target, rival) for rival in rivals]
     computed = [r for r in results if r['status'] in ('COMPUTED', 'NO_UNKNOWN', 'CONDITIONAL')]
