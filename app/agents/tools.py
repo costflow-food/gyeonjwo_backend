@@ -1055,8 +1055,9 @@ def _required_names(conditions) -> list[str]:
 
 def _spec_state(wanted: str, offered: str | None) -> str:
     """등록 규격이 요청 규격과 똑같으면 PASS, 그 밖은 RFQ로 확인한다(UNKNOWN). 표기만 다른 같은 규격을
-    잘못 제외하지 않도록 규격 차이로는 FAIL을 내지 않는다."""
-    if offered and _key(wanted) == _key(offered):
+    잘못 제외하지 않도록 규격 차이로는 FAIL을 내지 않는다. 쉼표·빗금 등 문장부호와 공백은 비교에서 뺀다
+    ('IQF, 10kg 박스'와 'IQF 10kg/박스'는 같은 규격)."""
+    if offered and _letters(wanted) == _letters(offered):
         return 'PASS'
     return 'UNKNOWN'
 
@@ -1904,7 +1905,7 @@ def _supplier_comparison(case: dict, quote_id: str, record: QuoteVersionRecord, 
             missing.append('specification')
         else:
             requirements.append(_requirement('규격', 'specification', case['specification'], stated('specification'),
-                                             _key(case['specification']) == _key(stated('specification'))))
+                                             _letters(case['specification']) == _letters(stated('specification'))))
     certifications = _required_names(case.get('mandatory_conditions'))
     if certifications and stated('certifications') is None:
         missing.append('certifications')
