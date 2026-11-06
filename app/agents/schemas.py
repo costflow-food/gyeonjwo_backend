@@ -328,7 +328,8 @@ class AgentOutput(StrictModel):
 # (REVISION_CHANGED·CASE_NOT_FOUND)와 원인을 정하지 못한 경우만 None이다(2026-11-06 결정).
 ExtractionHoldCode = Literal['SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH', 'MISSING_FIELD', 'MISSING_EVIDENCE',
                              'SOURCE_READ_FAILED', 'NO_QUOTE_DATA']
-HoldField = Literal['supplier_name', 'item_name', 'unit_price', 'unit']   # MISSING_FIELD에서 빠진 항목
+# MISSING_FIELD에서 빠진 항목. quantity는 기존 업체 인상 통보의 공급 물량(업무 비교 수량)이다
+HoldField = Literal['supplier_name', 'item_name', 'unit_price', 'unit', 'quantity']
 CandidateHoldCode = Literal['NO_SUITABLE_CANDIDATES', 'CONDITIONS_MISSING']
 
 
