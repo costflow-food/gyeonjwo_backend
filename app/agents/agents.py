@@ -93,6 +93,8 @@ PROMPTS = {
      붙어 있었을 때만 그 표기를 빼고 한 번 다시 보낸다. 회사명만 보냈으면 다시 보내지 않고 바로 HOLD한다.
      업체명을 빼고 다시 보내지 않는다(업체가 연결되지 않은 메일이라 업체명 누락으로 거절된다).
    - SUPPLIER_MISMATCH: 저장하지 말고 HOLD를 반환한다.
+   - SUPPLY_QUANTITY_MISSING: 기존 업체의 인상 통보인데 공급 물량이 없다. 원문에서 공급 계획·공급 물량을 찾아
+     단위와 함께 available_quantity로 한 번 다시 보낸다. 원문에 없으면 다시 보내지 않고 바로 HOLD한다.
    - REVISION_CHANGED·CASE_NOT_FOUND: 멈추고 HOLD를 반환한다.
    HOLD는 위에서 HOLD로 정한 코드이거나, 두 번 다시 보내도 저장되지 않았을 때만 고른다.
 6. 바로 최종 응답을 낸다(최종 응답이 실행 기록으로 저장된다).
@@ -184,7 +186,8 @@ hold (보류 코드. 서버가 이 코드로 담당자에게 보일 문구를 �
 - STORED면 hold를 비운다(null).
 - HOLD면 아래 표에서 상황에 맞는 hold.code 하나를 고르고 reason은 그 줄의 문장으로 쓴다.
   도구가 돌려준 코드(SUPPLIER_NOT_MATCHED·SUPPLIER_MISMATCH)는 바꾸지 않고 그대로 hold.code에 옮긴다.
-  hold.field는 MISSING_FIELD일 때만 빠진 항목을 적는다(supplier_name·item_name·unit_price·unit 중 하나). 그 밖에는 null.
+  hold.field는 MISSING_FIELD일 때만 빠진 항목을 적는다(supplier_name·item_name·unit_price·unit·quantity 중 하나).
+  그 밖에는 null.
   - NO_QUOTE_DATA — 단가 없음·접수 안내·견적 아님·다른 품목의 견적만 있음:
     "이 메일에는 업무 품목의 견적 정보가 없어 저장하지 않았습니다."
   - SOURCE_READ_FAILED — 견적이 있을 첨부 쪽을 read_mail_evidence로 읽었는데 읽을 수 없어 견적을 확인하지 못함.
@@ -199,6 +202,8 @@ hold (보류 코드. 서버가 이 코드로 담당자에게 보일 문구를 �
   - MISSING_FIELD, field unit_price·unit·item_name — 두 번 다시 보내도 그 항목이 거절됨:
     "○○를 원문에서 확인할 수 없어 견적을 저장하지 못했습니다."
     (○○는 단가·단위·품목명 중 거절된 항목 하나, 조사는 그 낱말에 맞춘다. field는 그 항목의 이름)
+  - MISSING_FIELD, field quantity — store_structured_mail이 SUPPLY_QUANTITY_MISSING을 돌려줬고 원문에 공급 물량이 없음:
+    "인상 통보에서 공급 물량을 확인할 수 없어 견적을 저장하지 않았습니다."
   - MISSING_EVIDENCE — 두 번 다시 보내도 근거(MISSING_EVIDENCE·SOURCE_MISMATCH·EVIDENCE_NOT_IN_CASE)로 거절됨:
     "견적 값의 원문 근거를 확인할 수 없어 저장하지 못했습니다."
   - REVISION_CHANGED·CASE_NOT_FOUND로 멈춤: hold는 비우고(null) "업무 정보가 바뀌어 이번 추출을 멈췄습니다."라고 쓴다.
@@ -548,6 +553,7 @@ def _extraction_hold(output: AgentOutput, messages: list) -> dict | None:
        마지막 코드. 도구가 남긴 쪽지와 같은 기준이다(업체명을 빼고 다시 보내 생긴 MISSING_FIELD가 앞선 업체 쪽지를
        덮어쓰지 않는다).
     3. 마지막 거절이 업체명 누락이면 MISSING_FIELD + supplier_name.
+       마지막 거절이 인상 통보의 공급 물량 누락(SUPPLY_QUANTITY_MISSING)이면 MISSING_FIELD + quantity.
     4. 그 밖에는 LLM이 적은 hold를 받는다. 업체 관련 코드는 도구 결과 없이 받지 않는다(2에서 정해진다).
        field는 MISSING_FIELD일 때만 남는다(스키마가 막는다).
     5. 정하지 못하면 None(서버가 HOLD_REASON_UNAVAILABLE로 본다)."""
@@ -560,6 +566,8 @@ def _extraction_hold(output: AgentOutput, messages: list) -> dict | None:
         return {'code': supplier_codes[-1], 'field': None}
     if _supplier_name_missing(rejected):
         return {'code': 'MISSING_FIELD', 'field': 'supplier_name'}
+    if rejected and any(item.get('code') == 'SUPPLY_QUANTITY_MISSING' for item in rejected[-1]):
+        return {'code': 'MISSING_FIELD', 'field': 'quantity'}
     if output.hold is not None and output.hold.code not in _TOOL_HOLD_CODES:
         return output.hold.model_dump()
     return None

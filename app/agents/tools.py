@@ -311,6 +311,8 @@ _HINTS = {
     'SUPPLIER_NOT_MATCHED': '등록된 업체명과 글자가 정확히 같지 않다. 결과의 next를 따른다.',
     'SUPPLIER_MISMATCH': '메일에 연결된 업체와 업체명이 다르다. 저장하지 말고 HOLD한다.',
     'SUPPLIER_EVIDENCE_MIXED': '한 업체의 메일 근거만 남기고 다시 보낸다.',
+    'SUPPLY_QUANTITY_MISSING': '인상 통보 메일에는 공급 물량이 있어야 한다. 원문의 공급 계획·공급 물량을 단위와 함께 '
+                               'available_quantity로 다시 보낸다. 원문에 없으면 다시 보내지 않고 HOLD한다.',
     'TAX_BASIS_NOT_TAX_TERMS': 'tax_basis는 field_name이 tax_terms인 항목에만 붙인다.',
     'INSTRUCTION_NOT_NOTE': 'AI·시스템에게 하는 문장이라 비고에서 뺐다. 다시 보내지 않는다.',
 }
@@ -719,6 +721,16 @@ def _case_conditions(case: dict, current: dict, item: dict | None, initial_mails
     return conditions or None
 
 
+def _supply_quantity_missing(case: dict, source_mail: dict, values: dict) -> bool:
+    """기존 업체 인상 통보(INITIAL 메일)인데 업무 비교 수량을 정할 공급 물량·단위가 없는지 (2026-11-06 팀 결정).
+    업무 수량이 비어 있을 때만 본다. 저장한 뒤에는 보류할 수 없으므로(DB가 거부) 저장 전에 거절한다.
+    단위는 공급 물량의 단위, 없으면 같은 메일의 단가 단위로 정한다(_case_conditions와 같은 기준)."""
+    if case.get('quantity') or source_mail.get('message_role') != 'INITIAL':
+        return False
+    supply = values.get('available_quantity')
+    return not supply or not (supply.get('quantity_unit') or values.get('unit', {}).get('value'))
+
+
 def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[QuoteField],
                           price_tiers: list[PriceTier], cost_terms: list[CostTerm], item_notes: list[ItemNote]) -> dict:
     """store_structured_mail의 본체. 업무·revision은 실행 정보(context)에서만 받는다."""
@@ -806,6 +818,9 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         return result
     # 원문 메일은 근거 메일 중 가장 최근에 받은 메일이다 (회신이 이전 메일의 값을 함께 근거로 써도 회신이 원문)
     source_mail_id = max(evidence_mails, key=lambda mail_id: (case_mails[mail_id].get('received_at') or '', mail_id))
+    if _supply_quantity_missing(case, case_mails[source_mail_id], values):
+        missing = {'field': 'available_quantity', 'code': 'SUPPLY_QUANTITY_MISSING'}
+        return _with_hints({'status': 'REJECTED', 'rejected': [missing]}, [missing])
     if check.instruction_mails & evidence_mails:
         review.append({'field': 'evidence', 'code': 'INSTRUCTION_IN_MAIL'})    # 메일에 AI·시스템에게 하는 문장이 있음
 
@@ -942,7 +957,7 @@ PREFERRED_ORIGIN, ORIGIN_WEIGHT, HISTORY_WEIGHT = '국내산', Decimal(2), Decim
 
 # RFQ 질문. 고정 질문은 모든 업체에 묻고, 선택 질문은 LLM이 업체마다 고른다(고르지 않으면 RFQ_DEFAULT_OPTIONS).
 # 업체별로 미확인 필수 조건 질문이 더해진다
-RFQ_FIXED_QUESTIONS = ('단가와 단가 기준 단위', '요청 수량 공급 가능 여부', '요청 납기일 납품 가능 여부',
+RFQ_FIXED_QUESTIONS = ('단가와 단가 기준 단위', '공급 가능 수량과 그 단위', '요청 납기일 납품 가능 여부',
                        '운송비 부담 주체와 단가 포함 여부')
 RFQ_OPTIONAL_QUESTIONS = {'MOQ': '최소 주문 수량(MOQ)', 'VALIDITY': '견적 유효기간', 'TAX': '부가세 포함 여부',
                           'PACKING': '포장 단위와 박스당 중량', 'ORIGIN': '원산지',
