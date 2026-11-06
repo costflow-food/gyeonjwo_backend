@@ -28,6 +28,7 @@ from app.features.workflow_logs.router import router as workflow_logs_router
 from app.features.suppliers.router import router as suppliers_router
 from app.features.work_cases.api.mail_drafts import router as mail_drafts_router
 from app.features.work_cases.api.candidates import router as candidates_router
+from app.features.work_cases.api.quotes import router as quotes_router
 from app.features.mail_management.api.router import router as mail_management_router
 from app.features.system.application.diagnostics import require_startup_configuration
 
@@ -231,6 +232,7 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     app.include_router(suppliers_router)
     app.include_router(mail_drafts_router)
     app.include_router(candidates_router)
+    app.include_router(quotes_router)
     app.include_router(mail_management_router)
     return app
 
