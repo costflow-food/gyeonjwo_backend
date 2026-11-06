@@ -340,6 +340,7 @@ class CandidateOut(AgentOutput):
     next_action: Literal[N.SEND_RFQ, N.HOLD]
     candidates: list[Candidate] = []
     draft_ids: list[str] = []
+    web_observations: list[dict] = Field(default_factory=list, max_length=3)
 
 
 class PriorityOut(AgentOutput):

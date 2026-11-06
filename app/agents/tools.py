@@ -189,6 +189,35 @@ def get_case_context(runtime: ToolRuntime[RunContext]) -> dict:
 
 @register
 @tool
+def crawl_supplier_candidates(query: str, runtime: ToolRuntime[RunContext], limit: int = 5) -> dict:
+    '''업무의 원료 품목·상태에 대한 공개 웹 검색 결과와 홈페이지 연락처를 수집한다.
+    query에는 검색할 품목과 조건만 넣고 메일 본문·개인정보는 넣지 않는다. limit은 1~5이다.
+    검색 결과는 미등록·미검증 자료다. 업체 ID나 견적 초안 대상으로 사용하지 않는다.
+    반환: OK / EMPTY / ERROR / REVISION_CHANGED / CASE_NOT_FOUND.
+    '''
+    from app.features.supplier_crawl.application.tool import SupplierSearchInput
+    from app.features.supplier_crawl.infrastructure.google_search import search_suppliers
+
+    context = _run_context(_case_store, runtime)
+    request = SupplierSearchInput(query=query, limit=limit)
+    if request.limit > 5:
+        return {'status': 'ERROR', 'code': 'LIMIT_EXCEEDED', 'suppliers': []}
+    case = _read(lambda: _case_store.get_work_case(context.case_id))
+    if case is None:
+        return {'status': 'CASE_NOT_FOUND', 'suppliers': []}
+    if case.get('input_revision') != context.input_revision:
+        return {'status': 'REVISION_CHANGED', 'suppliers': []}
+    result = search_suppliers(request.query, request.limit)
+    case = _read(lambda: _case_store.get_work_case(context.case_id))
+    if case is None:
+        return {'status': 'CASE_NOT_FOUND', 'suppliers': []}
+    if case.get('input_revision') != context.input_revision:
+        return {'status': 'REVISION_CHANGED', 'suppliers': []}
+    return result
+
+
+@register
+@tool
 def read_mail_evidence(mail_id: str, runtime: ToolRuntime[RunContext], part: str = 'body',
                        page: int | None = None) -> dict:
     '''이 업무에 속한 메일의 본문 또는 첨부 한 쪽(page)의 원문과 위치를 읽는다.
@@ -1188,6 +1217,9 @@ def search_supplier_evidence(supplier_item_ids: list[str], runtime: ToolRuntime[
     '''
     result = evaluate_candidates(_candidate_store, _run_context(_candidate_store, runtime), supplier_item_ids)
     result.pop('rfq_facts', None)       # 메일 문안용 값. LLM이 쓸 일이 없다
+    if result.get('status') == 'OK' and not result.get('candidates'):
+        result['next'] = ('등록 후보가 없다. create_rfq_draft를 부르지 말고 '
+                          'crawl_supplier_candidates로 웹 근거를 한 번 수집한 뒤 HOLD한다.')
     return result
 
 

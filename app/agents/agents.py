@@ -196,8 +196,13 @@ next_action:
    후보·제외·체크리스트·선호 점수는 도구가 정한 것이다.
    - CONDITIONS_MISSING·REVISION_CHANGED·CASE_NOT_FOUND면 다른 도구를 부르지 말고 바로 HOLD로 최종 응답한다.
      CONDITIONS_MISSING이면 reason에 결과의 summary 문장을 그대로 쓴다(필드 이름을 쓰지 않는다).
-   - candidates가 비어 있으면 create_rfq_draft를 부르지 말고 바로 HOLD로 최종 응답한다.
-     reason에는 검색 결과의 summary 문장을 그대로 쓴다.
+   - candidates가 비어 있으면 create_rfq_draft를 부르지 않는다. 업무의 원료 품목과 상태에 맞게
+     crawl_supplier_candidates를 최대 한 번 호출해 웹 검색 근거를 수집한 뒤 HOLD한다.
+     생과·냉동 등 명시된 원료 상태와 원산지 조건을 지킨다. 국내 납품 조건을 국내산 원료로 바꾸지 않는다.
+     웹 결과는 아직 등록된 공급처가 아니다. ID를 만들거나 후보·초안에 넣지 않는다.
+     web_observations는 시스템이 도구 결과로 채우므로 직접 작성하지 않는다.
+     업체 홈페이지·취급 여부·국내 소재와 원산지는 검색 결과만으로 확정하지 않는다.
+     검색 차단·오류는 결과 없음과 구분한다. reason에는 웹 검색 상태와 등록 후보가 없음을 알린다.
 4. candidates가 있을 때만 create_rfq_draft(supplier_item_ids, supplier_ids, questions)를 한 번만 부른다.
    메일 문안은 도구가 쓴다.
    - supplier_item_ids는 search_supplier_evidence에 보낸 목록을 하나도 빼지 않고 그대로 보낸다. 인상을 요청한 업체의
@@ -504,6 +509,8 @@ def _check_candidates(output: AgentOutput, messages: list) -> AgentOutput:
     """②: 초안 ID는 이번 실행에서 DRAFTED로 받은 것만, 후보는 search_supplier_evidence 후보만 인정한다.
     체크리스트·점수·근거·잠정 여부·unknown_fields는 LLM이 옮긴 값 대신 도구 값으로 채운다.
     LLM이 정하는 것은 업체별 사유와 등록 비고에 근거한 주의 표시뿐이다."""
+    observations = _tool_results(messages, 'crawl_supplier_candidates')[:3]
+    output = type(output).model_validate(output.model_dump() | {'web_observations': observations})
     searched = [r for r in _tool_results(messages, 'search_supplier_evidence') if r.get('status') == 'OK']
     found = {c['supplier_id']: c for c in (searched[-1]['candidates'] if searched else [])}
     drafted = {d['draft_id']: d['supplier_id'] for r in _tool_results(messages, 'create_rfq_draft')

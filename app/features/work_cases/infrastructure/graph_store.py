@@ -158,7 +158,8 @@ class GraphStore(AgentStore):
             if {self.draft_records[value].supplier_id for value in ids} != {str(item.supplier_id) for item in items}:
                 raise ValueError('Draft/candidate supplier mismatch')
         return CandidateSnapshot(case_id=self.scope.case_id, candidate_set_id=run_id, revision=self.scope.revision,
-            review_batch_id=self.scope.batch_id, items=items, unknown_fields=parsed.unknown_fields)
+            review_batch_id=self.scope.batch_id, items=items, unknown_fields=parsed.unknown_fields,
+            web_observations=parsed.web_observations)
 
     def get_candidate_conditions(self, case_id):
         return self.get_work_case(case_id)
