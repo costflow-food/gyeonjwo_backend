@@ -756,12 +756,12 @@ def _case_conditions(case: dict, current: dict, item: dict | None, initial_mails
     return conditions or None
 
 
-def _supply_quantity_missing(case: dict, source_mail: dict, values: dict, check: _SourceCheck,
-                             refs: dict) -> bool:
+def _supply_quantity_missing(case: dict, source_mail: dict, values: dict) -> bool:
     """기존 업체 인상 통보(INITIAL 메일)인데 업무 비교 수량을 정할 공급 물량·단위가 없는지 (2026-11-06 팀 결정).
     업무 수량이 비어 있을 때만 본다. 저장한 뒤에는 보류할 수 없으므로(DB가 거부) 저장 전에 거절한다.
     단위는 공급 물량의 단위, 없으면 같은 메일의 단가 단위로 정한다(_case_conditions와 같은 기준).
-    공급 물량 값이 나온 원문 줄이 모두 규격 줄이면(예: '특품 10kg/박스'의 10kg) 공급 물량이 아니다 (S3-15)."""
+    공급 물량 값이 규격·주문 단위 표기 안의 수량이면(예: '특품 10kg/박스'의 10kg) 공급 물량이 아니다 (S3-15).
+    줄이 아니라 값으로 본다: 규격과 공급 계획이 한 줄에 있어도('10kg/박스, 공급 계획 1,000kg') 1,000kg는 통과한다."""
     if case.get('quantity') or source_mail.get('message_role') != 'INITIAL':
         return False
     supply = values.get('available_quantity')
@@ -769,10 +769,8 @@ def _supply_quantity_missing(case: dict, source_mail: dict, values: dict, check:
         return True
     specs = [values[name]['raw_value'] for name in ('specification', 'quantity_per_order_unit') if name in values]
     specs += [case['specification']] if case.get('specification') else []
-    # 값이 여러 줄에 걸치면 줄을 찾지 못해(빈 목록) 통과시킨다
-    lines = check.lines(refs['available_quantity'], supply['raw_value'], numeric=True)
-    return bool(lines and specs) and all(
-        any(_contains(_normalized(line, True), _normalized(spec, True), True) for spec in specs) for line in lines)
+    raw = _normalized(supply['raw_value'], True)
+    return any(_contains(_normalized(spec, True), raw, True) for spec in specs)
 
 
 def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[QuoteField],
@@ -861,7 +859,7 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         return result
     # 원문 메일은 근거 메일 중 가장 최근에 받은 메일이다 (회신이 이전 메일의 값을 함께 근거로 써도 회신이 원문)
     source_mail_id = max(evidence_mails, key=lambda mail_id: (case_mails[mail_id].get('received_at') or '', mail_id))
-    if _supply_quantity_missing(case, case_mails[source_mail_id], values, check, refs):
+    if _supply_quantity_missing(case, case_mails[source_mail_id], values):
         missing = {'field': 'available_quantity', 'code': 'SUPPLY_QUANTITY_MISSING'}
         return _with_hints({'status': 'REJECTED', 'rejected': [missing]}, [missing])
     if check.instruction_mails & evidence_mails:

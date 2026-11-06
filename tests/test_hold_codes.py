@@ -346,6 +346,13 @@ def test_supply_plan_quantity_sets_case_quantity(store):
     assert Decimal(store.work_cases[CASE]['quantity']) == 1000 and store.work_cases[CASE]['unit'] == 'kg'
 
 
+def test_supply_plan_on_spec_line_is_supply_quantity(store):
+    # 규격과 공급 계획이 한 줄에 있어도 공급 계획 수량은 통과한다 (줄이 아니라 값으로 판단)
+    v1_store(store, '냉동딸기(IQF) 특품 10kg/박스, 11월 공급 계획 1,000kg, 5,500원/kg으로 조정합니다.')
+    result = save_structured_quote(store, ctx(), V1_FIELDS + [field('available_quantity', '1,000kg')], [], [], [])
+    assert result['status'] == 'STORED'
+
+
 def test_reply_supply_quantity_is_not_checked(store):
     body = '냉동딸기(IQF) 특품 10kg/박스 5,300원/kg\n공급 가능 수량 600kg'
     v1_store(store, body, message_role='QUOTE_REPLY')

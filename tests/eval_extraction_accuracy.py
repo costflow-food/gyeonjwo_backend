@@ -101,7 +101,9 @@ def usage_and_calls(messages):
                 usage[key] += (message.usage_metadata or {}).get(key, 0)
         elif isinstance(message, ToolMessage) and message.name == 'store_structured_mail':
             try:
-                stores.append(json.loads(message.content).get('status'))
+                result = json.loads(message.content)
+                codes = ','.join(f"{r.get('field')}:{r.get('code')}" for r in result.get('rejected') or [])
+                stores.append(result.get('status') + (f'[{codes}]' if codes else ''))   # 'REJECTED[unit:SOURCE_MISMATCH]'
             except (TypeError, ValueError, AttributeError):
                 stores.append('UNREADABLE')
     return usage, stores
