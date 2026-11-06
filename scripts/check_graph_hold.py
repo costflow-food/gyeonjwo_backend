@@ -24,21 +24,21 @@ class GraphHoldTests(unittest.TestCase):
         self.assertEqual(from_agent_output(output, rejection_codes=codes).code, 'HOLD_REASON_UNAVAILABLE')
 
     def test_recorded_evidence_precedes_structured_reason(self):
-        scope = SimpleNamespace(case_id='case', batch_id='batch', revision=4,
+        scope = SimpleNamespace(case_id='case', owner='owner', batch_id='batch', revision=4,
                                 mail_ids=('mail',), repo=Mock(), check=Mock())
-        scope.repo.call.return_value = True
+        scope.repo.call.side_effect = [{'kind': 'RECORDED', 'replay': False}, True]
         store = GraphStore(scope, {'job_id': 'job', 'claim_token': 'token'})
         store.active_extraction_run = 'run'
         store.role_runs['run'] = 'INFO_EXTRACTOR'
-        issue = {'code': 'SUPPLIER_NOT_MATCHED', 'field': 'supplier_name'}
+        issue = {'code': 'SUPPLIER_NOT_MATCHED', 'field': 'supplier_name', 'supplier_name': '업체명',
+                 'evidence': [{'evidence_id': 'mail:body', 'excerpt': '업체명'}]}
         with self.assertRaises(ServiceError):
-            store.record_extraction_issue('case', ['foreign'], issue, '업체명')
+            store.record_extraction_issue('case', 'foreign-run', issue)
         scope.repo.call.assert_not_called()
-        store.record_extraction_issue('case', ['mail'], issue, '업체명')
+        store.record_extraction_issue('case', 'run', issue)
         scope.repo.call.assert_called_once_with(
             'record_case_graph_extraction_issue', p_job='job', p_token='token', p_revision=4,
-            p_run='run', p_issue={'case_id': 'case', 'batch_id': 'batch', 'input_revision': 4,
-                                  'mail_id': 'mail', **issue, 'supplier_name': '업체명'})
+            p_run='run', p_issue=issue)
         store.finish_agent_run('run', 'COMPLETED', {
             'next_action': 'HOLD', 'hold': {'code': 'SUPPLIER_MISMATCH'}, 'reason': 'private reason'}, None)
         output = scope.repo.call.call_args.kwargs['p_output']

@@ -13,7 +13,8 @@ def validate_action_key(key):
 
 
 def revision_body_hash(revision, conditions=None):
-    body = json.dumps({'expected_revision': revision, **(conditions or {})}, separators=(',', ':'), sort_keys=True)
+    body = json.dumps({'expected_revision': revision, **(conditions or {})},
+                      separators=(',', ':'), sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(body.encode()).hexdigest()
 
 
