@@ -51,8 +51,9 @@ def card_decision(case):
 
 
 class ReviewCardService:
-    def __init__(self, repo):
+    def __init__(self, repo, market=None):
         self.repo = repo
+        self.market = market
 
     def get(self, owner, case_id, changes_ready=False):
         """업무의 최신 검토 카드. 카드가 없으면 404 REVIEW_NOT_READY. changes_ready는 판단 저장 함수 배포 여부."""
@@ -128,4 +129,5 @@ class ReviewCardService:
                         'break_even_amount': decimal_text(q.get('break_even_amount')), 'formula': q.get('formula')}
                        for q in questions],
             unresolved=card.get('unresolved') or [], decision=card_decision(case),
-            allowed_actions=allowed, disabled_actions=disabled)
+            allowed_actions=allowed, disabled_actions=disabled,
+            market_reference=self.market.get(case, quotes) if self.market else None)

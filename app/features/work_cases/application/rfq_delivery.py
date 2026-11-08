@@ -4,6 +4,7 @@ from app.core.errors import ServiceError
 from app.features.mailboxes.application.ingestion import message_metadata
 from app.features.work_cases.domain.rfq import AuthorizedMail
 from app.features.work_cases.domain.candidates import selected_for_dispatch
+from app.features.work_cases.domain.mail_drafts import requires_manual_approval
 
 logger = logging.getLogger('uvicorn.error.rfq_send')
 
@@ -47,9 +48,7 @@ class RfqDelivery:
                 or (not approved and draft_id not in (run.get('output_jsonb') or {}).get('draft_ids', []))):
             return {'status': 'PREPARATION_NOT_READY', 'sent_now': False}
         if not approved:
-            if style.get('candidate_caution'):
-                return {'status': 'WAITING_APPROVAL', 'sent_now': False}
-            if style.get('auto_policy_eligible') is not True:
+            if requires_manual_approval(draft):
                 return {'status': 'WAITING_APPROVAL', 'sent_now': False}
             policy = self.repo.send_policy(owner, case, draft['recipient'], draft['purpose'], draft['supplier_id'])
             if (not policy['auto_eligible'] or not style.get('auto_settings_version')

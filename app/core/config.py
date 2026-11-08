@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     supabase_publishable_key: SecretStr | None = None
     llm_base_url: HttpUrl | None = None
     llm_api_key: SecretStr | None = None
+    data_go_kr_api_key: SecretStr | None = None
     # 모델·추론 수준·시간 제한은 env가 아닌 코드 상수다. 모델과 추론 수준은 한 쌍으로 바꾼다
     llm_model: ClassVar[str] = 'gpt-6-luna'
     llm_classification_model: ClassVar[str] = 'gpt-5-nano'

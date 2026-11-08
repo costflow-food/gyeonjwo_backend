@@ -12,8 +12,14 @@ from app.agents.schemas import AgentRole, CandidateOut, RunContext
 from app.features.work_cases.domain.candidates import CandidateSnapshot
 from app.features.work_cases.application.candidates import CandidateService
 from app.features.work_cases.infrastructure.graph_store import GraphStore
-from app.features.supplier_crawl.infrastructure import google_search
 from app.features.supplier_crawl.infrastructure import network
+
+
+@pytest.fixture
+def google_search():
+    # Browser/parser dependencies are only needed by the search execution tests.
+    from app.features.supplier_crawl.infrastructure import google_search
+    return google_search
 
 
 class ToolCallingFake(FakeMessagesListChatModel):
@@ -40,7 +46,7 @@ def test_network_rejects_mixed_public_and_private_dns(monkeypatch):
         network.resolve_public('example.test', 443)
 
 
-def test_container_uses_installed_chromium(monkeypatch):
+def test_container_uses_installed_chromium(monkeypatch, google_search):
     from scrapling.fetchers import StealthyFetcher
     monkeypatch.setattr(google_search, 'which', lambda name: '/usr/bin/chromium' if name == 'chromium' else None)
     fetch = Mock(return_value=SimpleNamespace(status=200, body=b'<html></html>', url='https://www.google.com/search'))
@@ -49,7 +55,7 @@ def test_container_uses_installed_chromium(monkeypatch):
     assert fetch.call_args.kwargs['executable_path'] == '/usr/bin/chromium'
 
 
-def test_candidate_agent_calls_scoped_collector(monkeypatch):
+def test_candidate_agent_calls_scoped_collector(monkeypatch, google_search):
     context = RunContext(str(uuid4()), 1)
     monkeypatch.setattr(tools, '_case_store', SimpleNamespace(get_work_case=lambda _: {'input_revision': 1}))
     monkeypatch.setattr(google_search, 'search_suppliers', lambda query, limit: {'status': 'ERROR', 'code': 'SEARCH_BLOCKED', 'suppliers': []})
@@ -65,7 +71,7 @@ def test_candidate_agent_calls_scoped_collector(monkeypatch):
     assert checked.candidates == [] and checked.draft_ids == []
 
 
-def test_candidate_registry_and_revision_checked(monkeypatch):
+def test_candidate_registry_and_revision_checked(monkeypatch, google_search):
     assert 'crawl_supplier_candidates' in {t.name for t in tools.tools_for(AgentRole.CANDIDATE)}
     assert all('crawl_supplier_candidates' not in {t.name for t in tools.tools_for(role)}
                for role in AgentRole if role != AgentRole.CANDIDATE)
@@ -92,7 +98,7 @@ def test_no_registered_candidates_does_not_skip_web_discovery(monkeypatch):
     assert 'crawl_supplier_candidates' in result['next']
 
 
-def test_revision_change_after_search_discards_web_results(monkeypatch):
+def test_revision_change_after_search_discards_web_results(monkeypatch, google_search):
     state = iter([{'input_revision': 1}, {'input_revision': 2}])
     monkeypatch.setattr(tools, '_case_store', SimpleNamespace(get_work_case=lambda _: next(state)))
     monkeypatch.setattr(google_search, 'search_suppliers', lambda query, limit: {'status': 'OK', 'suppliers': [{'search_title': 'unverified'}]})
