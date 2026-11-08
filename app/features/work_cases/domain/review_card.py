@@ -94,3 +94,4 @@ class ReviewCardResponse(StrictModel):
     decision: ReviewDecision | None = None
     allowed_actions: list[str] = Field(default_factory=list)
     disabled_actions: list[DisabledAction] = Field(default_factory=list)
+    market_reference: dict | None = None

@@ -8,6 +8,11 @@ SNAPSHOT_FIELDS = ('id', 'work_case_id', 'supplier_id', 'intent_id', 'purpose',
                    'recipient', 'subject', 'body_text', 'input_revision')
 
 
+def requires_manual_approval(draft):
+    style = draft.get('style_snapshot_jsonb') or {}
+    return bool(style.get('candidate_caution')) or style.get('auto_policy_eligible') is not True
+
+
 def snapshot_hash(draft):
     framed = bytearray()
     for field in SNAPSHOT_FIELDS:

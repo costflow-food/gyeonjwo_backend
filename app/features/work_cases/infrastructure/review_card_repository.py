@@ -1,7 +1,7 @@
 """API-14 read model: the stored card on work_cases plus quote/supplier facts to fill names and prices. Never writes."""
 from app.core.errors import ServiceError
 
-CASE_COLUMNS = ('id,status,processing_step,input_revision,review_revision,latest_review_jsonb,decision,'
+CASE_COLUMNS = ('id,item_name,specification,status,processing_step,input_revision,review_revision,latest_review_jsonb,decision,'
                 'selected_plan_id,selected_plan_jsonb,selected_at,archived_at,accepted_at')
 MAX_LOOKUP = 200
 
@@ -34,7 +34,8 @@ class ReviewCardRepository:
             return {}
         if len(quote_ids) > MAX_LOOKUP:
             raise ServiceError('PROCESSING_UNAVAILABLE', '카드의 견적 참조 범위를 확인할 수 없습니다.', 503)
-        rows = self.rows(self.client.table('quote_versions').select('id,supplier_id,unit,unit_price')
+        rows = self.rows(self.client.table('quote_versions').select(
+                            'id,supplier_id,unit,unit_price::text,currency,checks_jsonb,evidence_jsonb')
                          .eq('owner_user_id', str(owner)).eq('work_case_id', str(case_id))
                          .in_('id', sorted(quote_ids)))
         return {str(row['id']): row for row in rows}

@@ -5,6 +5,7 @@ from app.features.mailboxes.api.router import require_google_user
 from app.features.work_cases.api.decisions import case_changes_ready
 from app.features.work_cases.api.router import get_runtime_repository
 from app.features.work_cases.application.review_card import ReviewCardService
+from app.features.work_cases.application.market_reference import MarketReferenceService
 from app.features.work_cases.domain.review_card import ReviewCardResponse
 from app.features.work_cases.infrastructure.review_card_repository import ReviewCardRepository
 from app.shared.infrastructure.db.client import make_server_client
@@ -18,7 +19,10 @@ def get_review_card_service(request: Request):
     with request.app.state.service_lock:
         service = getattr(request.app.state, 'review_card_service', None)
         if service is None:
-            service = ReviewCardService(ReviewCardRepository(make_server_client(request.app.state.settings)))
+            settings = request.app.state.settings
+            key = settings.data_go_kr_api_key
+            service = ReviewCardService(ReviewCardRepository(make_server_client(settings)),
+                                       MarketReferenceService(key.get_secret_value() if key else None))
             request.app.state.review_card_service = service
         return service
 
@@ -35,3 +39,9 @@ def review_card(case_id: UUID, request: Request, principal=Depends(require_googl
     """
     ready = case_changes_ready(get_runtime_repository(request))
     return api_json(service.get(principal.user_id, case_id, ready).model_dump(mode='json'), headers=PRIVATE)
+
+
+@router.get('/{case_id}/market-reference', summary='업무 품목의 최신 공공 조사 참고가격')
+def market_reference(case_id: UUID, principal=Depends(require_google_user), service=Depends(get_review_card_service)):
+    case = service.repo.case(principal.user_id, case_id)
+    return api_json(service.market.get(case), headers=PRIVATE)

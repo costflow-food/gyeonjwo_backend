@@ -1,0 +1,215 @@
+{
+  "synthetic": true,
+  "case": {
+    "input_revision": 1,
+    "item_name": "깐마늘",
+    "specification": "국산 대서 상품, 20kg 포장",
+    "review_batch_id": "batch-ec08",
+    "mandatory_conditions": [
+      "HACCP"
+    ],
+    "quantity": "1000",
+    "unit": "kg",
+    "due_date": null,
+    "policy": {
+      "allow_split": true,
+      "max_suppliers": 2,
+      "max_increase_rate": "0.04",
+      "incumbent_premium_rate": "0.04"
+    }
+  },
+  "suppliers": [
+    {
+      "id": "4d7e2693-24fa-56bf-8f9a-220bbf38e9b8",
+      "name": "시연마늘농산",
+      "contact_email": "incumbent@example.invalid",
+      "evidence_jsonb": null,
+      "source_type": "REGISTERED"
+    },
+    {
+      "id": "966ecfc8-eb7d-52e2-8135-64a8443d2bd3",
+      "name": "시연대서유통",
+      "contact_email": "a@example.invalid",
+      "evidence_jsonb": null,
+      "source_type": "REGISTERED"
+    },
+    {
+      "id": "632476c9-89ce-5552-acef-87b03616daf9",
+      "name": "시연깐마늘식품",
+      "contact_email": "b@example.invalid",
+      "evidence_jsonb": null,
+      "source_type": "REGISTERED"
+    },
+    {
+      "id": "d9b8e618-623b-5016-a61a-b18ac88d1c1e",
+      "name": "시연알마늘",
+      "contact_email": "c@example.invalid",
+      "evidence_jsonb": null,
+      "source_type": "REGISTERED"
+    },
+    {
+      "id": "b06f1cbd-6d20-53fe-a445-92129caa1123",
+      "name": "시연미확인농산",
+      "contact_email": "excluded@example.invalid",
+      "evidence_jsonb": null,
+      "source_type": "REGISTERED"
+    }
+  ],
+  "supplier_items": [
+    {
+      "id": "3a9a3ec1-1662-518d-bb4d-9a9cf8c2b846",
+      "supplier_id": "4d7e2693-24fa-56bf-8f9a-220bbf38e9b8",
+      "item_name": "깐마늘",
+      "specification": "국산 대서 상품, 20kg 포장",
+      "unit": "kg",
+      "certifications_jsonb": [
+        "HACCP"
+      ],
+      "origin": "국산",
+      "notes": null,
+      "last_purchase_id": "77ae6c8d-e96f-5e6f-9a18-efa5b1700dec"
+    },
+    {
+      "id": "e487b3c8-9886-5c0d-947a-f5b7cb28f1c3",
+      "supplier_id": "966ecfc8-eb7d-52e2-8135-64a8443d2bd3",
+      "item_name": "깐마늘",
+      "specification": "국산 대서 상품, 20kg 포장",
+      "unit": "kg",
+      "certifications_jsonb": [
+        "HACCP"
+      ],
+      "origin": "국산",
+      "notes": null,
+      "last_purchase_id": "b66ea02d-38fe-54e4-a2d2-b83afac2b2ea"
+    },
+    {
+      "id": "35472d4b-9757-547c-83d0-4d603992d7c8",
+      "supplier_id": "632476c9-89ce-5552-acef-87b03616daf9",
+      "item_name": "깐마늘",
+      "specification": "국산 대서 상품, 20kg 포장",
+      "unit": "kg",
+      "certifications_jsonb": [
+        "HACCP"
+      ],
+      "origin": "국산",
+      "notes": null,
+      "last_purchase_id": null
+    },
+    {
+      "id": "2edc9544-54f9-5bb9-bd95-dff744a6acfc",
+      "supplier_id": "d9b8e618-623b-5016-a61a-b18ac88d1c1e",
+      "item_name": "깐마늘",
+      "specification": "국산 대서 상품, 20kg 포장",
+      "unit": "kg",
+      "certifications_jsonb": [
+        "HACCP"
+      ],
+      "origin": "국산",
+      "notes": null,
+      "last_purchase_id": "1ae5a0bd-6bac-5256-a14e-fad9c57c84cd"
+    },
+    {
+      "id": "8227af1d-db1f-5bbb-9fc8-06b1e7766e76",
+      "supplier_id": "b06f1cbd-6d20-53fe-a445-92129caa1123",
+      "item_name": "깐마늘",
+      "specification": "국산 대서 상품, 20kg 포장",
+      "unit": "kg",
+      "certifications_jsonb": [],
+      "origin": "국산",
+      "notes": null,
+      "last_purchase_id": null
+    }
+  ],
+  "purchase_history": [
+    {
+      "id": "77ae6c8d-e96f-5e6f-9a18-efa5b1700dec",
+      "supplier_item_id": "3a9a3ec1-1662-518d-bb4d-9a9cf8c2b846",
+      "supplier_id": "4d7e2693-24fa-56bf-8f9a-220bbf38e9b8",
+      "transaction_date": "2026-10-15",
+      "quantity": "1000",
+      "unit": "kg",
+      "unit_price": "9400",
+      "total_amount": null,
+      "currency": "KRW"
+    },
+    {
+      "id": "b66ea02d-38fe-54e4-a2d2-b83afac2b2ea",
+      "supplier_item_id": "e487b3c8-9886-5c0d-947a-f5b7cb28f1c3",
+      "supplier_id": "966ecfc8-eb7d-52e2-8135-64a8443d2bd3",
+      "transaction_date": "2026-10-15",
+      "quantity": "300",
+      "unit": "kg",
+      "unit_price": "9700",
+      "total_amount": null,
+      "currency": "KRW"
+    },
+    {
+      "id": "1ae5a0bd-6bac-5256-a14e-fad9c57c84cd",
+      "supplier_item_id": "2edc9544-54f9-5bb9-bd95-dff744a6acfc",
+      "supplier_id": "d9b8e618-623b-5016-a61a-b18ac88d1c1e",
+      "transaction_date": "2026-10-15",
+      "quantity": "200",
+      "unit": "kg",
+      "unit_price": "9500",
+      "total_amount": null,
+      "currency": "KRW"
+    }
+  ],
+  "mails": [
+    {
+      "id": "7329fbc7-898d-51a7-a424-88dee132ce30",
+      "work_case_id": "c86bd050-de56-5135-87e8-5d97f509ec08",
+      "supplier_id": "4d7e2693-24fa-56bf-8f9a-220bbf38e9b8",
+      "message_role": "INITIAL",
+      "direction": "IN",
+      "subject": "7329fbc7-898d-51a7-a424-88dee132ce30 제목",
+      "received_at": "2026-10-29T09:00:00+09:00",
+      "body_text": "업체명: 시연마늘농산\n품목: 깐마늘\n규격: 국산 대서 상품, 20kg 포장\n변경 단가: 10340원\n단가 기준 단위: kg\n공급 가능량: 1000kg\n세금 조건: 부가세 면세\n최소 주문량: 100kg\n발주 배수: 20kg\n인증: HACCP\n원산지: 국산\n적용일: 2026-11-15\n견적 유효기간: 2026-12-31\n납품 소요일: 발주 후 3일\n기존 단가: 9400원\n인상 사유: 원물 매입비 상승\n운송비: 무료",
+      "attachments": []
+    },
+    {
+      "id": "3237bc87-56f9-5b85-b4f2-98a3784258c1",
+      "work_case_id": "c86bd050-de56-5135-87e8-5d97f509ec08",
+      "supplier_id": "966ecfc8-eb7d-52e2-8135-64a8443d2bd3",
+      "message_role": "REPLY",
+      "direction": "IN",
+      "subject": "3237bc87-56f9-5b85-b4f2-98a3784258c1 제목",
+      "received_at": "2026-10-29T09:00:00+09:00",
+      "body_text": "업체명: 시연대서유통\n품목: 깐마늘\n규격: 국산 대서 상품, 20kg 포장\n견적 단가: 9700원\n단가 기준 단위: kg\n공급 가능량: 1000kg\n세금 조건: 부가세 면세\n최소 주문량: 100kg\n발주 배수: 20kg\n인증: HACCP\n원산지: 국산\n적용일: 2026-11-15\n견적 유효기간: 2026-12-31\n납품 소요일: 발주 후 3일\n운송비: 무료",
+      "attachments": []
+    },
+    {
+      "id": "9ccd00a0-4629-50b6-9edd-a1e5a52d0b0f",
+      "work_case_id": "c86bd050-de56-5135-87e8-5d97f509ec08",
+      "supplier_id": "632476c9-89ce-5552-acef-87b03616daf9",
+      "message_role": "REPLY",
+      "direction": "IN",
+      "subject": "9ccd00a0-4629-50b6-9edd-a1e5a52d0b0f 제목",
+      "received_at": "2026-10-29T09:00:00+09:00",
+      "body_text": "업체명: 시연깐마늘식품\n품목: 깐마늘\n규격: 국산 대서 상품, 20kg 포장\n견적 단가: 9600원\n단가 기준 단위: kg\n공급 가능량: 1000kg\n세금 조건: 부가세 면세\n최소 주문량: 100kg\n발주 배수: 20kg\n인증: HACCP\n원산지: 국산\n적용일: 2026-11-15\n견적 유효기간: 2026-12-31\n납품 소요일: 발주 후 3일\n운송비: 추후 안내",
+      "attachments": []
+    },
+    {
+      "id": "8b44baa2-7401-5adc-94bd-26e4379cb425",
+      "work_case_id": "c86bd050-de56-5135-87e8-5d97f509ec08",
+      "supplier_id": "d9b8e618-623b-5016-a61a-b18ac88d1c1e",
+      "message_role": "REPLY",
+      "direction": "IN",
+      "subject": "8b44baa2-7401-5adc-94bd-26e4379cb425 제목",
+      "received_at": "2026-10-29T09:00:00+09:00",
+      "body_text": "업체명: 시연알마늘\n품목: 깐마늘\n규격: 국산 대서 상품, 20kg 포장\n견적 단가: 9500원\n단가 기준 단위: kg\n공급 가능량: 600kg\n세금 조건: 부가세 면세\n최소 주문량: 100kg\n발주 배수: 20kg\n인증: HACCP\n원산지: 국산\n적용일: 2026-11-15\n견적 유효기간: 2026-12-31\n납품 소요일: 발주 후 3일\n운송비: 무료",
+      "attachments": []
+    },
+    {
+      "id": "51af742e-5716-5954-9f21-45f78e7d7c5d",
+      "work_case_id": "c86bd050-de56-5135-87e8-5d97f509ec08",
+      "supplier_id": "632476c9-89ce-5552-acef-87b03616daf9",
+      "message_role": "REPLY",
+      "direction": "IN",
+      "subject": "51af742e-5716-5954-9f21-45f78e7d7c5d 제목",
+      "received_at": "2026-10-29T09:00:00+09:00",
+      "body_text": "업체명: 시연깐마늘식품\n운송비: 70000원, 1회 배송당 별도",
+      "attachments": []
+    }
+  ]
+}

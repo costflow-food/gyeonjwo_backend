@@ -239,8 +239,11 @@ def run_case(graph, data: RunCaseInput) -> RunCaseOutput:
                           'input_revision': data.input_revision, 'mail_ids': data.mail_ids,
                           'role_calls': 0, 'draft_ids': [], 'unresolved': [], 'steps': []},
                          {'recursion_limit': 4 * MAX_ROLE_CALLS_PER_RUN + 4})
+    # Completion commits exactly the drafts referenced by the final card; retries may have created older drafts.
+    drafts = ((state.get('counter_offer_result') or {}).get('draft_ids', [])
+              if state['status'] == RunStatus.COMPLETE else state.get('draft_ids', []))
     return RunCaseOutput(case_id=data.case_id, status=state['status'],
                          processing_step=state.get('processing_step', ProcessingStep.PENDING_START),
-                         input_revision=data.input_revision, draft_ids=state.get('draft_ids', []),
+                         input_revision=data.input_revision, draft_ids=drafts,
                          card_id=state.get('card_id'), unresolved=state.get('unresolved', []),
                          steps=state.get('steps', []))

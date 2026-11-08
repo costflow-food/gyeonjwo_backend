@@ -105,7 +105,7 @@ def test_required_conditions_pass_and_unknown(store):
     a, d, b = evaluate_candidates(store, ctx(), ITEMS)['candidates']
     assert states(a, True) == {'규격 10kg/박스': 'PASS', 'HACCP': 'PASS'}
     assert states(d, True) == {'규격 10kg/박스': 'UNKNOWN', 'HACCP': 'PASS'}        # 규격 차이로는 제외하지 않는다
-    assert states(b, True) == {'규격 10kg/박스': 'UNKNOWN', 'HACCP': 'UNKNOWN'}     # 인증 목록이 없으면 RFQ로 확인
+    assert states(b, True) == {'규격 10kg/박스': 'PASS', 'HACCP': 'UNKNOWN'}     # 구분자만 다른 규격은 일치, 인증은 RFQ로 확인
 
 
 def test_preference_score_is_origin_and_history_only(store):
@@ -209,11 +209,12 @@ def test_one_call_makes_a_draft_per_supplier_from_the_code_template(store):
         '안녕하세요. 다온푸드 담당자님\n건강한 동결건조 식품을 만드는 (주)트루나스입니다.\n\n'
         f'아래 품목의 견적을 요청드립니다. {deadline}까지 회신 부탁드립니다.\n\n'
         '<요청 내용>\n- 품목: 냉동 딸기\n- 규격: 10kg/박스\n- 수량: 600kg\n- 납기일: 2026-12-01\n\n'
-        '<견적서 포함 사항>\n1. 단가와 단가 기준 단위\n2. 요청 수량 공급 가능 여부\n3. 요청 납기일 납품 가능 여부\n'
+        '<견적서 포함 사항>\n1. 단가와 단가 기준 단위\n2. 공급 가능 수량과 그 단위\n3. 요청 납기일 납품 가능 여부\n'
         '4. 운송비 부담 주체와 단가 포함 여부\n5. 최소 주문 수량(MOQ)\n6. 견적 유효기간\n\n'
         '빠른 회신 주시면 내부 검토 후 신속히 연락드리겠습니다.\n감사합니다.\n트루나스 드림')
     # 확인되지 않은 필수 조건은 증빙 질문으로 더한다
-    assert '7. 규격 10kg/박스 충족 여부(증빙)\n8. HACCP 충족 여부(증빙)' in b.body_text
+    assert '7. HACCP 충족 여부(증빙)' in b.body_text
+    assert '규격 10kg/박스 충족 여부(증빙)' not in b.body_text
     assert a.evidence_refs_jsonb == ['supplier_items:si-a', 'suppliers:sup-a.evidence_jsonb', 'agent_runs:run-x']
     assert not any(word in a.body_text + b.body_text for word in ('가나농산', '9500', '9,500'))
 
@@ -305,7 +306,7 @@ def test_candidate_agent_drafts_all_rfqs_in_one_call_and_tool_values_replace_llm
     a, b = out.candidates
     assert a.reason == '국내산·HACCP 확인' and a.preference_score == '3' and len(a.checklist) == 4
     assert b.preference_score == '0'
-    assert set(out.unknown_fields) == {'sup-b.규격 10kg/박스', 'sup-b.HACCP'}
+    assert set(out.unknown_fields) == {'sup-b.HACCP'}
     assert out.reason == SUMMARY.format('2곳(다온푸드, 라온상사)')       # 초안 결과 문장 (LLM 문장 대신)
     assert store.agent_runs['run-1']['status'] == 'COMPLETED'
 
@@ -316,7 +317,7 @@ def test_missing_candidate_reason_is_filled_from_checklist(store):
         call('CandidateOut', {'next_action': 'SEND_RFQ', 'reason': 'x', 'draft_ids': ['draft-1', 'draft-2'],
                               'candidates': [candidate('sup-a', '국내산이고 HACCP가 확인된 업체입니다.')]}, 3)])
     assert [c.supplier_id for c in out.candidates] == ['sup-a', 'sup-b']
-    assert out.candidates[1].reason == '규격 10kg/박스, HACCP은(는) 견적 회신으로 확인합니다.'
+    assert out.candidates[1].reason == '필수 조건 규격 10kg/박스 확인됨. HACCP은(는) 견적 회신으로 확인합니다.'
 
 
 def test_caution_is_kept_only_with_registered_notes(store):
