@@ -10,9 +10,6 @@ logs/
 .local-tmp/
 models/
 
-# 로컬 전용 테스트 자료 (평가 스크립트·설계 메모·재현용 PDF·시드)
-tests/*.md
-tests/eval_*.py
-tests/fixtures/mango/
-tests/fixtures/strawberry/*/*.sql
-tests/fixtures/strawberry/*/email.md
+# 테스트·작업 문서는 저장소에서 추적하지 않고 각자 로컬에 둔다 (fd04466 규칙)
+/tests/
+/docs/
