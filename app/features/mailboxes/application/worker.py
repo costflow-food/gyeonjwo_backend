@@ -1,5 +1,6 @@
 """Connected mailbox worker: durable jobs, no token or message body logging."""
 import logging
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,12 @@ from app.shared.infrastructure.llm import JsonAgent
 # Inherit Uvicorn's INFO handler so these events appear in Docker without
 # reconfiguring root logging (which could expose third-party HTTP diagnostics).
 logger = logging.getLogger('uvicorn.error.gmail_receive')
+
+
+def failure_cause(error):
+    """Fixed service code or exception class only; never messages, tokens or provider payloads."""
+    cause = error.code if isinstance(error, ServiceError) else type(error).__name__
+    return cause if isinstance(cause, str) and re.fullmatch(r'[A-Za-z0-9_]{1,64}', cause) else 'UNKNOWN'
 
 
 class ClassificationNode:
@@ -148,10 +155,10 @@ class ConnectedMailboxWorker:
             logger.info('gmail sync_completed sync_id=%s saved=%d duplicates=%d deleted=%d quarantined=%d elapsed_ms=%d',
                         sync_id, saved, duplicates, deleted, quarantined, int((time.monotonic() - started) * 1000))
             return True
-        except Exception:
+        except Exception as error:
             # Failed/uncertain and no-new-mail are different. Cursor never advances here.
-            logger.warning('gmail sync_failed sync_id=%s phase=%s code=GMAIL_SYNC_FAILED saved=%d',
-                           sync_id, phase, saved)
+            logger.warning('gmail sync_failed sync_id=%s phase=%s code=GMAIL_SYNC_FAILED cause=%s saved=%d',
+                           sync_id, phase, failure_cause(error), saved)
             self.repo.fail_sync(job, 'GMAIL_SYNC_FAILED', phase=phase)
             return True
 

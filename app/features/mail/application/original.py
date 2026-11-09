@@ -1,6 +1,6 @@
 """Stored plain text and metadata only. No Gmail probe, analysis, OCR or writes."""
 from app.core.errors import ServiceError
-from app.features.mail.domain.attachment_ids import attachment_id
+from app.features.mail.domain.attachment_ids import attachment_id, part_reference
 from app.features.mail.domain.original import OriginalAttachment, OriginalMail
 
 
@@ -16,9 +16,12 @@ class OriginalMailService:
                 metadata = []
             if not isinstance(metadata, list) or any(not isinstance(a, dict) for a in metadata):
                 raise ValueError('Invalid attachment metadata')
+            downloadable_provider = str(row.get('provider') or '').upper() == 'GMAIL'
             attachments = [OriginalAttachment(
                 attachment_id=attachment_id(row['id'], a, index), filename=a['filename'],
-                mime_type=a['mime_type'], size_bytes=a['size_bytes']) for index, a in enumerate(metadata)]
+                mime_type=a['mime_type'], size_bytes=a['size_bytes'],
+                can_download=downloadable_provider and isinstance(part_reference(a), str))
+                for index, a in enumerate(metadata)]
             if len({a.attachment_id for a in attachments}) != len(attachments):
                 raise ValueError('Ambiguous attachment references')
             return OriginalMail(mail_id=row['id'], subject=row['subject'], sender=row['sender'],

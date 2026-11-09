@@ -45,6 +45,7 @@ import dataclasses
 import hashlib
 import json
 import re
+import unicodedata
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Literal, Protocol
@@ -288,6 +289,8 @@ PRICE_BASIS = ('unit', 'currency', 'order_unit', 'quantity_per_order_unit')
 # 저장하는 단위. 원문 표기는 _UNIT_ALIASES·unit_name으로 바꾸고, 이 밖의 단위는 INVALID_UNIT으로 거절한다
 _UNITS = {'kg', 'g', '톤', 'box', '개', '팩', '봉', '포대'}
 _UNIT_ALIASES = {'Box': 'box', '상자': 'box', '그램': 'g', 't': '톤', 'EA': '개', 'ea': '개'}
+# unit_code를 받는 항목: 단위 자체와 단위가 붙는 수량
+_UNIT_FIELDS = {'unit', 'order_unit', 'available_quantity', 'quantity_per_order_unit', 'moq', 'pack_multiple'}
 # 수량에 붙는 수식어 ('최소 20박스', '5박스 단위', '500kg 미만', '박스당 10kg'). 숫자를 읽을 때만 떼고,
 # 원문 대조는 붙인 채로 한다. 숫자 뒤의 단위는 pricing_terms_jsonb의 '{필드}_unit'으로 저장한다
 _QUANTITY_FIELDS = {'available_quantity', 'quantity_per_order_unit', 'moq', 'pack_multiple'}
@@ -309,9 +312,14 @@ _HINTS = {
     'MISSING_EVIDENCE': '값을 읽은 메일의 evidence{mail_id, part, page}를 붙인다. 원문에서 그 항목을 직접 읽지 않았다면 '
                         '(다른 항목의 값을 옮겨 쓴 경우 등) 그 항목은 빼고 다시 보낸다.',
     'EVIDENCE_NOT_IN_CASE': 'get_case_context 메일 목록의 mail_id와 part(본문 body, 첨부 att-1 등)를 쓴다.',
-    'INVALID_NUMBER': '숫자와 단위·통화만 옮긴다 (예: "54,500원", "300kg", "3.20 USD"). 그래도 안 되면 그 항목만 null로 보낸다.',
+    'INVALID_NUMBER': '숫자와 단위·통화만 옮긴다 (예: "54,500원", "300kg", "3.20 USD"). 앞뒤의 설명 낱말은 빼고 '
+                      '다시 보낸다 (예: "박스당 중량은 10kg" → "10kg"). 그래도 안 되면 그 항목만 null로 보낸다.',
     'INVALID_DATE': '연도가 있는 날짜만 옮긴다. 연도가 없으면 그 항목만 null로 보낸다.',
-    'INVALID_UNIT': 'kg·g·톤·박스·개·팩·봉·포대 중 원문 단위를 옮긴다. 원문에 없으면 null로 보낸다.',
+    'INVALID_UNIT': 'kg·g·톤·박스·개·팩·봉·포대 중 원문 단위를 옮긴다. 원문 표기가 이 이름과 다르면(예: "킬로", "봉지") '
+                    'raw_value는 원문 그대로 두고 unit_code에 정해진 단위를 적는다. 원문에 단위가 없으면 null로 보낸다.',
+    'UNIT_CODE_MISMATCH': 'unit_code가 원문 단위와 다르다. 원문 단위를 다시 확인한다.',
+    'BASIS_TYPE_MISMATCH': '비용의 basis_type·basis_unit이 basis 원문과 맞지 않는다. 주문·배송 한 번마다면 PER_ORDER, '
+                           '수량 단위마다면 PER_UNIT과 그 단위(basis_unit)다. 원문에 기준이 없으면 둘 다 보내지 않는다.',
     'UNKNOWN_FIELD': 'fields에는 정해진 field_name만 쓴다. 비용·단가 구간·비고는 cost_terms·price_tiers·item_notes 인자로 보낸다.',
     'DUPLICATE_FIELD': '같은 field_name은 한 번만 보낸다.',
     'TIER_BOUND_MISPLACED': '구간마다 "이상·초과·부터" 경계는 min_quantity, "미만·이하·까지" 경계는 max_quantity에 나눠 넣는다.',
@@ -321,9 +329,12 @@ _HINTS = {
     'SUPPLIER_NOT_MATCHED': '등록된 업체명과 글자가 정확히 같지 않다. 결과의 next를 따른다.',
     'SUPPLIER_MISMATCH': '메일에 연결된 업체와 업체명이 다르다. 저장하지 말고 HOLD한다.',
     'SUPPLIER_EVIDENCE_MIXED': '한 업체의 메일 근거만 남기고 다시 보낸다.',
-    'SUPPLY_QUANTITY_MISSING': '인상 통보 메일에는 공급 물량이 있어야 한다. 원문의 공급 계획·공급 물량을 단위와 함께 '
-                               'available_quantity로 다시 보낸다. 원문에 없으면 다시 보내지 않고 HOLD한다.',
+    'SUPPLY_QUANTITY_MISSING': '인상 통보 메일에는 공급 물량이 있어야 한다. 공급 계획·공급 물량·공급 가능량이라고 적힌 '
+                               '수량만 단위와 함께 available_quantity로 다시 보낸다. 규격·포장·주문 단위의 수량'
+                               '(예: 10kg/박스, 박스당 10kg, 주문 단위 10kg 박스)은 공급 물량이 아니다. '
+                               '그런 수량만 있으면 다시 보내지 말고 HOLD한다.',
     'TAX_BASIS_NOT_TAX_TERMS': 'tax_basis는 field_name이 tax_terms인 항목에만 붙인다.',
+    'UNIT_CODE_NOT_UNIT_FIELD': 'unit_code는 unit·order_unit과 단위가 붙는 수량 항목에만 붙인다.',
     'INSTRUCTION_NOT_NOTE': 'AI·시스템에게 하는 문장이라 비고에서 뺐다. 다시 보내지 않는다.',
 }
 
@@ -335,12 +346,17 @@ class EvidenceRef(StrictModel):
     cell: str | None = None            # 표의 행·열 등
 
 
+UnitCode = Literal['kg', 'g', '톤', 'box', '개', '팩', '봉', '포대']
+
+
 class QuoteField(StrictModel):
     field_name: str
     raw_value: str | None              # 원문에 적힌 그대로. 원문에 없으면 null
     evidence: EvidenceRef | None = None
     # field_name이 tax_terms일 때만: 원문이 말하는 부가세 기준 (포함·별도·면세). 판단할 수 없으면 null
     tax_basis: Literal['INCLUDED', 'EXCLUDED', 'EXEMPT'] | None = None
+    # 단위가 있는 항목(unit·order_unit·수량)에서 원문 단위 표기가 정해진 이름과 다를 때 ①이 고른 단위 ('킬로' → kg)
+    unit_code: UnitCode | None = None
 
 
 class PriceTier(StrictModel):
@@ -355,6 +371,10 @@ class CostTerm(StrictModel):
     source_text: str = Field(min_length=1)  # 이 비용 조건이 적힌 원문 구절 그대로
     amount: str | None = None          # 원문 그대로. 무료 근거가 있으면 '무료'
     basis: str | None = None           # 산정 기준 원문 (예: 회당, 박스당)
+    # 산정 기준의 뜻 (①이 고른다): 주문·배송 한 번마다(PER_ORDER) / 수량 단위마다(PER_UNIT, basis_unit 필수).
+    # 계산은 이 값을 쓰고, 없으면(이전 견적) basis 원문을 키워드로 읽는다
+    basis_type: Literal['PER_ORDER', 'PER_UNIT'] | None = None
+    basis_unit: UnitCode | None = None
     payer: str | None = None           # 부담 주체 원문
     included_in_price: StrictBool | None  # 비용마다 정한다: 포함 true, 별도 청구 false, 원문에 없으면 null
     evidence: EvidenceRef
@@ -427,17 +447,22 @@ def use_quote_store(store: QuoteStore | None) -> None:
     _quote_store = store
 
 
+def _nfkc(text: str) -> str:
+    """글자 모양만 다른 표기를 한 가지로 ('ｋｇ'·'㎏' → 'kg', '１,０００' → '1,000'). 뜻은 바꾸지 않는다."""
+    return unicodedata.normalize('NFKC', text)
+
+
 def _compact(text: str) -> str:
-    return re.sub(r'\s+', '', text)
+    return re.sub(r'\s+', '', _nfkc(text))
 
 
 def _quantity_text(raw: str) -> str:
-    return _QUANTITY_WORDS.sub('', raw.strip()).strip()
+    return _QUANTITY_WORDS.sub('', _nfkc(raw).strip()).strip()
 
 
 def _date(raw: str, field_name: str) -> str:
     """연도가 있는 날짜만 받는다. '2026년 12월 1일', '2026-12-01', '2026. 12. 1.', 뒤의 '까지·부터'는 허용."""
-    text = _DATE_SUFFIX.sub('', raw.strip())
+    text = _DATE_SUFFIX.sub('', _nfkc(raw).strip())
     match = _DOTTED_DATE.fullmatch(text)
     if match is None:
         return explicit_date(text, field_name).isoformat()
@@ -447,46 +472,57 @@ def _date(raw: str, field_name: str) -> str:
         raise ReviewRequired('INVALID_DATE', f'{field_name}의 날짜를 확인할 수 없습니다.', field_name)
 
 
-def _unit(raw: str, field_name: str) -> str:
-    """'kg', '박스', '원/kg', 'kg당', '1kg'을 저장 단위로 바꾼다. 정해진 단위가 아니면 INVALID_UNIT."""
-    text = re.sub(r'\s*당$', '', re.sub(r'^(?:원\s*)?/\s*', '', raw.strip()))
+def _unit(raw: str, field_name: str, code: str | None = None) -> str:
+    """'kg', '박스', '원/kg', 'kg당', '1kg'을 저장 단위로 바꾼다. 정해진 단위가 아니면 INVALID_UNIT.
+    code는 ①이 원문 단위를 정해진 단위 중 하나로 고른 값(unit_code)이다. 표기를 코드가 못 읽을 때('킬로', '봉지')
+    그 값을 쓰고, 코드가 읽은 단위와 다르면 UNIT_CODE_MISMATCH로 거절한다."""
+    text = re.sub(r'\s*당$', '', re.sub(r'^(?:원\s*)?/\s*', '', _nfkc(raw).strip()))
     text = re.sub(r'^1\s*(?=\D)', '', text)          # '1kg 당 단가'의 1kg
     unit = unit_name(_UNIT_ALIASES.get(text, text))
     if unit not in _UNITS:
+        if code in _UNITS:
+            return code
         raise ReviewRequired('INVALID_UNIT', f'{field_name}의 단위를 확인할 수 없습니다.', field_name)
+    if code is not None and code != unit:
+        raise ReviewRequired('UNIT_CODE_MISMATCH', f'{field_name}의 단위 표기와 unit_code가 다릅니다.', field_name)
     return unit
 
 
 def _price(raw: str, field_name: str) -> tuple[str, str | None]:
     """단가·금액을 (소수 문자열, 외화 통화 코드)로 읽는다. '3.20 USD', '$3.20'은 통화를 나누고, 그 밖에는 원화 표기만 받는다."""
+    raw = _nfkc(raw)
     match = _FOREIGN_PRICE.fullmatch(raw.strip())
     if match and (match['pre'] or match['post']):
         return str(decimal_value(match['num'], field_name)), _CURRENCIES[match['pre'] or match['post']]
     return str(decimal_value(raw, field_name)), None
 
 
-def _quantity(raw: str, field_name: str) -> tuple[str, str | None]:
-    """수량을 (소수 문자열, 단위)로 읽는다. '최소 20박스' → ('20', 'box'), '박스당 10kg' → ('10', 'kg'), '300' → ('300', None)."""
+def _quantity(raw: str, field_name: str, code: str | None = None) -> tuple[str, str | None]:
+    """수량을 (소수 문자열, 단위)로 읽는다. '최소 20박스' → ('20', 'box'), '박스당 10kg' → ('10', 'kg'), '300' → ('300', None).
+    code는 _unit과 같다. 단위 표기가 없으면 쓰지 않는다."""
     match = re.fullmatch(rf'({_NUMBER})\s*(.*)', _quantity_text(raw))
     if match is None:
         raise ReviewRequired('INVALID_NUMBER', f'{field_name}의 숫자와 단위를 확인할 수 없습니다.', field_name)
     try:
-        unit = _unit(match[2], field_name) if match[2] else None
-    except ReviewRequired:
+        unit = _unit(match[2], field_name, code) if match[2] else None
+    except ReviewRequired as error:
+        if error.issue['code'] == 'UNIT_CODE_MISMATCH':
+            raise
         raise ReviewRequired('INVALID_NUMBER', f'{field_name}의 숫자와 단위를 확인할 수 없습니다.', field_name)
     return str(decimal_value(match[1], field_name)), unit
 
 
-def _parse(kind: str, field_name: str, raw: str) -> str:
+def _parse(kind: str, field_name: str, raw: str, unit_code: str | None = None) -> str:
     """원문 값을 저장 값으로 바꾼다. 숫자는 소수 문자열, 날짜는 ISO, 단위·통화는 표준 이름."""
     if kind == 'price':
         return _price(raw, field_name)[0]
     if kind == 'number':
-        return _quantity(raw, field_name)[0] if field_name in _QUANTITY_FIELDS else str(decimal_value(raw, field_name))
+        return (_quantity(raw, field_name, unit_code)[0] if field_name in _QUANTITY_FIELDS
+                else str(decimal_value(_nfkc(raw), field_name)))
     if kind == 'date':
         return _date(raw, field_name)
     if kind == 'unit':
-        return _unit(raw, field_name)
+        return _unit(raw, field_name, unit_code)
     if kind == 'currency':
         return _CURRENCIES.get(raw.strip(), raw.strip().upper())
     return raw.strip()
@@ -606,51 +642,95 @@ def _costs(check, costs: list[CostTerm], rejected: list, review: list) -> list[d
         amount = None
         if not issue:
             amount, issue = _number(check, amount_text, 'amount', cost.evidence, zero_words=True)
+        if not issue:
+            issue = _basis_issue(cost)
         if issue:
             rejected.append({'field': f'cost_terms[{index}]', 'code': issue})
             continue
         out.append({'cost_type': cost.cost_type, 'source_text': cost.source_text, 'amount': amount, 'basis': basis,
-                    'payer': cost.payer, 'included_in_price': cost.included_in_price, **source})
+                    'payer': cost.payer, 'included_in_price': cost.included_in_price, **source}
+                   | ({'basis_type': cost.basis_type, 'basis_unit': cost.basis_unit} if cost.basis_type else {}))
     return out
 
 
+def _basis_issue(cost: CostTerm) -> str | None:
+    """①이 고른 산정 기준(basis_type·basis_unit)이 basis 원문과 맞는지. 뜻은 ①이 정하고, 코드는 원문에 단위가 보이는
+    경우만 대조한다('박스당'을 PER_ORDER로, 'kg당'을 PER_UNIT box로 보내면 거절). 맞지 않으면 BASIS_TYPE_MISMATCH."""
+    if cost.basis_type is None:
+        return 'BASIS_TYPE_MISMATCH' if cost.basis_unit else None
+    if cost.basis_type == 'PER_ORDER':
+        unit = _unit_key(_PER_UNIT_PREFIX.sub('', cost.basis or ''))
+        return 'BASIS_TYPE_MISMATCH' if cost.basis_unit or unit in _UNITS else None
+    if not cost.basis or cost.basis_unit is None:
+        return 'BASIS_TYPE_MISMATCH'
+    unit = _unit_key(_PER_UNIT_PREFIX.sub('', cost.basis))
+    return 'BASIS_TYPE_MISMATCH' if unit in _UNITS and unit != cost.basis_unit else None
+
+
 def _quote_supplier(store: QuoteStore, case_id: str, case_mails: dict, evidence_mails: set,
-                    supplier_name: str | None) -> tuple[str | None, dict | None]:
+                    supplier_name: str | None) -> tuple[str | None, dict | None, str | None]:
     """견적 업체는 근거 메일의 서버 연결(mail_messages.supplier_id)로 정한다. LLM이 적은 업체명은 대조에만 쓴다.
-    반환: (supplier_id, 거절 사유)."""
+    반환: (supplier_id, 거절 사유, 등록 업체와 맞은 업체명 — 법인 표기를 뺐으면 뺀 이름)."""
     if not evidence_mails:
-        return None, {'field': 'supplier_name', 'code': 'MISSING_FIELD'}
+        return None, {'field': 'supplier_name', 'code': 'MISSING_FIELD'}, None
     linked = {(case_mails.get(mail_id) or {}).get('supplier_id') for mail_id in evidence_mails}
-    named = _read(lambda: store.resolve_supplier(case_id, supplier_name)) if supplier_name else None
+    named, matched_name = _resolve_supplier_name(store, case_id, supplier_name)
     if None in linked:
         # 업체가 연결되지 않은 메일은 업체명으로 찾되, 다른 메일 값과 섞이지 않게 한 메일 안의 근거만 묶는다
         if len(evidence_mails) > 1:
-            return None, {'field': 'evidence', 'code': 'SUPPLIER_EVIDENCE_MIXED', 'mail_ids': sorted(evidence_mails)}
+            return None, {'field': 'evidence', 'code': 'SUPPLIER_EVIDENCE_MIXED',
+                          'mail_ids': sorted(evidence_mails)}, None
         if supplier_name is None:
-            return None, {'field': 'supplier_name', 'code': 'MISSING_FIELD'}
+            return None, {'field': 'supplier_name', 'code': 'MISSING_FIELD'}, None
         if named is None:
-            return None, {'field': 'supplier_name', 'code': 'SUPPLIER_NOT_MATCHED'}
-        return named, None
+            return None, {'field': 'supplier_name', 'code': 'SUPPLIER_NOT_MATCHED'}, None
+        return named, None, matched_name
     if len(linked) > 1:
-        return None, {'field': 'evidence', 'code': 'SUPPLIER_EVIDENCE_MIXED', 'mail_ids': sorted(evidence_mails)}
+        return None, {'field': 'evidence', 'code': 'SUPPLIER_EVIDENCE_MIXED', 'mail_ids': sorted(evidence_mails)}, None
     supplier_id = linked.pop()
     if named is not None and named != supplier_id:
-        return None, {'field': 'supplier_name', 'code': 'SUPPLIER_MISMATCH'}
-    return supplier_id, None
+        return None, {'field': 'supplier_name', 'code': 'SUPPLIER_MISMATCH'}, None
+    return supplier_id, None, matched_name if named is not None else None
 
 
-# 업체명에 붙어 등록 이름과 달라지게 하는 표기: 법인 표기, 부서·직책
-_NAME_DECORATION = re.compile(r'주식회사|유한회사|농업회사법인|영농조합법인|\((?:주|유)\)|㈜|'
-                              r'영업[부팀]|구매[부팀]|대표이사|과장|대리|팀장|부장|사원|드림')
+# 거래처는 법인 표기 없이 등록되어 있다. 업체명 앞뒤에 붙은 법인 표기만 뺀다('동해프레시 주식회사', '(주)청솔농산')
+_LEGAL_FORM = re.compile(r'주식회사|유한책임회사|유한회사|합자회사|합명회사|농업회사법인|영농조합법인|'
+                         r'\(\s*(?:주|유)\s*\)|㈜|㈲')
+# 법인 표기 외에 등록 이름과 달라지게 하는 표기: 부서·직책. 처음 나온 위치부터 뒤는 회사명이 아니다
+_NAME_DECORATION = re.compile(r'영업[부팀]|구매[부팀]|대표이사|과장|대리|팀장|부장|사원|드림')
 
 
-def _supplier_retry_next(supplier_name: str | None) -> str:
-    """SUPPLIER_NOT_MATCHED 뒤에 할 일. 보낸 업체명에 법인 표기·부서·직책이 붙었을 때만 다시 보내게 한다."""
-    if supplier_name and _NAME_DECORATION.search(supplier_name):
-        return ('업체명에 법인 표기나 부서·직책이 붙어 있다. 그 표기를 빼고 회사명만(예: "동해프레시 주식회사" → '
-                '"동해프레시") 한 번 더 보낸다. 나머지 값은 그대로 보낸다.')
-    return ('회사명만 보냈는데 등록된 거래처에 없다. 다시 보내지 말고(업체명을 빼고 보내지도 않는다) '
-            '바로 HOLD로 최종 응답한다. hold.code는 SUPPLIER_NOT_MATCHED다.')
+def _company_name(text: str | None) -> str:
+    """법인 표기를 빼고 띄어쓰기를 한 칸으로 줄인 업체명 ('동해프레시 주식회사' → '동해프레시')."""
+    return re.sub(r'\s+', ' ', _LEGAL_FORM.sub(' ', str(text or ''))).strip()
+
+
+def _resolve_supplier_name(store: QuoteStore, case_id: str, supplier_name: str | None) -> tuple[str | None, str | None]:
+    """업체명으로 등록 업체 하나를 찾는다. 반환: (supplier_id, 찾은 이름).
+    적힌 그대로 정확히 같은 업체를 먼저 찾고, 없으면 법인 표기를 뺀 이름, 그다음 부서·직책 표기 앞부분만 남긴 이름
+    ('한결냉동식품 영업팀 최서윤' → '한결냉동식품')으로 차례로 정확히 찾는다.
+    이름이 서로 포함되는 정도로는 찾지 않는다(저장소 조회는 정확 일치이고, 여럿이면 찾지 않는다).
+    찾은 이름은 등록 이름과 같으므로, 저장할 업체명 값으로 쓰면 DB의 업체 근거 검사(등록 이름과 같음)를 통과한다."""
+    if not supplier_name or not supplier_name.strip():
+        return None, None
+    named = _read(lambda: store.resolve_supplier(case_id, supplier_name))
+    if named is not None:
+        return named, supplier_name
+    company = _company_name(supplier_name)
+    decoration = _NAME_DECORATION.search(company)
+    tried = {supplier_name}
+    for name in (company, company[:decoration.start()].strip() if decoration else ''):
+        if name and name not in tried:
+            tried.add(name)
+            named = _read(lambda: store.resolve_supplier(case_id, name))
+            if named is not None:
+                return named, name
+    return None, None
+
+
+# SUPPLIER_NOT_MATCHED 뒤에 할 일. 법인 표기·부서·직책은 도구가 이미 빼고 찾았으므로 다시 보내지 않는다
+_SUPPLIER_NOT_MATCHED_NEXT = ('등록된 거래처에 없다. 다시 보내지 말고(업체명을 빼고 보내지도 않는다) '
+                              '바로 HOLD로 최종 응답한다. hold.code는 SUPPLIER_NOT_MATCHED다.')
 
 
 def _carry(previous: tuple[str, QuoteVersionRecord], values: dict, tiers: list, costs: list,
@@ -688,7 +768,7 @@ def _carry(previous: tuple[str, QuoteVersionRecord], values: dict, tiers: list, 
 
 def _letters(text) -> str:
     """품목·규격 대조용 표기: 한글·영문·숫자만 남긴다 ('특품, 10kg/박스' → '특품10kg박스')."""
-    return re.sub(r'[^0-9a-zA-Z가-힣]', '', str(text or '')).casefold()
+    return re.sub(r'[^0-9a-zA-Z가-힣]', '', _nfkc(str(text or ''))).casefold()
 
 
 _ISSUE_EXCERPT_LIMIT = 300
@@ -720,19 +800,26 @@ def _item_key(text) -> str:
     return ' '.join(str(text or '').split()).lower()
 
 
-def _registered_item(items: list[dict], current: dict) -> dict | None:
+def _registered_item(items: list[dict], current: dict, case: dict) -> dict | None:
     """이번 메일의 품목과 같은 그 업체의 등록 품목. _item_key 기준으로 품목명이 같을 때 같은 품목으로 보고,
     여럿이면 규격으로 좁힌다. 하나로 정해질 때만 돌려준다(애매하면 연결하지 않는다).
-    이름이 서로 포함되는 정도('냉동딸기'와 '냉동딸기 (IQF)')로는 연결하지 않는다. DB가 같은 품목으로 보지 않아 저장이 거부된다."""
+    이름이 서로 포함되는 정도('냉동딸기'와 '냉동딸기 (IQF)')로는 연결하지 않는다. DB가 같은 품목으로 보지 않아 저장이 거부된다.
+    업무에 이미 품목명·품목 키가 있으면 DB가 그것과도 대조하므로(QUOTE_ITEM_IDENTITY_MISMATCH·CASE_ITEM_KEY_MISMATCH),
+    업무 품목명이 이번 메일 품목명과 다르거나 업무 키가 등록 품목 키와 다르면 연결하지 않는다."""
     name = _item_key(current.get('item_name', {}).get('value'))
-    if not name:
+    if not name or (case.get('item_name') and _item_key(case['item_name']) != name):
         return None
     found = [item for item in items if _item_key(item.get('item_name')) == name]
     if len(found) > 1:
         wanted = name + _letters(current.get('specification', {}).get('value'))
         found = [item for item in found if _letters(item.get('specification')) and
                  _letters(item.get('specification')) in wanted] or found
-    return found[0] if len(found) == 1 else None
+    if len(found) != 1:
+        return None
+    # 업무 키는 BE select에 따라 context에 없을 수 있다. 들어온 경우에만 대조한다
+    if case.get('standardized_item_key') and found[0].get('standardized_item_key') != case['standardized_item_key']:
+        return None
+    return found[0]
 
 
 def _case_conditions(case: dict, current: dict, item: dict | None, initial_mails: set) -> dict | None:
@@ -757,11 +844,18 @@ def _case_conditions(case: dict, current: dict, item: dict | None, initial_mails
 def _supply_quantity_missing(case: dict, source_mail: dict, values: dict) -> bool:
     """기존 업체 인상 통보(INITIAL 메일)인데 업무 비교 수량을 정할 공급 물량·단위가 없는지 (2026-11-06 팀 결정).
     업무 수량이 비어 있을 때만 본다. 저장한 뒤에는 보류할 수 없으므로(DB가 거부) 저장 전에 거절한다.
-    단위는 공급 물량의 단위, 없으면 같은 메일의 단가 단위로 정한다(_case_conditions와 같은 기준)."""
+    단위는 공급 물량의 단위, 없으면 같은 메일의 단가 단위로 정한다(_case_conditions와 같은 기준).
+    공급 물량 값이 규격·주문 단위 표기 안의 수량이면(예: '특품 10kg/박스'의 10kg) 공급 물량이 아니다 (S3-15).
+    줄이 아니라 값으로 본다: 규격과 공급 계획이 한 줄에 있어도('10kg/박스, 공급 계획 1,000kg') 1,000kg는 통과한다."""
     if case.get('quantity') or source_mail.get('message_role') != 'INITIAL':
         return False
     supply = values.get('available_quantity')
-    return not supply or not (supply.get('quantity_unit') or values.get('unit', {}).get('value'))
+    if not supply or not (supply.get('quantity_unit') or values.get('unit', {}).get('value')):
+        return True
+    specs = [values[name]['raw_value'] for name in ('specification', 'quantity_per_order_unit') if name in values]
+    specs += [case['specification']] if case.get('specification') else []
+    raw = _normalized(supply['raw_value'], True)
+    return any(_contains(_normalized(spec, True), raw, True) for spec in specs)
 
 
 def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[QuoteField],
@@ -786,6 +880,9 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         if field.tax_basis and field.field_name != 'tax_terms':
             rejected.append({'field': field.field_name, 'code': 'TAX_BASIS_NOT_TAX_TERMS'})
             continue
+        if field.unit_code and field.field_name not in _UNIT_FIELDS:
+            rejected.append({'field': field.field_name, 'code': 'UNIT_CODE_NOT_UNIT_FIELD'})
+            continue
         seen.add(field.field_name)
         if field.raw_value is None or not field.raw_value.strip():
             sent_null.append(field.field_name)
@@ -794,7 +891,7 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         issue, source = check(field.evidence, field.raw_value, numeric=kind in ('number', 'price'))
         if issue is None:
             try:
-                value = _parse(kind, field.field_name, field.raw_value)
+                value = _parse(kind, field.field_name, field.raw_value, field.unit_code)
             except ReviewRequired as error:
                 issue = error.issue['code']
         if issue:
@@ -802,7 +899,8 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
             continue
         entry = values[field.field_name] = {'raw_value': field.raw_value, 'value': value, **source}
         refs[field.field_name] = field.evidence
-        if field.field_name in _QUANTITY_FIELDS and (unit := _quantity(field.raw_value, field.field_name)[1]):
+        if field.field_name in _QUANTITY_FIELDS and (
+                unit := _quantity(field.raw_value, field.field_name, field.unit_code)[1]):
             entry['quantity_unit'] = unit
         if kind == 'price' and (currency := _price(field.raw_value, field.field_name)[1]):
             entry['currency'] = currency
@@ -835,7 +933,10 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
     case_mails = {mail['mail_id']: mail for mail in _read(lambda: store.list_case_mails(case_id))}
     evidence_mails = {entry['mail_id'] for entry in [*values.values(), *tiers, *costs, *notes]}
     supplier_name = values['supplier_name']['value'] if 'supplier_name' in values else None
-    supplier_id, issue = _quote_supplier(store, case_id, case_mails, evidence_mails, supplier_name)
+    supplier_id, issue, matched_name = _quote_supplier(store, case_id, case_mails, evidence_mails, supplier_name)
+    if matched_name and matched_name != supplier_name:
+        # 법인 표기·부서·직책을 빼고 찾았으면 저장 값은 등록 이름, raw_value·근거는 원문 표기 그대로 둔다
+        values['supplier_name']['value'] = matched_name
     # 원문 근거가 확인된 업체명이 등록 거래처와 맞지 않으면(미등록·연결 업체와 다름) 다른 항목의 거절보다 먼저 알린다.
     # 다른 항목을 고쳐도 저장할 수 없는 견적이라, 다시 보내기를 다른 항목에 쓰고 원인을 잃지 않게 한다
     # (2026-11-06 실제 LLM 재현: 규격 근거 거절로 두 번 다시 보내고 SUPPLIER_MISMATCH에 닿지 못함)
@@ -846,7 +947,7 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
             _record_supplier_issue(store, context, check, issue, values.get('supplier_name'), refs.get('supplier_name'))
         result = _with_hints({'status': 'REJECTED', 'rejected': [issue]}, [issue])
         if issue['code'] == 'SUPPLIER_NOT_MATCHED':
-            result['next'] = _supplier_retry_next(supplier_name)
+            result['next'] = _SUPPLIER_NOT_MATCHED_NEXT
         return result
     # 원문 메일은 근거 메일 중 가장 최근에 받은 메일이다 (회신이 이전 메일의 값을 함께 근거로 써도 회신이 원문)
     source_mail_id = max(evidence_mails, key=lambda mail_id: (case_mails[mail_id].get('received_at') or '', mail_id))
@@ -886,7 +987,7 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
     foreign = value('currency') not in (None, 'KRW')
     quantity_units = {f'{name}_unit': values[name]['quantity_unit'] for name in sorted(_QUANTITY_FIELDS)
                       if values.get(name, {}).get('quantity_unit')}
-    item = _registered_item(_read(lambda: store.list_supplier_items(case_id, supplier_id)) or [], current)
+    item = _registered_item(_read(lambda: store.list_supplier_items(case_id, supplier_id)) or [], current, case)
     initial_mails = {mail_id for mail_id, mail in case_mails.items() if mail.get('message_role') == 'INITIAL'}
     conditions = _case_conditions(case, current, item, initial_mails)
     record = QuoteVersionRecord(
@@ -1506,6 +1607,8 @@ def create_rfq_draft(supplier_item_ids: list[str], supplier_ids: list[str], runt
 _WEIGHT_KG = {'kg': Decimal(1), 'g': Decimal('0.001'), '톤': Decimal(1000)}
 # 비용 산정 기준 중 주문(배송) 한 번에 한 번 붙는 것. '회당'·'1회'·'건당' 등에서 '당'·'1'을 뗀 표기
 _PER_ORDER = {'회', '건', '주문', '발주', '배송', '납품', '배송회', '주문건'}
+# 단위 대조 전에 떼는 앞말 ('1박스당' → '박스당', '매 kg' → 'kg')
+_PER_UNIT_PREFIX = re.compile(r'^\s*(?:매\s*)?1?\s*')
 # 비교에 꼭 있어야 하는 비용. 견적에 아예 적혀 있지 않으면 미확인으로 본다
 REQUIRED_COST_TYPES = ('SHIPPING',)
 # 세금 기준. ①이 checks_jsonb.tax_basis에 이 값 중 하나로 저장했을 때만 비교에 쓴다
@@ -1644,7 +1747,13 @@ def _cost_line(record: QuoteVersionRecord, cost: dict, quantity: Decimal, case_u
         return Decimal(0), None
     if cost.get('included_in_price') is None:
         return None, 'INCLUSION_UNCLEAR'
-    basis = (cost.get('basis') or '').replace(' ', '')
+    if cost.get('basis_type') == 'PER_ORDER':
+        return amount, None
+    if cost.get('basis_type') == 'PER_UNIT':
+        ratio = unit_ratio(record, case_unit, cost.get('basis_unit'))
+        return (amount * quantity * ratio, None) if ratio is not None else (None, 'BASIS_UNCLEAR')
+    # basis_type이 없는 이전 견적: basis 원문을 키워드로 읽는다
+    basis = _compact(cost.get('basis') or '')
     # '1회 배송당'처럼 횟수 표기가 앞에 붙은 기준도 주문(배송) 한 번의 비용으로 본다
     if not basis or (basis.removesuffix('당').removeprefix('1').removeprefix('회') or '회') in _PER_ORDER:
         return amount, None
