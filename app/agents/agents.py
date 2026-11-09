@@ -700,8 +700,12 @@ def _check_candidates(output: AgentOutput, messages: list) -> AgentOutput:
     if output.next_action == 'SEND_RFQ' and not drafted:
         raise UngroundedOutputError('SEND_RFQ needs drafts created in this run')
     if output.next_action == 'HOLD':     # 후보·초안을 넘기지 않는다
+        # 업무 조건 부족이면 빠진 조건 이름을 도구 결과로 넘긴다(보완 입력 대상). 아니면 LLM 값을 둔다
+        missing = next((r.get('missing', []) for name in ('create_rfq_draft', 'search_supplier_evidence')
+                        for r in reversed(_tool_results(messages, name)) if r.get('status') == 'CONDITIONS_MISSING'),
+                       output.unknown_fields)
         return type(output).model_validate(output.model_dump() | {
-            'candidates': [], 'draft_ids': [], 'hold': _candidate_hold(messages),
+            'candidates': [], 'draft_ids': [], 'hold': _candidate_hold(messages), 'unknown_fields': missing,
             'reason': _without_code_prefix(output.reason)})
     unknown = [c.supplier_id for c in output.candidates if c.supplier_id not in found]
     if unknown:
