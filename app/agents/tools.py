@@ -321,8 +321,10 @@ _HINTS = {
     'SUPPLIER_NOT_MATCHED': '등록된 업체명과 글자가 정확히 같지 않다. 결과의 next를 따른다.',
     'SUPPLIER_MISMATCH': '메일에 연결된 업체와 업체명이 다르다. 저장하지 말고 HOLD한다.',
     'SUPPLIER_EVIDENCE_MIXED': '한 업체의 메일 근거만 남기고 다시 보낸다.',
-    'SUPPLY_QUANTITY_MISSING': '인상 통보 메일에는 공급 물량이 있어야 한다. 원문의 공급 계획·공급 물량을 단위와 함께 '
-                               'available_quantity로 다시 보낸다. 원문에 없으면 다시 보내지 않고 HOLD한다.',
+    'SUPPLY_QUANTITY_MISSING': '인상 통보 메일에는 공급 물량이 있어야 한다. 공급 계획·공급 물량·공급 가능량이라고 적힌 '
+                               '수량만 단위와 함께 available_quantity로 다시 보낸다. 규격·포장·주문 단위의 수량'
+                               '(예: 10kg/박스, 박스당 10kg, 주문 단위 10kg 박스)은 공급 물량이 아니다. '
+                               '그런 수량만 있으면 다시 보내지 말고 HOLD한다.',
     'TAX_BASIS_NOT_TAX_TERMS': 'tax_basis는 field_name이 tax_terms인 항목에만 붙인다.',
     'INSTRUCTION_NOT_NOTE': 'AI·시스템에게 하는 문장이라 비고에서 뺐다. 다시 보내지 않는다.',
 }
@@ -791,11 +793,18 @@ def _case_conditions(case: dict, current: dict, item: dict | None, initial_mails
 def _supply_quantity_missing(case: dict, source_mail: dict, values: dict) -> bool:
     """기존 업체 인상 통보(INITIAL 메일)인데 업무 비교 수량을 정할 공급 물량·단위가 없는지 (2026-11-06 팀 결정).
     업무 수량이 비어 있을 때만 본다. 저장한 뒤에는 보류할 수 없으므로(DB가 거부) 저장 전에 거절한다.
-    단위는 공급 물량의 단위, 없으면 같은 메일의 단가 단위로 정한다(_case_conditions와 같은 기준)."""
+    단위는 공급 물량의 단위, 없으면 같은 메일의 단가 단위로 정한다(_case_conditions와 같은 기준).
+    공급 물량 값이 규격·주문 단위 표기 안의 수량이면(예: '특품 10kg/박스'의 10kg) 공급 물량이 아니다 (S3-15).
+    줄이 아니라 값으로 본다: 규격과 공급 계획이 한 줄에 있어도('10kg/박스, 공급 계획 1,000kg') 1,000kg는 통과한다."""
     if case.get('quantity') or source_mail.get('message_role') != 'INITIAL':
         return False
     supply = values.get('available_quantity')
-    return not supply or not (supply.get('quantity_unit') or values.get('unit', {}).get('value'))
+    if not supply or not (supply.get('quantity_unit') or values.get('unit', {}).get('value')):
+        return True
+    specs = [values[name]['raw_value'] for name in ('specification', 'quantity_per_order_unit') if name in values]
+    specs += [case['specification']] if case.get('specification') else []
+    raw = _normalized(supply['raw_value'], True)
+    return any(_contains(_normalized(spec, True), raw, True) for spec in specs)
 
 
 def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[QuoteField],

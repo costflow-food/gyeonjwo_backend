@@ -71,6 +71,8 @@ PLAN ─────────────────────────
 - `Plan`은 KEEP과 SWITCH가 업체 1곳, SPLIT이 서로 다른 업체 2곳이어야 한다.
 - ①②가 `HOLD`이면 `hold`에 보류 코드를 담는다(KAN-146). 서버가 이 코드로 화면 문구를 정하고, `reason`은 한국어 문장만 쓴다.
   `STORED`·`SEND_RFQ`이면 `hold`는 null이다.
+  ① 수량 보류(`MISSING_FIELD`·`quantity`)는 `HOLD` → `ON_HOLD`로 끝난다(품목 누락은 `NEEDS_INFO`). 이 경계는 기획 결정 대기다.
+  ①이 이번 실행에서 견적을 저장한 뒤 `HOLD`를 내면 최종 검사가 `STORED`로 바꾼다(서버가 저장 뒤 보류를 거부한다).
 
   | 역할 | `hold` 형식 | 코드 |
   |---|---|---|

@@ -34,6 +34,7 @@ def test_supplier_rejection_records_one_scoped_rpc_and_finishes_hold(linked):
     ])
     store.read_mail_part = Mock(return_value={'text': '가나농산 주식회사', 'location': 'body'})
     store.resolve_supplier = Mock(return_value='other-supplier' if linked else None)
+    store.repo.call.side_effect = lambda name, **_: {'kind': 'RECORDED'} if name == 'record_case_graph_extraction_issue' else True
 
     fields = [
         QuoteField(field_name='supplier_name', raw_value='가나농산 주식회사', evidence=EvidenceRef(mail_id=mail_id)),
