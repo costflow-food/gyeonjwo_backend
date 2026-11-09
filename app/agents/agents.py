@@ -136,14 +136,22 @@ PROMPTS = {
         (통화 기호가 숫자 앞에 있으면 숫자와 통화를 나눠 보낸다. "per kg"·"Unit price"는 raw_value에 넣지 않는다)
       "Valid until: December 31, 2026"처럼 영어로 쓴 날짜는 도구가 읽지 못한다. 그 항목만 null로 보내고 reason에 적는다
       "단가는 kg당 9,500원입니다" → unit_price "9,500원", unit "kg"
-      "하차비는 박스당 500원" → cost_terms {amount "500원", basis "박스당"}
+      "하차비는 박스당 500원" → cost_terms {amount "500원", basis "박스당", basis_type PER_UNIT, basis_unit box}
+      "운송비 1회 배송당 100,000원 별도" → cost_terms {amount "100,000원", basis "1회 배송당", basis_type PER_ORDER}
       "98,000원/박스 (박스당 10kg)" → unit_price "98,000원", unit "박스", quantity_per_order_unit "박스당 10kg"
+      "박스당 중량은 10kg입니다" → quantity_per_order_unit "10kg" (수량 앞의 설명 낱말은 넣지 않는다)
       "주문 단위 10kg 박스" → order_unit "박스", quantity_per_order_unit "10kg"
         (order_unit에는 단위 낱말 하나만 넣는다. "10kg 박스"처럼 수량을 붙이면 INVALID_UNIT으로 거절된다)
       "하차비: 없음" → cost_terms {cost_type HANDLING, source_text "하차비: 없음", amount "없음"}
       표·시트의 셀(예: "A5: 운송비", "B5: 무료")은 값 셀을 그대로 옮기고 셀 위치를 evidence.cell에 적는다
         → cost_terms {cost_type SHIPPING, source_text "무료", amount "무료"}, evidence.cell "B5"
 - cost_terms의 source_text·amount·basis·payer도 원문 그대로다. 번역하거나 바꿔 쓰지 않는다(예: payer "귀사 부담").
+- 비용에 산정 기준(basis)이 있으면 그 뜻을 basis_type으로 함께 보낸다. 표현은 달라도 뜻으로 고른다.
+  주문·배송·납품 한 번마다 붙으면 PER_ORDER (예: "회당", "1회 배송당", "배송 1회당", "건당", "매 출고 시").
+  수량 단위마다 붙으면 PER_UNIT과 그 단위 basis_unit (예: "박스당" → box, "kg당" → kg).
+  원문에 기준이 없으면 basis·basis_type·basis_unit 모두 보내지 않는다.
+- unit·order_unit·수량 항목의 단위 표기가 kg·g·톤·박스·개·팩·봉·포대와 글자가 다르면(예: "킬로", "ton", "봉지")
+  raw_value는 원문 그대로 두고 unit_code에 정해진 단위(kg, g, 톤, box, 개, 팩, 봉, 포대)를 적는다. 같으면 보내지 않는다.
 - 메일 목록에 supplier_id가 있는 메일은 업체가 연결돼 있다. 원문에 업체명이 없으면 supplier_name을 보내지 않고,
   업체명이 없다는 이유로 unknown_fields에 넣거나 HOLD하지 않는다.
 
@@ -154,7 +162,8 @@ PROMPTS = {
   같은 업체의 이전 견적 값은 도구가 이어받으므로 이번 메일에 없는 값을 다시 적지 않는다.
 - 비용은 cost_terms에 그 비용이 적힌 원문 구절과 함께 넣는다. 무료는 원문에 무료라고 적힌 경우만이다.
   included_in_price는 비용마다 꼭 정한다. 단가에 포함이면 true, 별도·추가로 청구하면 false, 원문에 없으면 null이다.
-  (예: "운송비 1회 80,000원 별도" → false, "운송비는 단가에 포함" → true)
+  (예: "운송비 1회 80,000원 별도" → false, "운임 90,000원, 귀사 부담" → false, "운송비는 단가에 포함" → true)
+  "귀사 부담"·"구매처 부담"처럼 받는 쪽이 따로 낸다고 적혀 있으면 별도 청구(false)다.
 - 품목 비고는 위 필드에 들어가지 않지만 견적 판단에 영향을 줄 수 있는 조건을 적힌 그대로 기록한다.
   비고마다 category를 하나 붙인다: RECEIVING(입고) QUALITY(품질) PACKING(포장) PAYMENT(결제) SUPPLY(공급)
   PRICE_NOTICE(가격 예고).
