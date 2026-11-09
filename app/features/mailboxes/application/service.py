@@ -4,7 +4,7 @@ from uuid import UUID
 import logging
 
 from app.core.errors import ServiceError, error_payload
-from app.core.idempotency import request_in_progress
+from app.core.idempotency import request_in_progress, valid_idempotency_key
 from app.core.request_context import current_request_id
 from app.features.mailboxes.domain.schemas import GoogleConnection, READ_SCOPE, SEND_SCOPE, GooglePrincipal
 from app.features.mailboxes.infrastructure.google import GoogleRejected
@@ -47,10 +47,9 @@ class GoogleConnectionService:
         return result
 
     def connect(self, principal, payload, key):
-        if not key or not key.strip():
-            raise ServiceError('INVALID_REQUEST', 'Idempotency-Key가 필요합니다.', 422, fields=['header.Idempotency-Key'])
-        if len(key) > 256:
-            raise ServiceError('INVALID_REQUEST', 'Idempotency-Key가 너무 깁니다.', 422, fields=['header.Idempotency-Key'])
+        if not valid_idempotency_key(key):
+            raise ServiceError('INVALID_REQUEST', '유효한 Idempotency-Key가 필요합니다.', 422,
+                               fields=['header.Idempotency-Key'], retryable=False)
         access = payload.provider_access_token.get_secret_value()
         refresh = payload.provider_refresh_token.get_secret_value() if payload.provider_refresh_token else None
         claim = self.repo.claim(principal.user_id, key, self.cipher.body_hash(access, refresh))
