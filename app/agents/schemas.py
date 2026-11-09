@@ -12,7 +12,7 @@
 업무 상태(Waiting/Running/Complete)·revision 검사는 app.features.work_cases.domain.contracts를 따른다.
 API 오류 응답의 next_action(app.core.errors)과는 다른 값이다.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import UUID
@@ -275,6 +275,8 @@ class RunContext:
     input_revision: int
     agent_run_id: str | None = None      # 06 agent_runs.id. 실행 기록 저장소가 없으면 None
     review_batch_id: str | None = None   # 06 agent_runs.review_batch_id
+    # LLM에게 보이는 ID 이름표 대응표(handles.IdHandles). AgentRunner가 역할 호출마다 만든다. 없으면 이름표를 쓰지 않는다
+    handles: object | None = field(default=None, compare=False)
 
 
 class ExtractionIn(AgentInput):

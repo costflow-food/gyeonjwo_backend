@@ -55,7 +55,7 @@ from langchain_core.tools import BaseTool, tool
 from pydantic import Field, StrictBool
 
 from app.agents.schemas import READ_RETRY_LIMIT, AgentRole, DecimalStr, RunContext
-from app.core.errors import ReviewRequired
+from app.core.errors import ReviewRequired, ServiceError
 from app.features.review.domain.validation import decimal_value, explicit_date, unit_name
 from app.shared.domain.schemas import StrictModel
 
@@ -546,6 +546,10 @@ def _contains(text: str, value: str, numeric: bool) -> bool:
     return re.search(pattern, text) is not None
 
 
+# 저장소가 근거 메일을 범위 밖·없음으로 거절하는 코드. 거절 사유로 바꾸고, 다른 오류(장애)는 그대로 올린다
+_OUT_OF_SCOPE = {'ACTION_NOT_ALLOWED', 'RESOURCE_NOT_FOUND'}
+
+
 class _SourceCheck:
     """근거가 이 업무의 메일·첨부 쪽이고 값이 그 쪽 원문에 그대로 있는지 확인한다. 쪽 원문은 한 번만 읽는다.
     읽은 쪽에 AI·시스템에게 하는 문장이 있으면 그 메일을 instruction_mails에 모은다."""
@@ -556,10 +560,20 @@ class _SourceCheck:
     def _part(self, evidence: EvidenceRef) -> dict | None:
         key = (evidence.mail_id, evidence.part, evidence.page)
         if key not in self.parts:
-            part = self.parts[key] = _read(lambda: self.store.read_mail_part(self.case_id, *key))
+            part = self.parts[key] = self._read_part(key)
             if part and any(_INSTRUCTION.search(line) for line in part['text'].splitlines()):
                 self.instruction_mails.add(evidence.mail_id)
         return self.parts[key]
+
+    def _read_part(self, key: tuple) -> dict | None:
+        """근거 쪽 원문. 저장소가 이번 실행 범위 밖이거나 없는 메일이라고 거절하면 None(EVIDENCE_NOT_IN_CASE 거절)으로 본다.
+        서버 저장소는 범위 밖 메일에 예외를 올린다. 그대로 두면 근거 메일 ID 하나가 틀려도 실행 전체가 실패한다."""
+        try:
+            return _read(lambda: self.store.read_mail_part(self.case_id, *key))
+        except ServiceError as error:
+            if error.code in _OUT_OF_SCOPE:
+                return None
+            raise
 
     def lines(self, evidence: EvidenceRef, raw: str, numeric=False) -> list[str]:
         """값이 들어 있는 원문 줄. 값이 여러 줄에 걸쳐 있으면 빈 목록."""

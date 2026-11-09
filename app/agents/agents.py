@@ -37,6 +37,7 @@ from langchain_openai import ChatOpenAI
 from app.agents.schemas import (AGENT_IO, EXTRACTION_TOOL_CALL_CAP, EXTRACTION_TOOL_CALLS_PER_EXTRA_MAIL,
                                 MAX_TOOL_CALLS_PER_AGENT_CALL, TOOL_CALL_LIMITS, AgentInput, AgentOutput,
                                 AgentRole, RunContext)
+from app.agents.handles import HandleMiddleware, IdHandles
 from app.agents.tools import EXTRACTION_FIELD_NAMES, candidate_summary, tools_for
 
 # 07 7절. 역할 지시문은 담당 팀원이 작성한다. 주석은 넣어야 할 내용과 고를 수 있는 next_action이다.
@@ -268,8 +269,8 @@ next_action:
    메일 문안은 도구가 쓴다.
    - supplier_item_ids는 search_supplier_evidence에 보낸 목록을 하나도 빼지 않고 그대로 보낸다. 인상을 요청한 업체의
      품목이나 후보가 되지 못한 업체의 품목도 빼지 않는다(도구가 조회 범위와 제외 업체를 세는 데 쓴다).
-     예) search_supplier_evidence(["si-old", "si-a", "si-b"])였고 후보가 sup-a·sup-b면
-         create_rfq_draft(supplier_item_ids=["si-old", "si-a", "si-b"], supplier_ids=["sup-a", "sup-b"], ...)
+     예) search_supplier_evidence(["I1", "I2", "I3"])였고 후보가 S2·S3이면
+         create_rfq_draft(supplier_item_ids=["I1", "I2", "I3"], supplier_ids=["S2", "S3"], ...)
    - supplier_ids에는 candidates의 supplier_id를 모두 넣는다. 업체마다 따로 부르지 않는다.
    - questions에는 업체마다 추가로 물을 선택 질문을 question_options의 ID로 고른다 [{supplier_id, question_ids}].
      업체의 등록 비고(notes)·원산지(origin)에 이미 답이 있는 항목은 묻지 않으므로 고르지 않는다.
@@ -281,7 +282,7 @@ next_action:
      비고·원산지로 바뀔 것이 없는 업체는 넣지 않는다(default_question_options로 묻는다). 고정 질문은 도구가 늘 넣는다.
      부르기 전에 후보마다 확인한다: origin이 비어 있는(null) 업체는 반드시 questions에 넣고 question_ids에
      ORIGIN과 기본 질문(MOQ·VALIDITY 중 비고에 답이 없는 것)을 함께 적는다.
-     (예: sup-cl의 origin이 null이고 비고 없음 → {supplier_id "sup-cl", question_ids ["MOQ", "VALIDITY", "ORIGIN"]})
+     (예: S4의 origin이 null이고 비고 없음 → {supplier_id "S4", question_ids ["MOQ", "VALIDITY", "ORIGIN"]})
    - rejected에 있는 업체는 초안이 없다. 그 업체는 최종 응답 candidates에서 뺀다. 결과가 DRAFTED면 다시 부르지 않는다.
 5. 바로 최종 응답(CandidateOut)을 낸다(최종 응답이 실행 기록으로 저장된다).
 
@@ -485,6 +486,9 @@ Keep amounts and quantities as decimal strings.
 No purchase approval, supplier availability guarantees, or unsupported source citations.
 Give the final answer by calling the {output} tool. Never write the final answer as text, and never call
 another tool again just to re-check or to wait; once the steps are done, call {output}.
+IDs are shown as short handles: M1 (mail), S1 (supplier), I1 (supplier item), Q1 (quote version), D1 (draft).
+Copy a handle exactly as the input or a tool result shows it, in tool arguments, evidence and the final answer.
+Never invent, shorten or change a handle.
 '''
 
 
@@ -508,7 +512,8 @@ def build_agent(role: AgentRole, model: BaseChatModel, limit: int | None = None)
         model, tools_for(role), system_prompt=system_prompt(role),
         response_format=ToolStrategy(output),
         context_schema=RunContext,
-        middleware=[ToolCallLimitMiddleware(run_limit=limit or tool_call_limit(role), exit_behavior='error')],
+        middleware=[ToolCallLimitMiddleware(run_limit=limit or tool_call_limit(role), exit_behavior='error'),
+                    HandleMiddleware()],
         name=role.lower(),
     )
 
@@ -994,7 +999,8 @@ class AgentRunner:
         if not isinstance(data, expected_in):
             raise TypeError(f'{role} expects {expected_in.__name__}')
         agent = self.agent_for(role, data)
-        context = RunContext(str(data.case_id), data.input_revision)
+        handles = IdHandles()
+        context = RunContext(str(data.case_id), data.input_revision, handles=handles)
         if self.runs is not None:
             model = self.model_for(role)
             started = self.runs.start_agent_run(
@@ -1002,12 +1008,15 @@ class AgentRunner:
                 getattr(model, 'model_name', None) or type(model).__name__,
                 hashlib.sha256(system_prompt(role).encode()).hexdigest()[:12])
             context = RunContext(context.case_id, context.input_revision, started['agent_run_id'],
-                                 started['review_batch_id'])
+                                 started['review_batch_id'], handles=handles)
         log = ToolCallLog()
         try:
-            result = agent.invoke({'messages': [('user', data.model_dump_json())]}, context=context,
-                                              config={'callbacks': [log]})
-            output = check_final_output(role, data, context, result['structured_response'], result['messages'])
+            # LLM에게는 ID 대신 이름표만 보인다. 최종 답과 도구 결과는 ID로 되돌려 최종 검사·그래프에 넘긴다
+            result = agent.invoke({'messages': [('user', handles.hide_json(data.model_dump_json()))]}, context=context,
+                                  config={'callbacks': [log]})
+            answer = result['structured_response']
+            answer = type(answer).model_validate(handles.reveal(answer.model_dump()))
+            output = check_final_output(role, data, context, answer, handles.reveal_messages(result['messages']))
         except Exception as error:
             if self.runs is not None:      # 부분 결과: 실패하기 전까지 부른 도구와 그 결과 (07 5.2)
                 self.runs.finish_agent_run(context.agent_run_id, 'FAILED',
