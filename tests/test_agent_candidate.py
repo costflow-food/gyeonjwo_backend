@@ -47,7 +47,7 @@ def store():
     memory.add_supplier('sup-d', '바다유통', 'bada@example.com')
     memory.add_supplier_item('si-old', 'sup-old', ITEM, '10kg/박스', ['HACCP'], '국내산')
     memory.add_supplier_item('si-a', 'sup-a', ITEM, '10kg/박스', ['HACCP'], '국내산')
-    memory.add_supplier_item('si-b', 'sup-b', ITEM, '10kg 박스', None, '칠레산')          # 인증 모름·규격 표기 다름
+    memory.add_supplier_item('si-b', 'sup-b', ITEM, '10kg 박스', None, '칠레산')          # 인증 모름·규격은 문장부호만 다름(같은 규격)
     memory.add_supplier_item('si-c', 'sup-c', ITEM, '10kg/박스', ['ISO22000'], '국내산')  # HACCP 없음 → 제외
     memory.add_supplier_item('si-d', 'sup-d', ITEM, '5kg/박스', ['HACCP'], '국내산')      # 규격 다름 → 회신으로 확인
     memory.add_supplier_item('si-x', 'sup-a', '냉동 망고', '10kg/박스', ['HACCP'])        # 다른 품목
@@ -105,7 +105,8 @@ def test_required_conditions_pass_and_unknown(store):
     a, d, b = evaluate_candidates(store, ctx(), ITEMS)['candidates']
     assert states(a, True) == {'규격 10kg/박스': 'PASS', 'HACCP': 'PASS'}
     assert states(d, True) == {'규격 10kg/박스': 'UNKNOWN', 'HACCP': 'PASS'}        # 규격 차이로는 제외하지 않는다
-    assert states(b, True) == {'규격 10kg/박스': 'UNKNOWN', 'HACCP': 'UNKNOWN'}     # 인증 목록이 없으면 RFQ로 확인
+    # c935825: 규격 비교는 문장부호를 무시한다('10kg 박스' = '10kg/박스'). 인증 목록이 없으면 RFQ로 확인
+    assert states(b, True) == {'규격 10kg/박스': 'PASS', 'HACCP': 'UNKNOWN'}
 
 
 def test_preference_score_is_origin_and_history_only(store):
@@ -213,7 +214,7 @@ def test_one_call_makes_a_draft_per_supplier_from_the_code_template(store):
         '4. 운송비 부담 주체와 단가 포함 여부\n5. 최소 주문 수량(MOQ)\n6. 견적 유효기간\n\n'
         '빠른 회신 주시면 내부 검토 후 신속히 연락드리겠습니다.\n감사합니다.\n트루나스 드림')
     # 확인되지 않은 필수 조건은 증빙 질문으로 더한다
-    assert '7. 규격 10kg/박스 충족 여부(증빙)\n8. HACCP 충족 여부(증빙)' in b.body_text
+    assert '7. HACCP 충족 여부(증빙)\n\n' in b.body_text and '규격 10kg/박스 충족 여부' not in b.body_text
     assert a.evidence_refs_jsonb == ['supplier_items:si-a', 'suppliers:sup-a.evidence_jsonb', 'agent_runs:run-x']
     assert not any(word in a.body_text + b.body_text for word in ('가나농산', '9500', '9,500'))
 
@@ -305,7 +306,7 @@ def test_candidate_agent_drafts_all_rfqs_in_one_call_and_tool_values_replace_llm
     a, b = out.candidates
     assert a.reason == '국내산·HACCP 확인' and a.preference_score == '3' and len(a.checklist) == 4
     assert b.preference_score == '0'
-    assert set(out.unknown_fields) == {'sup-b.규격 10kg/박스', 'sup-b.HACCP'}
+    assert set(out.unknown_fields) == {'sup-b.HACCP'}
     assert out.reason == SUMMARY.format('2곳(다온푸드, 라온상사)')       # 초안 결과 문장 (LLM 문장 대신)
     assert store.agent_runs['run-1']['status'] == 'COMPLETED'
 
@@ -316,7 +317,7 @@ def test_missing_candidate_reason_is_filled_from_checklist(store):
         call('CandidateOut', {'next_action': 'SEND_RFQ', 'reason': 'x', 'draft_ids': ['draft-1', 'draft-2'],
                               'candidates': [candidate('sup-a', '국내산이고 HACCP가 확인된 업체입니다.')]}, 3)])
     assert [c.supplier_id for c in out.candidates] == ['sup-a', 'sup-b']
-    assert out.candidates[1].reason == '규격 10kg/박스, HACCP은(는) 견적 회신으로 확인합니다.'
+    assert out.candidates[1].reason == '필수 조건 규격 10kg/박스 확인됨. HACCP은(는) 견적 회신으로 확인합니다.'
 
 
 def test_caution_is_kept_only_with_registered_notes(store):
