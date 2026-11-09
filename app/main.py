@@ -22,7 +22,7 @@ from app.features.mail.api.router import router as mail_router
 from app.features.review.api.router import router as review_router
 from app.features.mailboxes.api.router import router as mailbox_router, make_mailbox_service
 from app.features.mailboxes.application.worker import ConnectedMailboxWorker
-from app.features.work_cases.api.router import router as work_cases_router
+from app.features.work_cases.api.router import get_list_service, router as work_cases_router
 from app.features.work_cases.api.revisions import router as work_revisions_router
 from app.features.workflow_logs.router import router as workflow_logs_router
 from app.features.suppliers.router import router as suppliers_router
@@ -150,6 +150,9 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     app.state.rfq_metadata_worker = None
     app.state.rfq_workflow_worker = None
     app.state.service_lock = threading.Lock()
+    if getattr(settings, 'google_token_encryption_key', None):
+        # Build the list clients before accepting requests. Connections remain lazy.
+        get_list_service(app.state)
     app.state.push_verifier = push_verifier
     app.add_middleware(BodyLimitMiddleware)
     rate_lock, rates = threading.Lock(), {}

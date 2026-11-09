@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "date": "2026-11-05",
-  "status": "HTTP_IMPLEMENTED_DB_AND_FE_PENDING",
+  "status": "DEV_DB_APPLIED_INTEGRATION_PENDING",
   "scope": "Where work_cases comparison conditions come from: quantity/unit, mandatory conditions, company policy. Agents read only work_cases (get_work_case); DB functions fill it.",
   "quantity": {
     "source": "Incumbent increase notice (INITIAL mail) supply quantity extracted by INFO_EXTRACTOR as available_quantity, e.g. \"11월 공급 계획 1,000kg에 대해 5,000원에서 5,500원으로 인상\" -> quantity 1000, unit kg.",
@@ -10,7 +10,7 @@
       "store_case_graph_quote fills work_cases.quantity/unit from record.case_conditions only when they are empty.",
       "unit is the quantity unit; if absent, the same mail price unit.",
       "Alternative supplier replies never set the case quantity; their available_quantity is only a supply capacity check.",
-      "Missing quantity may produce CONDITIONS_MISSING. API-06 HTTP is available; actual recovery requires atomic DB revision and job scheduling."
+      "Missing quantity may produce CONDITIONS_MISSING. API-06 can save comparison conditions; continuing the review is a separate operation."
     ]
   },
   "company_items": {
@@ -65,8 +65,8 @@
     "idempotency": "Canonical quantity/unit/date included in submit and lookup hashes. Revision-only hashes remain compatible."
   },
   "api_06": {
-    "request": "PATCH conditions with expected_revision, changes (quantity, unit, due_date and permitted other fields), optional reason/evidence_refs, Idempotency-Key.",
-    "storage": "Reuse KAN-136 submit_work_revision EDIT_CONDITIONS. Check ownership and revision, persist change, invalidate stale review and queue permitted reprocessing atomically.",
-    "resume": "For missing conditions before dispatch, reselect candidates using the new snapshot. DB and product must confirm safe retirement of old unsent drafts and rules for active or unresolved sends. Preserve sent records; never replay external sends."
+    "request": "PATCH conditions with expected_revision, changes (quantity, unit, due_date), optional reason and string-array evidence_refs, Idempotency-Key.",
+    "storage": "Reuse KAN-136 submit_work_revision EDIT_CONDITIONS. Check ownership and revision, persist the change and invalidate the prior review atomically. Dev migration 20261106150401 does not schedule PLAN automatically after condition edits.",
+    "resume": "Candidate reselection, automatic PLAN scheduling, and treatment of unsent drafts are separate follow-up policies."
   }
 }

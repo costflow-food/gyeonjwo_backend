@@ -1,5 +1,6 @@
 """Immutable candidate sets in agent_runs; selection audit in workflow_logs."""
 from uuid import UUID
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from threading import Lock
 from time import monotonic
 from app.core.errors import ServiceError
@@ -8,6 +9,7 @@ from app.features.work_cases.application.start_readiness import StartReadiness
 
 CASE_COLUMNS = 'id,status,processing_step,input_revision,current_batch_id,archived_at,decision,mailbox_ref'
 RUN_COLUMNS = 'id,owner_user_id,work_case_id,input_revision,review_batch_id,output_jsonb,finished_at'
+_READINESS_PROBES = ThreadPoolExecutor(max_workers=2, thread_name_prefix='candidate-readiness')
 
 
 class CandidateRepository:
@@ -15,6 +17,7 @@ class CandidateRepository:
         self.client = client
         self._readiness_lock = Lock()
         self._readiness_cache = None
+        self._readiness_probe = None
 
     def rows(self, query):
         try:
@@ -111,10 +114,20 @@ class CandidateRepository:
 
     def listing_readiness(self):
         with self._readiness_lock:
-            if self._readiness_cache is None or monotonic() >= self._readiness_cache[0]:
-                readiness = self.ready()
+            if self._readiness_cache is not None and monotonic() < self._readiness_cache[0]:
+                return self._readiness_cache[1]
+            if self._readiness_probe is None:
+                self._readiness_probe = _READINESS_PROBES.submit(self.ready)
+            probe = self._readiness_probe
+        try:
+            readiness = probe.result(timeout=0.025)
+        except TimeoutError:
+            return StartReadiness('CANDIDATE_SELECTION_INTEGRATION_REQUIRED', '후보 선택 준비 상태를 확인 중입니다.')
+        with self._readiness_lock:
+            if self._readiness_probe is probe:
                 self._readiness_cache = (monotonic() + (60 if readiness.available else 5), readiness)
-            return self._readiness_cache[1]
+                self._readiness_probe = None
+        return readiness
 
     def blocks(self, owner, cases):
         from app.features.work_cases.application.candidates import candidate_block
