@@ -3,7 +3,7 @@ import logging
 import threading
 import time
 
-from langsmith import tracing_context
+from app.core.tracing import agent_tracing
 from app.features.work_cases.application.agent_boundary import load_extraction_adapter
 from app.features.work_cases.domain.extraction_outcome import ExtractionOutcome
 from app.core.errors import ServiceError
@@ -44,7 +44,8 @@ class ExtractionWorker:
                     deadline=time.monotonic() + 60, lease_check=lease.check, job=job)
                 token = CURRENT_SCOPE.set(scope)
                 try:
-                    with tracing_context(enabled=False):
+                    with agent_tracing(self.settings, case_id=scope.case_id, job_id=job['job_id'],
+                                       input_revision=scope.revision, start_from='EXTRACTION'):
                         adapter = self.runner_factory() if self.runner_factory else self.adapter
                         if adapter is None:
                             adapter = load_extraction_adapter()
