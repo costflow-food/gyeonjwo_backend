@@ -350,7 +350,7 @@ def case_messages(case_id: UUID, request: Request, principal=Depends(require_goo
                   limit: Annotated[int, Query(ge=1, le=100)] = 25):
     """API-10 (KAN-175). Reuses the list service's client, cursor key and reply facts RPC."""
     from app.features.work_cases.infrastructure.messages_repository import list_case_messages
-    service = get_list_service(request)
+    service = get_list_service(request.app.state)
     return api_json(list_case_messages(service.repo.client, service.codec, principal.user_id, case_id,
                                        cursor=cursor, limit=limit, reply_summaries=service.repo.reply_summaries),
                     headers={'Cache-Control': 'private, no-store'})

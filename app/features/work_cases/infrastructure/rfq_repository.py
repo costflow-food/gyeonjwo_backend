@@ -3,6 +3,11 @@ from uuid import UUID
 from app.core.errors import ServiceError
 
 
+# 발송 기록(OUT 메일 행)을 남길 RFQ 밖의 발송 초안 목적과, 한 주기에 살펴보는 최근 발송 초안 수
+CASE_METADATA_PURPOSES = ('CLARIFICATION', 'COUNTER_OFFER')
+CASE_METADATA_SCAN = 50
+
+
 def require(value):
     if not value:
         raise ValueError('Invalid RFQ storage response')
@@ -93,6 +98,33 @@ class RfqRepository:
         if (not isinstance(result, dict) or result.get('metadata_state') != 'READY'
                 or result.get('sent_message_id') != job['sent_message_id']):
             raise ServiceError('PROCESSING_UNAVAILABLE', 'RFQ 헤더 저장 결과를 확인할 수 없습니다.', 503)
+        return result
+
+    def case_metadata_drafts(self, owner, limit=CASE_METADATA_SCAN):
+        """발송 기록(OUT 메일 행)이 아직 없는 보완 질문·역제안 발송 초안. 최근 발송분부터 limit건을 본다.
+        반환: [{draft_id, provider_message_id}]."""
+        drafts = (self.client.table('mail_drafts').select('id,sent_provider_message_id')
+                  .eq('owner_user_id', str(owner)).eq('status', 'SENT')
+                  .in_('purpose', list(CASE_METADATA_PURPOSES)).not_.is_('sent_provider_message_id', 'null')
+                  .order('sent_at', desc=True).limit(limit).execute().data or [])
+        ids = [row['sent_provider_message_id'] for row in drafts]
+        if not ids:
+            return []
+        recorded = (self.client.table('mail_messages').select('provider_message_id')
+                    .eq('owner_user_id', str(owner)).eq('direction', 'OUT').in_('provider_message_id', ids)
+                    .execute().data or [])
+        done = {row['provider_message_id'] for row in recorded}
+        return [{'draft_id': str(row['id']), 'provider_message_id': row['sent_provider_message_id']}
+                for row in drafts if row['sent_provider_message_id'] not in done]
+
+    def complete_case_metadata(self, owner, draft_id, message):
+        """보완 질문·역제안 발송 메일의 헤더로 OUT 메일 행을 남긴다(DB complete_case_outbound_metadata).
+        같은 메일을 다시 넣어도 DB에는 한 행만 남는다."""
+        result = self.call('complete_case_outbound_metadata', p_owner=str(owner), p_draft=str(draft_id),
+                           p_message=message)
+        if (not isinstance(result, dict) or result.get('metadata_state') != 'READY'
+                or str(result.get('draft_id')) != str(draft_id)):
+            raise ServiceError('PROCESSING_UNAVAILABLE', '발송 기록 저장 결과를 확인할 수 없습니다.', 503)
         return result
 
     def fail_metadata(self, owner, job):

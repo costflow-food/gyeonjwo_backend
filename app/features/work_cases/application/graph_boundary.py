@@ -89,6 +89,17 @@ def run_graph(*, settings, scope, runner_factory=None, store_factory=GraphStore)
                     'EXTRACTION_TIME_LIMIT', 'EXTRACTION_LEASE_LOST', 'PROCESSING_UNAVAILABLE'} else 'GRAPH_ROLE_FAILED'
                 logger.warning('graph role_failed role=%s code=%s', str(role), safe)
                 raise
+            except Exception as error:
+                # The agent graph logs the exception message. Pass only a fixed
+                # code across that boundary, never provider or tool output.
+                safe = {
+                    'ToolCallLimitExceededError': 'AGENT_TOOL_CALL_LIMIT',
+                    'UngroundedOutputError': 'AGENT_UNGROUNDED_OUTPUT',
+                    'ValidationError': 'AGENT_VALIDATION_FAILED',
+                    'APITimeoutError': 'AGENT_PROVIDER_TIMEOUT',
+                }.get(type(error).__name__, 'GRAPH_ROLE_FAILED')
+                logger.warning('graph role_failed start_from=%s role=%s code=%s', mode, str(role), safe)
+                raise RuntimeError(safe) from None
 
         app_graph = graph.build_graph(run_agent=run_role, current_revision=store.current_input_revision,
                                       latest_quotes=store.latest_ids)

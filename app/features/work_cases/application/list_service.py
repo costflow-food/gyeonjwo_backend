@@ -116,7 +116,12 @@ class WorkCaseListService:
                 filtered.append((key, row))
             filtered.sort(key=lambda item: item[0], reverse=True)
             page = filtered[:limit]
-            summaries_read = _PAGE_READS.submit(self.repo.reply_summaries, owner, [str(row.case_id) for _, row in page])
+            # An explicitly absent current round proves 0/0. Older schemas omit
+            # the column; those rows still use the authoritative reply-facts RPC.
+            reply_case_ids = [str(row.case_id) for _, row in page
+                              if page_cases[str(row.case_id)].get('current_rfq_round_id', True) is not None]
+            summaries_read = (_PAGE_READS.submit(self.repo.reply_summaries, owner, reply_case_ids)
+                              if reply_case_ids else None)
             held = [page_cases[str(row.case_id)] for _, row in page if row.processing_step == 'ON_HOLD']
             hold_read = _PAGE_READS.submit(self.repo.hold_reasons, owner, held) if held else None
             candidate_cases = [page_cases[str(row.case_id)] for _, row in page
@@ -129,7 +134,7 @@ class WorkCaseListService:
                     page_cases[str(row.case_id)], readiness, resume_readiness, case_changes_ready=case_changes_ready)
             resumable = [page_cases[str(row.case_id)] for _, row in page if 'RESUME' in row.allowed_actions]
             resume_blocks = self.repo.resume_blocks(owner, resumable) if resumable else {}
-            summaries = summaries_read.result()
+            summaries = summaries_read.result() if summaries_read else {}
             hold_reasons = hold_read.result() if hold_read else {}
             candidate_blocks = candidate_read.result() if candidate_read else {}
             for _, row in page:
@@ -138,7 +143,8 @@ class WorkCaseListService:
                     row.allowed_actions.remove('RESUME')
                     code, message = resume_blocks[str(row.case_id)]
                     row.disabled_actions.append({'action': 'RESUME', 'reason_code': code, 'message': message})
-                row.reply_summary = summaries[str(row.case_id)]
+                if page_cases[str(row.case_id)].get('current_rfq_round_id', True) is not None:
+                    row.reply_summary = summaries[str(row.case_id)]
                 if str(row.case_id) in candidate_blocks:
                     from app.features.work_cases.application.candidates import apply_candidate_action
                     apply_candidate_action(page_cases[str(row.case_id)], row.allowed_actions, row.disabled_actions,

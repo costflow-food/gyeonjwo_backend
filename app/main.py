@@ -3,7 +3,9 @@ import logging
 import math
 import threading
 import time
+import httpx
 from contextlib import asynccontextmanager
+from anyio import move_on_after, to_thread
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -69,6 +71,27 @@ def start_workflow_worker(settings, mailbox_service):
                              RfqDelivery(repo, mailbox_service), repo.metadata_owners)
 
 
+async def prime_work_case_reads(state):
+    service = getattr(state, 'work_case_list_service', None)
+    if service is None:
+        return
+
+    def connect():
+        client = service.repo.client
+        # Warm the list's own connection without reading any user's rows.
+        try:
+            postgrest = client.postgrest
+            postgrest.session.head(
+                str(client.rest_url).rstrip('/') + '/work_cases',
+                headers=postgrest.headers, params={'select': 'id', 'limit': 0}, timeout=0.2)
+        except httpx.HTTPError:
+            pass
+
+    # Startup and API availability must not depend on the optional probe.
+    with move_on_after(0.2):
+        await to_thread.run_sync(connect, abandon_on_cancel=True)
+
+
 def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_service=None):
     settings = settings or get_settings()
     require_startup_configuration(settings)
@@ -122,6 +145,7 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
                 app.state.extraction_worker = None
                 app.state.graph_startup_code = 'GRAPH_RUNTIME_UNAVAILABLE'
                 logger.warning('graph unavailable code=GRAPH_RUNTIME_UNAVAILABLE; mail/API remain available')
+            await prime_work_case_reads(app.state)
             # Independent mail/metadata lifecycles; sender remains separately gated.
             for prepared_worker in (connected_worker, rfq_worker, rfq_workflow):
                 if prepared_worker is not None:
