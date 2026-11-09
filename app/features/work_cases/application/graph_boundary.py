@@ -63,8 +63,8 @@ def run_graph(*, settings, scope, runner_factory=None, store_factory=GraphStore)
             runner = runner_factory(store)
         else:
             client = stack.enter_context(httpx.Client(event_hooks={'request': [bounded_request]}))
-            def model(role=None):
-                result = agents.chat_model(settings, role)
+            def model(role=None, verifier=False):
+                result = agents.chat_model(settings, role, verifier=verifier)
                 original = result.root_client
                 result.root_client = original.with_options(http_client=client, max_retries=0,
                     timeout=settings.agent_graph_request_timeout_seconds)
@@ -74,7 +74,9 @@ def run_graph(*, settings, scope, runner_factory=None, store_factory=GraphStore)
                 result.max_retries = 0
                 return result
             roles = tuple(schemas.AgentRole)
-            runner = agents.AgentRunner(model(), runs=store, role_models={role: model(role) for role in roles})
+            runner = agents.AgentRunner(model(), runs=store, role_models={role: model(role) for role in roles},
+                                        verifiers={role: model(role, verifier=True) for role in roles
+                                                   if str(role) in settings.llm_verifier_reasoning_efforts})
 
         def run_role(role, data):
             try:
