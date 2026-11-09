@@ -47,9 +47,15 @@ class Settings(BaseSettings):
     google_token_encryption_key: SecretStr | None = None
     # 빌드 시 주입한다
     app_build_revision: str = 'development'
+    # 에이전트 실행은 항상 LangSmith에 기록한다(MVP는 합성 데이터만 쓴다). 키가 없을 때만 기록하지 않는다
+    langsmith_api_key: SecretStr | None = None
+    langsmith_project: str = 'gyeonjwo-dev'
+    # 조직 단위 Service Key는 기록할 작업 공간 ID가 있어야 한다(LangSmith Settings 화면에서 확인)
+    langsmith_workspace_id: str | None = None
 
     @field_validator('supabase_url', 'llm_base_url', 'supabase_secret_key', 'supabase_publishable_key',
-                     'llm_api_key', 'gmail_client_secret', 'google_token_encryption_key', mode='before')
+                     'llm_api_key', 'gmail_client_secret', 'google_token_encryption_key', 'langsmith_api_key',
+                     'langsmith_workspace_id', mode='before')
     @classmethod
     def empty_optional_values(cls, value):
         return None if isinstance(value, str) and not value.strip() else value

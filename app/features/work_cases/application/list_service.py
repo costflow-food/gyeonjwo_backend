@@ -44,7 +44,10 @@ class WorkCaseListService:
         counts, filtered = QueueCounts(), []
         page_cases = {}
         try:
-            for case, mail in self.repo.rows(owner, snapshot, archived):
+            rows = self.repo.rows(owner, snapshot, archived)
+            if callable(case_changes_ready):
+                case_changes_ready = case_changes_ready()
+            for case, mail in rows:
                 # Defensive checks also support alternative repositories without
                 # accidentally applying status to tab counts.
                 if (case['archived_at'] is not None) != archived:

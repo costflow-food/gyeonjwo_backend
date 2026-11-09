@@ -257,6 +257,10 @@ class AgentRole(StrEnum):
 # 역할별 도구 호출 한도. 없는 역할은 MAX_TOOL_CALLS_PER_AGENT_CALL을 쓴다.
 # 확인 우선순위는 비용 누락도 원문을 다시 읽고, 대응안은 평균 5.5~6.2회를 써서 8회를 가끔 넘었다.
 TOOL_CALL_LIMITS = {AgentRole.INFO_PRIORITY: 10, AgentRole.RESPONSE_PLAN: 10}
+# ① 회신 검토는 쌓인 회신을 한 번에 받는다. 메일 한 통에 본문·첨부 읽기와 저장(다시 보내기 포함)이 들므로
+# 두 번째 메일부터 메일마다 한도를 늘리고 상한을 둔다 (2026-11-06 실제 LLM: 회신 3통에서 10/8회로 실패)
+EXTRACTION_TOOL_CALLS_PER_EXTRA_MAIL = 4
+EXTRACTION_TOOL_CALL_CAP = 24
 
 
 class AgentInput(StrictModel):

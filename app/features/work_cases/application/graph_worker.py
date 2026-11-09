@@ -2,7 +2,7 @@
 import logging
 import time
 from uuid import UUID
-from langsmith import tracing_context
+from app.core.tracing import agent_tracing
 from app.core.errors import ServiceError
 from app.core.leases import LeaseHeartbeat
 from app.features.work_cases.application.extraction_scope import CURRENT_SCOPE, ExtractionScope
@@ -74,7 +74,8 @@ class GraphWorker(ExtractionWorker):
                     raise ValueError('Review initial source missing')
                 token = CURRENT_SCOPE.set(scope)
                 try:
-                    with tracing_context(enabled=False):
+                    with agent_tracing(self.settings, case_id=scope.case_id, job_id=job['job_id'],
+                                       input_revision=scope.revision, start_from=mode):
                         output = (self.adapter or run_graph)(settings=self.settings, scope=scope,
                                                              runner_factory=self.runner_factory)
                     from app.agents.schemas import RunCaseOutput

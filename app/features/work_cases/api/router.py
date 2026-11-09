@@ -1,4 +1,5 @@
 from typing import Annotated, Literal
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, Query, Request, Header
 from fastapi.responses import JSONResponse
@@ -28,6 +29,7 @@ from app.features.work_cases.application.start_readiness import (
 from app.features.work_cases.application.case_actions import case_actions
 
 router = APIRouter(prefix='/api/v1/work-cases', tags=['Work cases'])
+_LIST_READINESS = ThreadPoolExecutor(max_workers=2, thread_name_prefix='case-list-readiness')
 
 
 def resume_readiness(request, repo=None, *, fresh=False):
@@ -63,13 +65,14 @@ def extraction_available(request):
 
 
 def get_list_service(request: Request):
+    runtime = get_runtime_repository(request)
     with request.app.state.service_lock:
         service = getattr(request.app.state, 'work_case_list_service', None)
         if service is None:
             settings = request.app.state.settings
-            client = make_server_client(settings)
+            client = make_server_client(settings, http1_only=True)
             service = WorkCaseListService(WorkCaseListRepository(client,
-                                         extraction_fields=True),
+                                         extraction_fields=True, column_missing=runtime.cached_column_missing),
                                          CursorCodec(settings.google_token_encryption_key.get_secret_value()))
             request.app.state.work_case_list_service = service
     return service
@@ -117,9 +120,11 @@ def list_work_cases(
     reply_summary counts distinct suppliers from SENT RFQs and verified quote
     replies in the current request round. Sidebar totals belong to the frontend.
     """
+    runtime = get_runtime_repository(request)
+    readiness = _LIST_READINESS.submit(case_changes_ready, runtime)
     result = service.list(principal.user_id, status=status, archived=archived, q=q, limit=limit, cursor=cursor,
                           start_readiness=extraction_readiness(request), resume_readiness=resume_readiness(request),
-                          case_changes_ready=case_changes_ready(get_runtime_repository(request)))
+                          case_changes_ready=readiness.result)
     return api_json(result.model_dump(mode='json'), headers={'Cache-Control': 'private, no-store'})
 
 
@@ -173,7 +178,7 @@ def load_action_case(repo, owner, case_id):
     try:
         rows = (repo.client.table('work_cases')
             .select('id,initial_mail_id,status,processing_step,input_revision,item_name,specification,quantity::text,unit,'
-                    'decision,archived_at,current_batch_id')
+                    'due_date,mandatory_conditions_jsonb,policy_jsonb,decision,archived_at,current_batch_id')
             .eq('owner_user_id', str(owner)).eq('id', str(case_id)).limit(1).execute().data)
     except Exception:
         raise ServiceError('PROCESSING_UNAVAILABLE', '업무를 조회할 수 없습니다.', 503) from None
@@ -280,6 +285,41 @@ def case_hold(repo, owner, row):
     return hold.model_dump() if hold is not None else None
 
 
+PROGRESS_ERROR_CODES = frozenset({
+    'EXTRACTION_FAILED', 'EXTRACTION_TIME_LIMIT', 'WORKER_INTERRUPTED', 'INPUT_REVISION_CHANGED',
+    'RFQ_PREPARATION_FAILED', 'NO_REGISTERED_SUPPLIER_EVIDENCE', 'NO_SUITABLE_CANDIDATES',
+    'SEND_POLICY_REQUIRED', 'SEND_RESULT_UNKNOWN', 'SETTINGS_CHANGED', 'RFQ_CONDITIONS_REQUIRED',
+    'GRAPH_FAILED', 'GRAPH_TIME_LIMIT', 'GRAPH_ORPHANED'})
+PROGRESS_WAITING_STEPS = frozenset({'WAITING_REPLY', 'WAITING_APPROVAL', 'AWAITING_APPROVAL', 'NEEDS_INFO',
+                                    'ON_HOLD', 'SEND_UNKNOWN', 'SELECTING_CANDIDATES'})
+
+
+def progress_waiting_reason(step):
+    return STEP_MESSAGES.get(step) if step in PROGRESS_WAITING_STEPS else None
+
+
+def progress_error(step, code):
+    """API-03 error. ON_HOLD already explains itself through `hold`, so an unknown
+    stored code there is not re-labelled as EXTRACTION_FAILED (KAN-161 S7-12)."""
+    if not code:
+        return None
+    if isinstance(code, str) and code in PROGRESS_ERROR_CODES:
+        return {'code': code}
+    return None if step == 'ON_HOLD' else {'code': 'EXTRACTION_FAILED'}
+
+
+@router.get('/{case_id}/messages', summary='업무의 송수신 메일·회신 현황 조회')
+def case_messages(case_id: UUID, request: Request, principal=Depends(require_google_user),
+                  cursor: Annotated[str | None, Query()] = None,
+                  limit: Annotated[int, Query(ge=1, le=100)] = 25):
+    """API-10 (KAN-175). Reuses the list service's client, cursor key and reply facts RPC."""
+    from app.features.work_cases.infrastructure.messages_repository import list_case_messages
+    service = get_list_service(request)
+    return api_json(list_case_messages(service.repo.client, service.codec, principal.user_id, case_id,
+                                       cursor=cursor, limit=limit, reply_summaries=service.repo.reply_summaries),
+                    headers={'Cache-Control': 'private, no-store'})
+
+
 @router.get('/{case_id}/progress', summary='저장된 검토 단계 조회')
 def case_progress(case_id: UUID, request: Request, principal=Depends(require_google_user), repo=Depends(get_runtime_repository)):
     try:
@@ -289,10 +329,6 @@ def case_progress(case_id: UUID, request: Request, principal=Depends(require_goo
     except Exception:
         raise ServiceError('PROCESSING_UNAVAILABLE', '처리 단계를 조회할 수 없습니다.', 503) from None
     row = stored_case_row(rows, ('id', 'status', 'processing_step', 'input_revision', 'current_batch_id'))
-    safe_codes = {'EXTRACTION_FAILED', 'EXTRACTION_TIME_LIMIT', 'WORKER_INTERRUPTED', 'INPUT_REVISION_CHANGED',
-                  'RFQ_PREPARATION_FAILED', 'NO_REGISTERED_SUPPLIER_EVIDENCE', 'NO_SUITABLE_CANDIDATES',
-                  'SEND_POLICY_REQUIRED', 'SEND_RESULT_UNKNOWN', 'SETTINGS_CHANGED', 'RFQ_CONDITIONS_REQUIRED',
-                  'GRAPH_FAILED', 'GRAPH_TIME_LIMIT', 'GRAPH_ORPHANED'}
     error = row.get('error_jsonb')
     if error is not None and not isinstance(error, dict):
         raise ServiceError('PROCESSING_UNAVAILABLE', '저장된 오류 상태를 확인할 수 없습니다.', 503)
@@ -326,13 +362,11 @@ def case_progress(case_id: UUID, request: Request, principal=Depends(require_goo
                      'running_roles': sorted({run['agent_role'] for run in roles}),
                      'step_history': [{'id': event['id'], 'event_type': 'REVIEW_STEP_CHANGED',
                                        'created_at': iso_z(utc_time(event['created_at']))} for event in history],
-                     'waiting_reason': STEP_MESSAGES.get(step) if step in {'WAITING_REPLY', 'WAITING_APPROVAL',
-                                                                          'AWAITING_APPROVAL', 'NEEDS_INFO', 'ON_HOLD',
-                                                                          'SEND_UNKNOWN'} else None,
+                     'waiting_reason': progress_waiting_reason(step),
                      'can_resume': resumable,
                      'input_revision': row['input_revision'], 'updated_at': updated_at,
                      'batch_id': row.get('current_batch_id'), 'progress_url': f'/api/v1/work-cases/{case_id}/progress',
-                     'error': {'code': code if isinstance(code, str) and code in safe_codes else 'EXTRACTION_FAILED'} if code else None})
+                     'error': progress_error(step, code)})
 
 
 @router.get('/{case_id}', summary='업무의 저장 상태 조회: 실행 없음')
@@ -352,6 +386,9 @@ def get_case(case_id: UUID, request: Request, principal=Depends(require_google_u
         block = CandidateRepository(repo.client).blocks(principal.user_id, [row]).get(str(case_id))
         apply_candidate_action(row, actions, disabled, block)
     batch_id = row.pop('current_batch_id')
+    # KAN-161 S2-6: API-02 carries the stored goal conditions and policy (08 §5).
+    row['mandatory_conditions'] = row.pop('mandatory_conditions_jsonb', None)
+    row['policy'] = row.pop('policy_jsonb', None)
     return api_json({'case_id': row.pop('id'), **row,
                     'batch_id': batch_id, 'progress_url': f'/api/v1/work-cases/{case_id}/progress',
                     'allowed_actions': actions, 'disabled_actions': disabled, 'related_cases': related_cases,

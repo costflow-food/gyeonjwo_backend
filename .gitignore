@@ -9,3 +9,7 @@ __pycache__/
 logs/
 .local-tmp/
 models/
+
+# 테스트·작업 문서는 저장소에서 추적하지 않고 각자 로컬에 둔다 (fd04466 규칙)
+/tests/
+/docs/

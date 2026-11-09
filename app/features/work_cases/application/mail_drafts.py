@@ -8,6 +8,28 @@ from app.features.work_cases.domain.mail_drafts import DraftAccepted, snapshot_h
 from app.features.work_cases.domain.candidates import selection_staged
 
 
+def dispatch_state(draft, case, policy):
+    """(auto_policy_eligible, approval_available) for API-16/17. Mirrors RfqDelivery's auto gate;
+    the DB submit_rfq_draft_action still re-checks every condition on approval."""
+    style = draft.get('style_snapshot_jsonb') or {}
+    auto_eligible = (style.get('auto_policy_eligible') is True and not style.get('candidate_caution')
+                     and policy.get('auto_eligible') is True)
+    pending = (draft['status'] == 'DRAFT' and not draft.get('approved_by')
+               and draft['input_revision'] == case['input_revision'])
+    approval_available = pending and policy.get('configured') is True and (
+        policy.get('approval_required') is True or not auto_eligible)
+    return auto_eligible, approval_available
+
+
+def approval_block_reason(policy):
+    """Why sending is blocked by settings/recipient: FE opens mailbox settings only for the first."""
+    if policy.get('configured') is True:
+        return None
+    if policy.get('settings_ready') is not True:
+        return 'SEND_SETTINGS_REQUIRED'
+    return 'RECIPIENT_NOT_REGISTERED'
+
+
 class MailDraftService:
     def __init__(self, repo, codec):
         self.repo, self.codec = repo, codec
@@ -16,6 +38,7 @@ class MailDraftService:
         if selection_staged(draft):
             raise ServiceError('RESOURCE_NOT_FOUND', '메일 초안을 찾을 수 없습니다.', 404)
         policy = self.repo.send_policy(owner, case, draft['recipient'], draft['purpose'], draft['supplier_id'])
+        auto_eligible, approval_available = dispatch_state(draft, case, policy)
         return {
             'draft_id': draft['id'], 'case_id': draft['work_case_id'], 'supplier_id': draft['supplier_id'],
             'purpose': draft['purpose'], 'recipient': draft['recipient'], 'subject': draft['subject'],
@@ -29,6 +52,12 @@ class MailDraftService:
                 'source_version': policy.get('source_version')},
             'provider_message_id': draft.get('sent_provider_message_id') if draft['status'] == 'SENT' else None,
             'sent_at': iso_z(utc_time(draft['sent_at'])) if draft.get('sent_at') else None,
+            # KAN-167 S4-4: with approval OFF, drafts the worker will not auto-send
+            # (selected before settings were saved, caution suppliers) still need a
+            # manual approval path instead of a dead end.
+            'auto_policy_eligible': auto_eligible,
+            'approval_available': approval_available,
+            'approval_block_reason': approval_block_reason(policy),
         }
 
     def get(self, owner, draft_id):

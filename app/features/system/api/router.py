@@ -33,6 +33,9 @@ def ready(request: Request):
     checks['gmail_worker']='running'
     metadata_worker = getattr(request.app.state, 'rfq_metadata_worker', None)
     checks['rfq_metadata_worker'] = 'running' if metadata_worker and metadata_worker.running else 'not_running'
+    # KAN-161 S4-16: RFQ preparation/sending worker. Per-user send settings still gate actual sending.
+    dispatch_worker = getattr(request.app.state, 'rfq_workflow_worker', None)
+    checks['rfq_dispatch'] = 'running' if dispatch_worker and dispatch_worker.running else 'not_running'
     checks['review_execution_mode'] = 'GRAPH_START'
     checks['review_claim'] = 'awaiting_db_contract'
     from app.features.work_cases.api.router import get_runtime_repository
@@ -61,4 +64,6 @@ def ready(request: Request):
         degraded.append('final_decision')
     if checks['rfq_metadata_worker'] != 'running':
         degraded.append('rfq_metadata')
+    if checks['rfq_dispatch'] != 'running':
+        degraded.append('rfq_dispatch')
     return {'status':'ready','mode':'google-mailbox','checks':checks,'degraded_features':degraded}
