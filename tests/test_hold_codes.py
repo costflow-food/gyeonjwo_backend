@@ -54,11 +54,35 @@ def tool_message(name, result):
 
 def test_registered_item_ignores_case_and_repeated_spaces_only():
     items = [{'id': 'si-1', 'item_name': '냉동딸기 (IQF)', 'specification': '특품 10kg 박스'}]
-    assert _registered_item(items, {'item_name': {'value': ' 냉동딸기  (iqf) '}})['id'] == 'si-1'
+    assert _registered_item(items, {'item_name': {'value': ' 냉동딸기  (iqf) '}}, {})['id'] == 'si-1'
     # 띄어쓰기 유무가 다르면 다른 품목이다 (DB 품목 키 기준과 같다, tools._item_key)
-    assert _registered_item(items, {'item_name': {'value': '냉동딸기(IQF)'}}) is None
+    assert _registered_item(items, {'item_name': {'value': '냉동딸기(IQF)'}}, {}) is None
     # 이름이 포함되는 정도로는 연결하지 않는다 (DB가 다른 품목으로 보고 저장을 거부한다)
-    assert _registered_item(items, {'item_name': {'value': '냉동딸기'}}) is None
+    assert _registered_item(items, {'item_name': {'value': '냉동딸기'}}, {}) is None
+
+
+# ── 등록 품목 연결: 업무에 이미 있는 품목명·품목 키와도 맞아야 한다 (KAN-162, DB 대조 기준) ──
+
+STRAWBERRY = [{'id': 'si-1', 'item_name': '냉동딸기 (IQF)', 'standardized_item_key': 'frozen_strawberry'}]
+
+
+def test_registered_item_skips_when_case_item_name_differs():
+    case = {'item_name': '냉동딸기'}
+    assert _registered_item(STRAWBERRY, {'item_name': {'value': '냉동딸기 (IQF)'}}, case) is None
+
+
+def test_registered_item_skips_when_case_item_key_differs():
+    case = {'item_name': '냉동딸기 (IQF)', 'standardized_item_key': 'item_ceedb4a1'}
+    assert _registered_item(STRAWBERRY, {'item_name': {'value': '냉동딸기 (IQF)'}}, case) is None
+
+
+def test_registered_item_links_when_case_item_empty():
+    assert _registered_item(STRAWBERRY, {'item_name': {'value': '냉동딸기 (IQF)'}}, {'item_name': None})['id'] == 'si-1'
+
+
+def test_registered_item_links_when_only_letter_case_differs():
+    case = {'item_name': '냉동딸기 (iqf)', 'standardized_item_key': 'frozen_strawberry'}
+    assert _registered_item(STRAWBERRY, {'item_name': {'value': '냉동딸기 (IQF)'}}, case)['id'] == 'si-1'
 
 
 # ── ① 업체 관련 거절 쪽지 ──

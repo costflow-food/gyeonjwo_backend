@@ -747,19 +747,26 @@ def _item_key(text) -> str:
     return ' '.join(str(text or '').split()).lower()
 
 
-def _registered_item(items: list[dict], current: dict) -> dict | None:
+def _registered_item(items: list[dict], current: dict, case: dict) -> dict | None:
     """이번 메일의 품목과 같은 그 업체의 등록 품목. _item_key 기준으로 품목명이 같을 때 같은 품목으로 보고,
     여럿이면 규격으로 좁힌다. 하나로 정해질 때만 돌려준다(애매하면 연결하지 않는다).
-    이름이 서로 포함되는 정도('냉동딸기'와 '냉동딸기 (IQF)')로는 연결하지 않는다. DB가 같은 품목으로 보지 않아 저장이 거부된다."""
+    이름이 서로 포함되는 정도('냉동딸기'와 '냉동딸기 (IQF)')로는 연결하지 않는다. DB가 같은 품목으로 보지 않아 저장이 거부된다.
+    업무에 이미 품목명·품목 키가 있으면 DB가 그것과도 대조하므로(QUOTE_ITEM_IDENTITY_MISMATCH·CASE_ITEM_KEY_MISMATCH),
+    업무 품목명이 이번 메일 품목명과 다르거나 업무 키가 등록 품목 키와 다르면 연결하지 않는다."""
     name = _item_key(current.get('item_name', {}).get('value'))
-    if not name:
+    if not name or (case.get('item_name') and _item_key(case['item_name']) != name):
         return None
     found = [item for item in items if _item_key(item.get('item_name')) == name]
     if len(found) > 1:
         wanted = name + _letters(current.get('specification', {}).get('value'))
         found = [item for item in found if _letters(item.get('specification')) and
                  _letters(item.get('specification')) in wanted] or found
-    return found[0] if len(found) == 1 else None
+    if len(found) != 1:
+        return None
+    # 업무 키는 BE select에 따라 context에 없을 수 있다. 들어온 경우에만 대조한다
+    if case.get('standardized_item_key') and found[0].get('standardized_item_key') != case['standardized_item_key']:
+        return None
+    return found[0]
 
 
 def _case_conditions(case: dict, current: dict, item: dict | None, initial_mails: set) -> dict | None:
@@ -916,7 +923,7 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
     foreign = value('currency') not in (None, 'KRW')
     quantity_units = {f'{name}_unit': values[name]['quantity_unit'] for name in sorted(_QUANTITY_FIELDS)
                       if values.get(name, {}).get('quantity_unit')}
-    item = _registered_item(_read(lambda: store.list_supplier_items(case_id, supplier_id)) or [], current)
+    item = _registered_item(_read(lambda: store.list_supplier_items(case_id, supplier_id)) or [], current, case)
     initial_mails = {mail_id for mail_id, mail in case_mails.items() if mail.get('message_role') == 'INITIAL'}
     conditions = _case_conditions(case, current, item, initial_mails)
     record = QuoteVersionRecord(
