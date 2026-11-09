@@ -11,6 +11,9 @@ class OriginalAttachment(StrictModel):
     filename: str
     mime_type: str
     size_bytes: int = Field(strict=True, ge=0)
+    # API-26 can try this part (Gmail provider + stored MIME part). Not a live mailbox probe:
+    # a revoked connection still surfaces as 409 MAILBOX_RECONNECT_REQUIRED from API-26.
+    can_download: bool
 
 
 class OriginalMail(StrictModel):
