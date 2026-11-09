@@ -1,5 +1,5 @@
 from typing import Annotated, Literal
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from fastapi import APIRouter, Depends, Query, Request, Header
 from fastapi.responses import JSONResponse
@@ -36,8 +36,11 @@ def resume_readiness(request, repo=None, *, fresh=False):
     readiness = extraction_readiness(request, repo, fresh=fresh)
     if not readiness.available:
         return readiness
+    return repository_resume_readiness(repo or get_runtime_repository(request))
+
+
+def repository_resume_readiness(repository):
     try:
-        repository = repo or get_runtime_repository(request)
         return (StartReadiness() if repository.resume_available() else
                 StartReadiness('RESUME_INTEGRATION_REQUIRED', '그래프 재개 저장 기능이 아직 준비되지 않았습니다.'))
     except Exception:
@@ -64,17 +67,17 @@ def extraction_available(request):
     return extraction_readiness(request).available
 
 
-def get_list_service(request: Request):
-    runtime = get_runtime_repository(request)
-    with request.app.state.service_lock:
-        service = getattr(request.app.state, 'work_case_list_service', None)
+def get_list_service(state):
+    runtime = get_case_runtime(state)
+    with state.service_lock:
+        service = getattr(state, 'work_case_list_service', None)
         if service is None:
-            settings = request.app.state.settings
+            settings = state.settings
             client = make_server_client(settings, http1_only=True)
             service = WorkCaseListService(WorkCaseListRepository(client,
                                          extraction_fields=True, column_missing=runtime.cached_column_missing),
                                          CursorCodec(settings.google_token_encryption_key.get_secret_value()))
-            request.app.state.work_case_list_service = service
+            state.work_case_list_service = service
     return service
 
 
@@ -103,7 +106,7 @@ EXAMPLE = {
 @router.get('', response_model=Envelope[WorkCaseList], summary='업무 큐 목록·검색·상태별 건수',
             responses={200: {'content': {'application/json': {'example': EXAMPLE}}}})
 def list_work_cases(
-    request: Request, principal=Depends(require_google_user), service=Depends(get_list_service),
+    request: Request, principal=Depends(require_google_user),
     status: QueueFilter | None = None,
     archived: bool = False,
     q: Annotated[str, Query(max_length=200)] = '',
@@ -115,16 +118,45 @@ def list_work_cases(
     Reset cursor when status, archive filter or search changes. Counts ignore only
     status, not search/archive. Pending/Confirm rows remain unchanged when status
     is omitted; total includes them, while named counters use API-01's three tabs.
-    sender_name is null until its persistence contract is implemented. Other actions
-    remain conservatively hidden until their individual endpoint guards are wired.
+    sender_name is null when the source column or its value is unavailable.
+    Actions may be temporarily disabled while integration checks finish.
     reply_summary counts distinct suppliers from SENT RFQs and verified quote
     replies in the current request round. Sidebar totals belong to the frontend.
     """
+    service = get_list_service(request.app.state)
     runtime = get_runtime_repository(request)
-    readiness = _LIST_READINESS.submit(case_changes_ready, runtime)
+    settings = request.app.state.settings
+    fallback = configuration_readiness(settings)
+    if fallback.available:
+        fallback = worker_readiness(settings, getattr(request.app.state, 'extraction_worker', None))
+    if fallback.available:
+        fallback = StartReadiness('PROCESSING_UNAVAILABLE', '검토 실행 준비 상태를 확인 중입니다.')
+
+    def probe_actions():
+        start = extraction_readiness(request, runtime)
+        resume = repository_resume_readiness(runtime) if start.available else start
+        return start, resume, case_changes_ready(runtime)
+
+    # One in-flight readiness check per app. A slow probe can outlive a list response.
+    with request.app.state.service_lock:
+        probe = getattr(request.app.state, 'work_case_list_readiness', None)
+        if probe is None or probe.done():
+            probe = _LIST_READINESS.submit(probe_actions)
+            request.app.state.work_case_list_readiness = probe
+
+    def ready_for_actions():
+        try:
+            start, resume, changes_ready = probe.result(timeout=0.025)
+        except TimeoutError:
+            return fallback, fallback, False
+        if start.available:
+            live = worker_readiness(settings, getattr(request.app.state, 'extraction_worker', None))
+            if not live.available:
+                return live, live, changes_ready
+        return start, resume, changes_ready
+
     result = service.list(principal.user_id, status=status, archived=archived, q=q, limit=limit, cursor=cursor,
-                          start_readiness=extraction_readiness(request), resume_readiness=resume_readiness(request),
-                          case_changes_ready=readiness.result)
+                          start_readiness=fallback, action_readiness=ready_for_actions)
     return api_json(result.model_dump(mode='json'), headers={'Cache-Control': 'private, no-store'})
 
 
@@ -155,11 +187,15 @@ class ResumeRequest(CaseActionRequest):
 
 
 def get_runtime_repository(request: Request):
-    with request.app.state.service_lock:
-        repo = getattr(request.app.state, 'case_runtime_repository', None)
+    return get_case_runtime(request.app.state)
+
+
+def get_case_runtime(state):
+    with state.service_lock:
+        repo = getattr(state, 'case_runtime_repository', None)
         if repo is None:
-            repo = runtime_repository(make_server_client(request.app.state.settings), request.app.state.settings)
-            request.app.state.case_runtime_repository = repo
+            repo = runtime_repository(make_server_client(state.settings), state.settings)
+            state.case_runtime_repository = repo
         return repo
 
 
@@ -314,7 +350,7 @@ def case_messages(case_id: UUID, request: Request, principal=Depends(require_goo
                   limit: Annotated[int, Query(ge=1, le=100)] = 25):
     """API-10 (KAN-175). Reuses the list service's client, cursor key and reply facts RPC."""
     from app.features.work_cases.infrastructure.messages_repository import list_case_messages
-    service = get_list_service(request)
+    service = get_list_service(request.app.state)
     return api_json(list_case_messages(service.repo.client, service.codec, principal.user_id, case_id,
                                        cursor=cursor, limit=limit, reply_summaries=service.repo.reply_summaries),
                     headers={'Cache-Control': 'private, no-store'})

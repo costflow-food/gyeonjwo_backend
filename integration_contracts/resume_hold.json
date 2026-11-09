@@ -76,6 +76,12 @@
   },
   "readiness": "Read-only PostgREST OpenAPI signature check for both functions plus existing extraction configuration/adapter/storage/worker checks. Missing RPCs hide RESUME with RESUME_INTEGRATION_REQUIRED. No mutation probe or automatic schema installation.",
   "worker": "Wake existing extraction worker after durable 202; HTTP never runs a model. claim_case_extraction supplies the new batch; existing worker checks owner/revision/batch and starts extraction. Replays wake only, never create jobs.",
+  "failed_reply_retry_acceptance": {
+    "reason": "RETRY_FAILED",
+    "failed_reply_route": "When the latest failed job is a GRAPH_REVIEW_V1 / REPLY job, retry must enqueue GRAPH_REVIEW_V1 / REPLY on the same input revision under a new batch. Revalidate the original trigger mail IDs and full evidence against the current owner, case, revision and RFQ linkage. Reject stale evidence, newer active jobs and unresolved sends. Never redirect a failed REPLY to START.",
+    "atomicity": "The existing submit_work_case_resume transaction must perform mode selection, guards, enqueue and receipt persistence together. Identical retries reuse the original batch.",
+    "verification": "A 202 proves acceptance only. Verify the claimed job mode and its two trigger mail IDs, the source-linked quote versions, and the committed latest review card. Live RETRY_FAILED routing remains unverified until the deployed SQL or a controlled acceptance run confirms it."
+  },
   "supplier_policy": "Registering a supplier does not itself resume any case. User explicitly resumes; normal extraction/registered-supplier checks apply again. Suppliers are never auto-created.",
   "validation": {
     "date": "2026-11-02",

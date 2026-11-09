@@ -1,4 +1,6 @@
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
+from threading import Lock
 from uuid import UUID
 
 from app.core.errors import ServiceError
@@ -7,6 +9,8 @@ from app.features.work_cases.domain.listing import QueueCounts, WorkCaseList, Wo
 
 from app.features.work_cases.application.case_actions import case_actions
 from app.features.work_cases.application.start_readiness import StartReadiness
+
+_PAGE_READS = ThreadPoolExecutor(max_workers=8, thread_name_prefix='case-page-read')
 
 STEP_MESSAGES = {
     'PENDING_START': '원문 확인 후 검토 시작',
@@ -33,20 +37,49 @@ class WorkCaseListService:
         self.repo, self.codec = repository, codec
         self.extraction_enabled = extraction_enabled
         self.now = now or (lambda: datetime.now(timezone.utc))
+        self._in_flight = {}
+        self._in_flight_lock = Lock()
 
     def list(self, owner, *, status=None, archived=False, q='', limit=25, cursor=None, start_readiness=None, resume_readiness=None,
-             case_changes_ready=False):
+             case_changes_ready=False, action_readiness=None):
         readiness = start_readiness if start_readiness is not None else (StartReadiness()
             if self.extraction_enabled else StartReadiness('EXTRACTION_DISABLED', '서버의 검토 실행 설정이 꺼져 있습니다.'))
         query = q.strip().casefold()
         scope = self.codec.scope(owner, status, archived, query)
         snapshot, after = (self.codec.decode(cursor, scope) if cursor else (iso_z(self.now()), None))
+        # Share only overlapping reads with identical owner, filters and page.
+        # Completed results are discarded, so a refresh can see later changes.
+        key = (scope, limit, cursor, readiness, resume_readiness, case_changes_ready, action_readiness is not None)
+        with self._in_flight_lock:
+            pending = self._in_flight.get(key)
+            if pending is None:
+                pending = self._in_flight[key] = Future()
+                leader = True
+            else:
+                leader = False
+        if not leader:
+            return pending.result()
+        try:
+            result = self._read_page(owner, status, archived, query, limit, scope, snapshot, after,
+                                     readiness, resume_readiness, case_changes_ready, action_readiness)
+        except BaseException as error:
+            with self._in_flight_lock:
+                del self._in_flight[key]
+                pending.set_exception(error)
+            raise
+        else:
+            with self._in_flight_lock:
+                del self._in_flight[key]
+                pending.set_result(result)
+            return result
+
+    def _read_page(self, owner, status, archived, query, limit, scope, snapshot, after,
+                   readiness, resume_readiness, case_changes_ready, action_readiness):
         counts, filtered = QueueCounts(), []
         page_cases = {}
         try:
+            pending_read = _PAGE_READS.submit(self.repo.intake_pending, owner)
             rows = self.repo.rows(owner, snapshot, archived)
-            if callable(case_changes_ready):
-                case_changes_ready = case_changes_ready()
             for case, mail in rows:
                 # Defensive checks also support alternative repositories without
                 # accidentally applying status to tab counts.
@@ -68,7 +101,6 @@ class WorkCaseListService:
                 if after is not None and key >= after:
                     continue
                 archived_at = iso_z(utc_time(case['archived_at'])) if case['archived_at'] else None
-                actions, disabled = case_actions(case, readiness, resume_readiness, case_changes_ready=case_changes_ready)
                 step = case['processing_step']
                 attachments = mail.get('attachments_jsonb') or []
                 if not isinstance(attachments, list):
@@ -79,33 +111,47 @@ class WorkCaseListService:
                     received_at=received, status=case['status'], processing_step=step,
                     input_revision=case['input_revision'], archived_at=archived_at, item_name=case['item_name'],
                     attachment_count=len(attachments), step_detail={'code': step, 'message': STEP_MESSAGES.get(step, '처리 상태 확인')},
-                    allowed_actions=actions, disabled_actions=disabled)
+                    allowed_actions=[])
                 page_cases[str(row.case_id)] = case
                 filtered.append((key, row))
             filtered.sort(key=lambda item: item[0], reverse=True)
             page = filtered[:limit]
-            summaries = self.repo.reply_summaries(owner, [str(row.case_id) for _, row in page])
+            # An explicitly absent current round proves 0/0. Older schemas omit
+            # the column; those rows still use the authoritative reply-facts RPC.
+            reply_case_ids = [str(row.case_id) for _, row in page
+                              if page_cases[str(row.case_id)].get('current_rfq_round_id', True) is not None]
+            summaries_read = (_PAGE_READS.submit(self.repo.reply_summaries, owner, reply_case_ids)
+                              if reply_case_ids else None)
             held = [page_cases[str(row.case_id)] for _, row in page if row.processing_step == 'ON_HOLD']
-            hold_reasons = self.repo.hold_reasons(owner, held) if held else {}
-            resumable = [page_cases[str(row.case_id)] for _, row in page if 'RESUME' in row.allowed_actions]
-            resume_blocks = self.repo.resume_blocks(owner, resumable) if resumable else {}
+            hold_read = _PAGE_READS.submit(self.repo.hold_reasons, owner, held) if held else None
             candidate_cases = [page_cases[str(row.case_id)] for _, row in page
                                if row.processing_step in {'CANDIDATES', 'SELECTING_CANDIDATES'}]
-            candidate_blocks = self.repo.candidate_blocks(owner, candidate_cases) if candidate_cases else {}
+            candidate_read = _PAGE_READS.submit(self.repo.candidate_blocks, owner, candidate_cases) if candidate_cases else None
+            if page and action_readiness is not None:
+                readiness, resume_readiness, case_changes_ready = action_readiness()
+            for _, row in page:
+                row.allowed_actions, row.disabled_actions = case_actions(
+                    page_cases[str(row.case_id)], readiness, resume_readiness, case_changes_ready=case_changes_ready)
+            resumable = [page_cases[str(row.case_id)] for _, row in page if 'RESUME' in row.allowed_actions]
+            resume_blocks = self.repo.resume_blocks(owner, resumable) if resumable else {}
+            summaries = summaries_read.result() if summaries_read else {}
+            hold_reasons = hold_read.result() if hold_read else {}
+            candidate_blocks = candidate_read.result() if candidate_read else {}
             for _, row in page:
                 row.hold = hold_reasons.get(str(row.case_id))
                 if str(row.case_id) in resume_blocks:
                     row.allowed_actions.remove('RESUME')
                     code, message = resume_blocks[str(row.case_id)]
                     row.disabled_actions.append({'action': 'RESUME', 'reason_code': code, 'message': message})
-                row.reply_summary = summaries[str(row.case_id)]
+                if page_cases[str(row.case_id)].get('current_rfq_round_id', True) is not None:
+                    row.reply_summary = summaries[str(row.case_id)]
                 if str(row.case_id) in candidate_blocks:
                     from app.features.work_cases.application.candidates import apply_candidate_action
                     apply_candidate_action(page_cases[str(row.case_id)], row.allowed_actions, row.disabled_actions,
                                            candidate_blocks[str(row.case_id)])
             next_cursor = (self.codec.encode(scope, snapshot, page[-1][0]) if len(filtered) > limit else None)
             return WorkCaseList(items=[row for _, row in page], next_cursor=next_cursor,
-                                counts=counts, intake_pending=self.repo.intake_pending(owner))
+                                counts=counts, intake_pending=pending_read.result())
         except ServiceError:
             raise
         except Exception:

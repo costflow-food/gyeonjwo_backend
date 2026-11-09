@@ -3,7 +3,9 @@ import logging
 import math
 import threading
 import time
+import httpx
 from contextlib import asynccontextmanager
+from anyio import move_on_after, to_thread
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,7 +24,7 @@ from app.features.mail.api.router import router as mail_router
 from app.features.review.api.router import router as review_router
 from app.features.mailboxes.api.router import router as mailbox_router, make_mailbox_service
 from app.features.mailboxes.application.worker import ConnectedMailboxWorker
-from app.features.work_cases.api.router import router as work_cases_router
+from app.features.work_cases.api.router import get_list_service, router as work_cases_router
 from app.features.work_cases.api.revisions import router as work_revisions_router
 from app.features.workflow_logs.router import router as workflow_logs_router
 from app.features.suppliers.router import router as suppliers_router
@@ -67,6 +69,27 @@ def start_workflow_worker(settings, mailbox_service):
         return None
     return RfqWorkflowWorker(repo, RfqPreparation(repo, JsonAgent(settings), settings.llm_model),
                              RfqDelivery(repo, mailbox_service), repo.metadata_owners)
+
+
+async def prime_work_case_reads(state):
+    service = getattr(state, 'work_case_list_service', None)
+    if service is None:
+        return
+
+    def connect():
+        client = service.repo.client
+        # Warm the list's own connection without reading any user's rows.
+        try:
+            postgrest = client.postgrest
+            postgrest.session.head(
+                str(client.rest_url).rstrip('/') + '/work_cases',
+                headers=postgrest.headers, params={'select': 'id', 'limit': 0}, timeout=0.2)
+        except httpx.HTTPError:
+            pass
+
+    # Startup and API availability must not depend on the optional probe.
+    with move_on_after(0.2):
+        await to_thread.run_sync(connect, abandon_on_cancel=True)
 
 
 def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_service=None):
@@ -122,6 +145,7 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
                 app.state.extraction_worker = None
                 app.state.graph_startup_code = 'GRAPH_RUNTIME_UNAVAILABLE'
                 logger.warning('graph unavailable code=GRAPH_RUNTIME_UNAVAILABLE; mail/API remain available')
+            await prime_work_case_reads(app.state)
             # Independent mail/metadata lifecycles; sender remains separately gated.
             for prepared_worker in (connected_worker, rfq_worker, rfq_workflow):
                 if prepared_worker is not None:
@@ -150,6 +174,9 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     app.state.rfq_metadata_worker = None
     app.state.rfq_workflow_worker = None
     app.state.service_lock = threading.Lock()
+    if getattr(settings, 'google_token_encryption_key', None):
+        # Build the list clients before accepting requests. Connections remain lazy.
+        get_list_service(app.state)
     app.state.push_verifier = push_verifier
     app.add_middleware(BodyLimitMiddleware)
     rate_lock, rates = threading.Lock(), {}

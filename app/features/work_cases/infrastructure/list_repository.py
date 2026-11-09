@@ -25,6 +25,7 @@ class WorkCaseListRepository:
         self.client, self.extraction_fields = client, extraction_fields
         self.candidates = CandidateRepository(client)
         self._sender_name_retry_at = 0
+        self._round_column_retry_at = 0
         self.column_missing = column_missing
 
     def mail_columns(self):
@@ -43,6 +44,8 @@ class WorkCaseListRepository:
         try:
             while True:
                 columns = CASE_COLUMNS + (',requester_name' if self.extraction_fields else '')
+                if monotonic() >= self._round_column_retry_at:
+                    columns += ',current_rfq_round_id'
                 if embed:
                     mail_columns = self.mail_columns()
                     columns += f',initial_mail:{INITIAL_MAIL_RELATION}({mail_columns},supplier:{SUPPLIER_RELATION}(name))'
@@ -65,6 +68,9 @@ class WorkCaseListRepository:
                     if embed and code == '42703' and 'sender_name' in message and 'sender_name' in mail_columns:
                         self._sender_name_retry_at = monotonic() + 60
                         return self.rows(owner, snapshot, archived, embed=True)
+                    if code == '42703' and 'current_rfq_round_id' in message and 'current_rfq_round_id' in columns:
+                        self._round_column_retry_at = monotonic() + 60
+                        return self.rows(owner, snapshot, archived, embed=embed)
                     if (self.extraction_fields and getattr(error, 'code', None) == '42703'
                             and 'requester_name' in str(getattr(error, 'message', ''))):
                         # Read stored names independently of whether new extraction

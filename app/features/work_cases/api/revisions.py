@@ -21,16 +21,23 @@ from app.shared.infrastructure.db.client import make_server_client
 
 router = APIRouter(prefix='/api/v1', tags=['Work revisions'])
 IdempotencyKey = Annotated[str | None, Header(alias='Idempotency-Key')]
+CONDITION_FIELDS = frozenset({'quantity', 'unit', 'due_date'})
+QUOTE_CORRECTION_FIELDS = frozenset({
+    'unit_price', 'shipping_cost', 'available_quantity', 'moq_quantity', 'order_increment_quantity',
+    'unit', 'moq_unit', 'order_increment_unit', 'effective_from', 'valid_until',
+})
 
 
 class ConditionsRevision(RevisionRequest):
     changes: dict = Field(min_length=1)
     reason: str | None = None
-    evidence_refs: list = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
 
     @field_validator('changes')
     @classmethod
     def validate_comparison_inputs(cls, changes):
+        if changes.keys() - CONDITION_FIELDS:
+            raise ValueError('changes contains unsupported fields')
         changes = dict(changes)
         if 'quantity' in changes:
             value = changes['quantity']
@@ -52,7 +59,14 @@ class QuoteCorrection(RevisionRequest):
     source_quote_id: UUID | None = None
     corrections: dict = Field(min_length=1)
     reason: str = Field(min_length=1)
-    evidence_refs: list = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+
+    @field_validator('corrections')
+    @classmethod
+    def validate_correction_fields(cls, corrections):
+        if corrections.keys() - QUOTE_CORRECTION_FIELDS:
+            raise ValueError('corrections contains unsupported fields')
+        return corrections
 
 
 class DraftRevision(RevisionRequest):
