@@ -26,6 +26,8 @@ from app.shared.domain.schemas import StrictModel
 # ─────────────────────────────────────────────
 MAX_ROLE_CALLS_PER_RUN = 6
 MAX_TOOL_CALLS_PER_AGENT_CALL = 8
+# LLM 검증자 검증 횟수(역할 호출 하나당). 마지막 검증도 수정 필요면 마지막 결과로 진행하고 남은 지적을 reason에 적는다
+MAX_VERIFY_ATTEMPTS = 3
 READ_RETRY_LIMIT = 1
 
 DecimalStr = Annotated[str, Field(pattern=r'^-?\d+(\.\d+)?$')]
@@ -353,6 +355,19 @@ class ExtractionHold(StrictModel):
 
 class CandidateHold(StrictModel):
     code: CandidateHoldCode
+
+
+# LLM 검증자의 답. 모든 필드가 필수다(구조화 출력 strict 스키마)
+class VerifyIssue(StrictModel):
+    target: str                          # 문제 항목 (필드 이름, 이름표 등)
+    code: str                            # 역할별 확인 항목 코드 (agents.VERIFY_PROMPTS)
+    explanation: str                     # 무엇이 왜 틀렸고 어떻게 고치는지
+    evidence_quote: str                  # 근거 원문 구절. 원문에 없으면 코드가 지적을 버린다
+
+
+class VerifyOut(StrictModel):
+    verdict: Literal['PASS', 'REVISE']
+    issues: list[VerifyIssue]
 
 
 class ExtractionOut(AgentOutput):
