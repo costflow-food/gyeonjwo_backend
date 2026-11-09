@@ -9,3 +9,10 @@ __pycache__/
 logs/
 .local-tmp/
 models/
+
+# 로컬 전용 테스트 자료 (평가 스크립트·설계 메모·재현용 PDF·시드)
+tests/*.md
+tests/eval_*.py
+tests/fixtures/mango/
+tests/fixtures/strawberry/*/*.sql
+tests/fixtures/strawberry/*/email.md
