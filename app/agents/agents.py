@@ -27,11 +27,11 @@ import re
 from typing import Any, Protocol
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import AgentMiddleware, ToolCallLimitMiddleware
+from langchain.agents.middleware import AgentMiddleware, ToolCallLimitMiddleware, hook_config
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
 from app.agents.schemas import (AGENT_IO, EXTRACTION_TOOL_CALL_CAP, EXTRACTION_TOOL_CALLS_PER_EXTRA_MAIL,
@@ -507,12 +507,15 @@ def tool_call_limit(role: AgentRole, data: AgentInput | None = None) -> int:
 def build_agent(role: AgentRole, model: BaseChatModel, limit: int | None = None):
     """역할 에이전트. limit을 주지 않으면 역할 기본 도구 호출 한도를 쓴다."""
     _, output = AGENT_IO[role]
+    middleware = [ToolCallLimitMiddleware(run_limit=limit or tool_call_limit(role), exit_behavior='error'),
+                  HandleMiddleware()]
+    if role == AgentRole.INFO_EXTRACTOR:
+        middleware.append(MailCoverageMiddleware())
     return create_agent(
         model, tools_for(role), system_prompt=system_prompt(role),
         response_format=ToolStrategy(output),
         context_schema=RunContext,
-        middleware=[ToolCallLimitMiddleware(run_limit=limit or tool_call_limit(role), exit_behavior='error'),
-                    HandleMiddleware()],
+        middleware=middleware,
         name=role.lower(),
     )
 
@@ -1042,6 +1045,65 @@ class HandleMiddleware(AgentMiddleware):
         if isinstance(result, ToolMessage) and isinstance(result.content, str):
             return result.model_copy(update={'content': handles.hide_json(result.content)})
         return result
+
+
+# ①이 저장하지 않은 메일이 남은 채 최종 응답을 내면 한 번 되돌려 보내는 안내. {mails}에 그 메일 이름표가 들어간다
+_MAILS_NOT_STORED = ('mail_ids 중 {mails} 메일은 아직 store_structured_mail로 보내지 않았다. 최종 응답은 받지 않았다. '
+                     '그 메일을 읽고 업무 품목 단가가 있으면 업체마다 따로 저장한다. 단가가 없거나 다른 품목의 견적이면 '
+                     '저장하지 않는다. 그다음 이번 실행에서 저장한 quote_version_id를 모두 넣어 최종 응답을 다시 낸다.')
+
+
+def _mail_ids_in(value) -> set[str]:
+    """도구 인자 안의 모든 mail_id 값(근거 evidence의 메일)."""
+    if isinstance(value, dict):
+        found = {value['mail_id']} if isinstance(value.get('mail_id'), str) else set()
+        return found.union(*(_mail_ids_in(item) for item in value.values()))
+    if isinstance(value, list):
+        return set().union(*(_mail_ids_in(item) for item in value))
+    return set()
+
+
+class MailCoverageMiddleware(AgentMiddleware):
+    """① 전용. 메일 여러 통을 받은 실행에서 일부 메일만 저장하고 최종 응답을 내면, 최종 응답을 받지 않고
+    저장 시도가 없는 메일을 알려 LLM이 이어서 하게 한다 (2026-11-09 브로콜리 회신 3통 중 1통만 저장).
+    - 저장 시도: store_structured_mail 인자의 근거 mail_id. 거절된 시도도 시도로 본다.
+    - 저장 시도가 하나도 없으면(모든 메일에 단가가 없는 HOLD 등) 되돌리지 않는다. 메일 한 통이어도 되돌리지 않는다.
+    - 업무가 바뀌어 멈춘 실행(REVISION_CHANGED·CASE_NOT_FOUND)은 되돌리지 않는다.
+    - 단가가 없어 저장하지 않는 게 맞는 메일도 있으므로 한 실행에 한 번만 되돌린다. 두 번째 최종 응답은 그대로 받는다."""
+
+    @hook_config(can_jump_to=['model'])
+    def after_model(self, state, runtime):
+        """최종 응답(구조화 출력)이 나온 직후 저장 시도가 없는 메일을 확인한다. 되돌릴 때는 최종 응답을 비우고 안내를 넣는다."""
+        if state.get('structured_response') is None:
+            return None
+        messages = state['messages']
+        sent_back = _MAILS_NOT_STORED.split('{')[0]
+        if any(isinstance(m, HumanMessage) and str(m.content).startswith(sent_back) for m in messages[1:]):
+            return None
+        missing = self._missing_mails(messages, getattr(getattr(runtime, 'context', None), 'handles', None))
+        if not missing or _case_changed(messages):
+            return None
+        return {'messages': [HumanMessage(_MAILS_NOT_STORED.format(mails='·'.join(missing)))],
+                'structured_response': None, 'jump_to': 'model'}
+
+    @staticmethod
+    def _missing_mails(messages: list, handles) -> list[str]:
+        """입력 mail_ids 중 저장 시도가 없는 메일(LLM에게 보인 값, 이름표). 저장 시도가 하나도 없으면 빈 목록.
+        LLM이 이름표 대신 ID를 적었어도 같은 메일로 보도록 ID로 되돌려 비교한다."""
+        try:
+            shown = json.loads(messages[0].content).get('mail_ids') or []
+        except (AttributeError, TypeError, ValueError):
+            return []
+        reveal = handles.reveal if handles is not None else (lambda value: value)
+        tried = set()
+        for message in messages:
+            if isinstance(message, AIMessage):
+                for call in message.tool_calls:
+                    if call['name'] == 'store_structured_mail':
+                        tried |= {reveal({'mail_id': mail})['mail_id'] for mail in _mail_ids_in(call.get('args'))}
+        if len(shown) < 2 or not tried:
+            return []
+        return [mail for mail in shown if reveal({'mail_id': mail})['mail_id'] not in tried]
 
 
 class ToolCallLog(BaseCallbackHandler):
