@@ -42,3 +42,37 @@ def test_original_attachment_can_download_only_for_gmail_parts():
     assert [a.can_download for a in mail.attachments] == [True, False]
     mail = OriginalMailService(_Repo(_row('UPLOAD', attachments[:1]))).get('owner', MAIL)
     assert mail.attachments[0].can_download is False
+
+
+# KAN-167 S4-4: manual approval path for drafts the worker will not auto-send.
+from app.features.work_cases.application.mail_drafts import approval_block_reason, dispatch_state
+
+CASE_ROW = {'input_revision': 3}
+
+
+def draft_row(**style):
+    return {'status': 'DRAFT', 'approved_by': None, 'input_revision': 3, 'style_snapshot_jsonb': style}
+
+
+def test_approval_off_caution_draft_can_be_approved_manually():
+    policy = {'configured': True, 'approval_required': False, 'auto_eligible': True}
+    assert dispatch_state(draft_row(auto_policy_eligible=True, candidate_caution=True), CASE_ROW, policy) == (False, True)
+    assert dispatch_state(draft_row(auto_policy_eligible=False), CASE_ROW, policy) == (False, True)
+
+
+def test_approval_off_auto_draft_needs_no_button():
+    policy = {'configured': True, 'approval_required': False, 'auto_eligible': True}
+    assert dispatch_state(draft_row(auto_policy_eligible=True), CASE_ROW, policy) == (True, False)
+
+
+def test_approval_on_and_stale_or_sent_drafts():
+    on = {'configured': True, 'approval_required': True, 'auto_eligible': False}
+    assert dispatch_state(draft_row(), CASE_ROW, on) == (False, True)
+    assert dispatch_state({**draft_row(), 'input_revision': 2}, CASE_ROW, on) == (False, False)
+    assert dispatch_state({**draft_row(), 'status': 'SENT'}, CASE_ROW, on) == (False, False)
+
+
+def test_block_reason_separates_settings_and_recipient():
+    assert approval_block_reason({'configured': True}) is None
+    assert approval_block_reason({'configured': False, 'auto_eligible': False, 'settings_ready': False}) == 'SEND_SETTINGS_REQUIRED'
+    assert approval_block_reason({'configured': False, 'settings_ready': True, 'recipient_registered': False}) == 'RECIPIENT_NOT_REGISTERED'

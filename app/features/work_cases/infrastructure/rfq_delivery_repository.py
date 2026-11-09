@@ -68,12 +68,14 @@ class RfqDeliveryRepository(RfqRepository):
         chosen = (override if override and type(override['approval_required_by_purpose'].get(purpose)) is bool
                   else (base_rows[0] if base_rows else None))
         if not chosen:
-            return {'configured': False, 'auto_eligible': False}
+            return {'configured': False, 'auto_eligible': False, 'settings_ready': False}
         approval = chosen['approval_required_by_purpose'].get(purpose)
         # The mailbox default covers every case; recipients are the owner's registered supplier contacts.
-        configured = (chosen['configured'] is True and type(approval) is bool
-                      and self.registered_recipient(owner, supplier_id, recipient))
+        settings_ready = chosen['configured'] is True and type(approval) is bool
+        recipient_registered = self.registered_recipient(owner, supplier_id, recipient)
+        configured = settings_ready and recipient_registered
         return {'configured': configured, 'approval_required': approval,
+                'settings_ready': settings_ready, 'recipient_registered': recipient_registered,
                 'source': 'CASE' if chosen is override else 'MAILBOX',
                 'source_settings_id': chosen['id'], 'source_version': chosen['version_no'],
                 'auto_eligible': configured and approval is False,
