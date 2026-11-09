@@ -150,8 +150,9 @@ def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: N
                 return _failed(f'{role}: QUOTE_LOOKUP_FAILED')
             try:
                 output = run_agent(role, INPUTS[role](state | quote_ids))
-            except Exception:
-                logger.warning('agent failed role=%s', role)
+            except Exception as error:
+                # 실패 원인(예외 종류와 짧은 메시지)을 서버 로그에 남긴다. DB에는 AGENT_FAILED만 저장된다
+                logger.warning('agent failed role=%s error=%s: %.300s', role, type(error).__name__, error)
                 return _failed(f'{role}: AGENT_FAILED') | {'role_calls': state.get('role_calls', 0) + 1}
             update = {'role_calls': state.get('role_calls', 0) + 1, 'processing_step': ROLE_STEPS[role]} | quote_ids
             if not isinstance(output, AGENT_IO[role][1]):

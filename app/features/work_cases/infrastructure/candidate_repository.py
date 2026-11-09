@@ -1,5 +1,7 @@
 """Immutable candidate sets in agent_runs; selection audit in workflow_logs."""
 from uuid import UUID
+from threading import Lock
+from time import monotonic
 from app.core.errors import ServiceError
 from app.features.work_cases.domain.candidates import CandidateSnapshot, CandidateSelectionResponse, POLICY_MODE
 from app.features.work_cases.application.start_readiness import StartReadiness
@@ -11,6 +13,8 @@ RUN_COLUMNS = 'id,owner_user_id,work_case_id,input_revision,review_batch_id,outp
 class CandidateRepository:
     def __init__(self, client):
         self.client = client
+        self._readiness_lock = Lock()
+        self._readiness_cache = None
 
     def rows(self, query):
         try:
@@ -105,9 +109,16 @@ class CandidateRepository:
         except Exception:
             return StartReadiness('CANDIDATE_SELECTION_INTEGRATION_REQUIRED', '후보 선택·발송 저장 기능이 아직 연결되지 않았습니다.')
 
+    def listing_readiness(self):
+        with self._readiness_lock:
+            if self._readiness_cache is None or monotonic() >= self._readiness_cache[0]:
+                readiness = self.ready()
+                self._readiness_cache = (monotonic() + (60 if readiness.available else 5), readiness)
+            return self._readiness_cache[1]
+
     def blocks(self, owner, cases):
         from app.features.work_cases.application.candidates import candidate_block
-        readiness = self.ready()
+        readiness = self.listing_readiness()
         if not readiness.available:
             return {str(case['id']): (readiness.code, readiness.message) for case in cases}
         try:
