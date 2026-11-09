@@ -46,7 +46,7 @@ import hashlib
 import json
 import re
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Literal, Protocol
 
 from langchain.tools import ToolRuntime
@@ -1085,8 +1085,9 @@ def _required_names(conditions) -> list[str]:
 
 def _spec_state(wanted: str, offered: str | None) -> str:
     """등록 규격이 요청 규격과 똑같으면 PASS, 그 밖은 RFQ로 확인한다(UNKNOWN). 표기만 다른 같은 규격을
-    잘못 제외하지 않도록 규격 차이로는 FAIL을 내지 않는다."""
-    if offered and _key(wanted) == _key(offered):
+    잘못 제외하지 않도록 규격 차이로는 FAIL을 내지 않는다. 쉼표·빗금 등 문장부호와 공백은 비교에서 뺀다
+    ('IQF, 10kg 박스'와 'IQF 10kg/박스'는 같은 규격)."""
+    if offered and _letters(wanted) == _letters(offered):
         return 'PASS'
     return 'UNKNOWN'
 
@@ -1291,7 +1292,7 @@ def evaluate_candidates(store: CandidateStore, context: RunContext, supplier_ite
               'scope': {'searched': len({item['supplier_id'] for item in items}),
                         'candidates': len(candidates), 'excluded': len(excluded)},
               'rfq_facts': {'품목': item_name, '규격': case.get('specification'),
-                            '수량': f"{case['quantity']}{case.get('unit') or ''}" if case.get('quantity') else None,
+                            '수량': f"{_mail_quantity(case['quantity'])}{case.get('unit') or ''}" if case.get('quantity') else None,
                             '납기일': case.get('due_date')},
               'candidates': candidates, 'excluded': excluded,
               'question_options': dict(RFQ_OPTIONAL_QUESTIONS), 'default_question_options': list(RFQ_DEFAULT_OPTIONS)}
@@ -1541,6 +1542,15 @@ def _amount(value) -> Decimal | None:
         return None
 
 
+def _mail_quantity(quantity) -> str:
+    """메일에 쓰는 수량 표기: 천 단위 쉼표, 끝자리 0 없이 ('1000.000000' → '1,000', '2.5' → '2.5').
+    숫자로 읽을 수 없는 값은 그대로 쓴다."""
+    try:
+        return f'{Decimal(str(quantity)).normalize():,f}'
+    except InvalidOperation:
+        return str(quantity)
+
+
 def _amount_text(amount: Decimal) -> str:
     """Decimal을 지수 표기 없는 문자열로. 10000 → '10000', 1.50 → '1.5'."""
     text = format(amount, 'f')
@@ -1654,7 +1664,8 @@ def _cost_line(record: QuoteVersionRecord, cost: dict, quantity: Decimal, case_u
     if cost.get('included_in_price') is None:
         return None, 'INCLUSION_UNCLEAR'
     basis = (cost.get('basis') or '').replace(' ', '')
-    if not basis or basis.removesuffix('당').removeprefix('1') in _PER_ORDER:
+    # '1회 배송당'처럼 횟수 표기가 앞에 붙은 기준도 주문(배송) 한 번의 비용으로 본다
+    if not basis or (basis.removesuffix('당').removeprefix('1').removeprefix('회') or '회') in _PER_ORDER:
         return amount, None
     ratio = unit_ratio(record, case_unit, _unit_key(basis))
     return (amount * quantity * ratio, None) if ratio is not None else (None, 'BASIS_UNCLEAR')
@@ -1924,7 +1935,7 @@ def _supplier_comparison(case: dict, quote_id: str, record: QuoteVersionRecord, 
             missing.append('specification')
         else:
             requirements.append(_requirement('규격', 'specification', case['specification'], stated('specification'),
-                                             _key(case['specification']) == _key(stated('specification'))))
+                                             _letters(case['specification']) == _letters(stated('specification'))))
     certifications = _required_names(case.get('mandatory_conditions'))
     if certifications and stated('certifications') is None:
         missing.append('certifications')
@@ -2004,7 +2015,8 @@ def check_comparability(runtime: ToolRuntime[RunContext]) -> dict:
 
 def break_even_for(store: ComparisonStore, context: RunContext, supplier_id: str) -> dict:
     """calculate_break_even의 본체. supplier_id의 미확인 비용을 다른 업체 각각과 비교한다.
-    deciding: 확인 총액이 가장 낮은 다른 업체와의 결과 (질문의 역전 기준 금액·산식으로 쓴다)."""
+    deciding: 확인 총액이 가장 낮은 다른 업체와의 결과 (질문의 역전 기준 금액·산식으로 쓴다).
+    업체 하나가 업무 수량 전부를 맡는 비교라서, 공급 가능 수량이 업무 수량보다 적은 업체(SUPPLY_SHORT)는 상대로 두지 않는다."""
     case, stop = _priority_case(store, context)
     if stop:
         return stop
@@ -2013,7 +2025,7 @@ def break_even_for(store: ComparisonStore, context: RunContext, supplier_id: str
     if supplier_id not in sheets:
         return {'status': 'REJECTED', 'code': 'NOT_IN_COMPARISON', 'hint': 'check_comparability의 supplier_id만 보낸다.'}
     target = sheets[supplier_id]
-    rivals = sorted((sheet for sid, sheet in sheets.items() if sid != supplier_id),
+    rivals = sorted((sheet for sid, sheet in sheets.items() if sid != supplier_id and 'SUPPLY_SHORT' not in sheet.warnings),
                     key=lambda sheet: (sheet.known_total is None, sheet.known_total or 0))
     results = [break_even(target, rival) for rival in rivals]
     computed = [r for r in results if r['status'] in ('COMPUTED', 'NO_UNKNOWN', 'CONDITIONAL')]

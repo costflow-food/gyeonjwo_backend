@@ -9,31 +9,48 @@ replace this adapter after review with the DB owner. Never select body_text/toke
 from app.core.errors import ServiceError
 from uuid import UUID
 from app.features.work_cases.domain.replies import reply_summary
+from app.features.work_cases.infrastructure.candidate_repository import CandidateRepository
+from time import monotonic
 
 CASE_COLUMNS = 'id,initial_mail_id,created_at,status,processing_step,input_revision,archived_at,item_name,decision,current_batch_id'
 MAIL_COLUMNS = 'id,subject,sender,sent_or_received_at,attachments_jsonb,supplier_id'
+INITIAL_MAIL_RELATION = 'mail_messages!work_cases_owner_user_id_initial_mail_id_id_fkey'
+SUPPLIER_RELATION = 'suppliers!mail_messages_owner_user_id_supplier_id_fkey'
 BATCH_SIZE = 200
 MAX_CASES = 10000
 
 
 class WorkCaseListRepository:
-    def __init__(self, client, *, extraction_fields=True):
+    def __init__(self, client, *, extraction_fields=True, column_missing=None):
         self.client, self.extraction_fields = client, extraction_fields
+        self.candidates = CandidateRepository(client)
+        self._sender_name_retry_at = 0
+        self.column_missing = column_missing
+
+    def mail_columns(self):
+        missing = self.column_missing and self.column_missing('mail_messages', 'sender_name')
+        return MAIL_COLUMNS + (',sender_name' if not missing and monotonic() >= self._sender_name_retry_at else '')
 
     def resume_blocks(self, owner, cases):
         from app.features.work_cases.infrastructure.resume_repository import ResumeEligibilityRepository
         return ResumeEligibilityRepository(self.client).blocks(owner, cases)
 
     def candidate_blocks(self, owner, cases):
-        from app.features.work_cases.infrastructure.candidate_repository import CandidateRepository
-        return CandidateRepository(self.client).blocks(owner, cases)
+        return self.candidates.blocks(owner, cases)
 
-    def rows(self, owner, snapshot, archived):
+    def rows(self, owner, snapshot, archived, *, embed=True):
         cases, after = [], None
         try:
             while True:
                 columns = CASE_COLUMNS + (',requester_name' if self.extraction_fields else '')
+                if embed:
+                    mail_columns = self.mail_columns()
+                    columns += f',initial_mail:{INITIAL_MAIL_RELATION}({mail_columns},supplier:{SUPPLIER_RELATION}(name))'
                 query = self.client.table('work_cases').select(columns).eq('owner_user_id', str(owner))
+                if embed:
+                    query = (query.eq('initial_mail.owner_user_id', str(owner))
+                             .eq('initial_mail.supplier.owner_user_id', str(owner))
+                             .in_('initial_mail.supplier.source_type', ['REGISTERED', 'VERIFIED_WEB']))
                 query = query.lte('created_at', snapshot).order('id').limit(BATCH_SIZE)
                 query = query.not_.is_('archived_at', 'null') if archived else query.is_('archived_at', 'null')
                 if after:
@@ -41,12 +58,19 @@ class WorkCaseListRepository:
                 try:
                     batch = query.execute().data
                 except Exception as error:
+                    code = getattr(error, 'code', None)
+                    message = str(getattr(error, 'message', ''))
+                    if embed and code in {'PGRST200', 'PGRST201'}:
+                        return self.rows(owner, snapshot, archived, embed=False)
+                    if embed and code == '42703' and 'sender_name' in message and 'sender_name' in mail_columns:
+                        self._sender_name_retry_at = monotonic() + 60
+                        return self.rows(owner, snapshot, archived, embed=True)
                     if (self.extraction_fields and getattr(error, 'code', None) == '42703'
                             and 'requester_name' in str(getattr(error, 'message', ''))):
                         # Read stored names independently of whether new extraction
                         # is enabled. Older schemas remain readable without migration.
                         self.extraction_fields = False
-                        return self.rows(owner, snapshot, archived)
+                        return self.rows(owner, snapshot, archived, embed=embed)
                     raise
                 if not isinstance(batch, list):
                     raise ValueError('Invalid work-case response')
@@ -59,9 +83,22 @@ class WorkCaseListRepository:
                 if after is not None and next_id <= after:
                     raise ValueError('Unstable repository pagination')
                 after = next_id
+            if embed:
+                result = []
+                for case in cases:
+                    mail = case.pop('initial_mail')
+                    if mail is None:
+                        continue
+                    if mail['id'] != case['initial_mail_id']:
+                        raise ValueError('Invalid initial mail scope')
+                    supplier = mail.pop('supplier')
+                    if supplier is not None and case['processing_step'] != 'PENDING_START':
+                        case['registered_requester_name'] = supplier['name']
+                    result.append((case, mail))
+                return result
             mails = {}
             ids = sorted({row['initial_mail_id'] for row in cases})
-            mail_columns = MAIL_COLUMNS + ',sender_name'
+            mail_columns = self.mail_columns()
             for index in range(0, len(ids), BATCH_SIZE):
                 batch_ids = ids[index:index + BATCH_SIZE]
                 try:
@@ -72,11 +109,13 @@ class WorkCaseListRepository:
                             or 'sender_name' not in str(getattr(error, 'message', ''))):
                         raise
                     mail_columns = MAIL_COLUMNS
+                    self._sender_name_retry_at = monotonic() + 60
                     rows = (self.client.table('mail_messages').select(mail_columns)
                             .eq('owner_user_id', str(owner)).in_('id', batch_ids).execute().data)
                 for row in rows:
                     mails[row['id']] = row
-            supplier_ids = sorted({m['supplier_id'] for m in mails.values() if m.get('supplier_id')})
+            supplier_ids = sorted({mail['supplier_id'] for case in cases if case['processing_step'] != 'PENDING_START'
+                                   and (mail := mails.get(case['initial_mail_id'])) and mail.get('supplier_id')})
             names = {}
             for index in range(0, len(supplier_ids), BATCH_SIZE):
                 rows = (self.client.table('suppliers').select('id,name').eq('owner_user_id', str(owner))
