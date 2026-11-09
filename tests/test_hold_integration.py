@@ -12,7 +12,9 @@ from app.features.work_cases.infrastructure.graph_store import GraphStore
 
 def graph_store(role):
     case_id, mail_id, batch_id, run_id = (str(uuid4()) for _ in range(4))
-    repo = SimpleNamespace(call=Mock(return_value=True))
+    # 거절 기록 RPC는 {'kind': 'RECORDED'}, 나머지 RPC는 True를 돌려준다 (graph_store.record_extraction_issue)
+    repo = SimpleNamespace(call=Mock(side_effect=lambda name, **_: {'kind': 'RECORDED'}
+                                     if name == 'record_case_graph_extraction_issue' else True))
     scope = SimpleNamespace(case_id=case_id, mail_ids=[mail_id], batch_id=batch_id,
                             revision=1, repo=repo, check=Mock())
     store = GraphStore(scope, {'job_id': 'job', 'claim_token': 'claim'})
@@ -32,8 +34,6 @@ def test_supplier_rejection_records_one_scoped_rpc_and_finishes_hold(linked):
     ])
     store.read_mail_part = Mock(return_value={'text': '가나농산 주식회사', 'location': 'body'})
     store.resolve_supplier = Mock(return_value='other-supplier' if linked else None)
-    store.repo.call = Mock(side_effect=lambda name, **_: {'kind': 'RECORDED'}
-                           if name == 'record_case_graph_extraction_issue' else True)
 
     fields = [
         QuoteField(field_name='supplier_name', raw_value='가나농산 주식회사', evidence=EvidenceRef(mail_id=mail_id)),

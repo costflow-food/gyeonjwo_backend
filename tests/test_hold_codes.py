@@ -17,7 +17,7 @@ MAIL = 'mail-donghae'
 BODY = ('박 대리님, 안녕하세요. 동해프레시 한도윤입니다.\n'
         ' - 냉동딸기(IQF) 특품, 주문 단위 10kg 박스\n'
         ' - 기존 50,000원/박스 → 변경 55,000원/박스\n'
-        ' - 11월 공급 계획 100박스\n'                    # PR #61: 인상 통보(INITIAL)에는 공급 물량이 있어야 저장된다
+        ' - 월 공급 물량 100박스\n'
         '한도윤 드림\n동해프레시 영업부 | 033-555-0270')
 
 
@@ -50,15 +50,14 @@ def tool_message(name, result):
     return ToolMessage(content=json.dumps(result, ensure_ascii=False), name=name, tool_call_id=f'call-{name}')
 
 
-# ── 등록 품목 연결: DB(KAN-109)와 같은 정규화 — 앞뒤 공백 제거·연속 공백 한 칸·소문자 ──
+# ── 등록 품목 연결: 띄어쓰기만 무시 ──
 
-def test_registered_item_uses_db_name_normalization():
+def test_registered_item_ignores_case_and_repeated_spaces_only():
     items = [{'id': 'si-1', 'item_name': '냉동딸기 (IQF)', 'specification': '특품 10kg 박스'}]
-    assert _registered_item(items, {'item_name': {'value': '냉동딸기 (iqf)'}}, {})['id'] == 'si-1'
-    assert _registered_item(items, {'item_name': {'value': '  냉동딸기   (IQF) '}}, {})['id'] == 'si-1'
-    # 띄어쓰기가 다르면 DB가 다른 품목으로 보므로 연결하지 않는다 (연결하면 QUOTE_ITEM_IDENTITY_MISMATCH)
+    assert _registered_item(items, {'item_name': {'value': ' 냉동딸기  (iqf) '}}, {})['id'] == 'si-1'
+    # 띄어쓰기 유무가 다르면 다른 품목이다 (DB 품목 키 기준과 같다, tools._item_key)
     assert _registered_item(items, {'item_name': {'value': '냉동딸기(IQF)'}}, {}) is None
-    # 이름이 포함되는 정도로는 연결하지 않는다
+    # 이름이 포함되는 정도로는 연결하지 않는다 (DB가 다른 품목으로 보고 저장을 거부한다)
     assert _registered_item(items, {'item_name': {'value': '냉동딸기'}}, {}) is None
 
 
@@ -95,7 +94,7 @@ def test_unregistered_supplier_records_issue(store):
     [issue] = store.extraction_issues
     assert issue['code'] == 'SUPPLIER_NOT_MATCHED' and issue['field'] == 'supplier_name'
     assert issue['supplier_name'] == '동해프레시' and issue['agent_run_id'] == 'run-1'
-    # dev_1.0(PR #65): 업체명이 적힌 원문 줄을 근거로 남긴다
+    # 업체명이 적힌 원문 줄을 근거로 남긴다
     assert issue['evidence'] == [{'evidence_id': f'{MAIL}:body', 'excerpt': '박 대리님, 안녕하세요. 동해프레시 한도윤입니다.'}]
 
 
@@ -107,7 +106,7 @@ def test_registered_supplier_stores_without_issue(store):
 
 
 def test_issue_recording_failure_keeps_rejection(store):
-    # dev_1.0(PR #65): 기록이 실패해도 거절과 다음 행동 안내는 그대로 돌려준다(① 실행 전체를 실패로 끝내지 않는다)
+    # 기록이 실패해도 거절과 다음 행동 안내는 그대로 돌려준다 (tools._record_supplier_issue)
     def refuse(*args):
         raise RuntimeError('SUPPLIER_MATCH_AVAILABLE')
     store.record_extraction_issue = refuse
@@ -129,17 +128,44 @@ def test_not_matched_next_says_hold_for_legal_suffix(store):
     assert 'HOLD' in result['next'] and '다시 보내지 말고' in result['next']
 
 
-def test_not_matched_next_says_retry_for_department(store):
+def test_not_matched_next_says_hold_for_department(store):
+    # KAN-163: 부서·직책도 도구가 빼고 찾는다. 빼도 등록 업체가 없으면 다시 보내지 않고 HOLD
     fields = [field('supplier_name', '동해프레시 영업부')] + FIELDS[1:]
     result = save_structured_quote(store, ctx(), fields, [], [], [])
     assert result['rejected'][0]['code'] == 'SUPPLIER_NOT_MATCHED'
-    assert '빼고' in result['next'] and '한 번 더' in result['next']
+    assert 'HOLD' in result['next'] and '다시 보내지 말고' in result['next']
+
+
+# ── KAN-163: 부서·직책 표기 앞부분만 남긴 회사명으로 정확 일치 ──
+
+@pytest.mark.parametrize('registered, written', [('동해프레시', '동해프레시 영업부'),
+                                                 ('동해프레시', '동해프레시 주식회사 영업팀 홍길동'),
+                                                 ('한결냉동식품', '한결냉동식품 영업팀 최서윤')])
+def test_department_is_removed_to_match_registered_supplier(store, registered, written):
+    store.add_supplier('sup-1', registered, 'sales@supplier.example')
+    store.mail_messages[MAIL]['body_text'] = BODY + f'\n{written}'
+    fields = [field('supplier_name', written)] + FIELDS[1:]
+    result = save_structured_quote(store, ctx(), fields, [], [], [])
+    assert result['status'] == 'STORED' and store.extraction_issues == []
+    [record] = store.quote_versions.values()
+    assert record.supplier_id == 'sup-1'
+    saved = record.mail_normalized[MAIL]['fields']['supplier_name']
+    assert saved['value'] == registered and saved['raw_value'] == written
+
+
+def test_department_removal_does_not_pick_one_of_duplicates(store):
+    store.add_supplier('sup-a', '동해프레시', 'a@donghae.example')
+    store.add_supplier('sup-b', '동해프레시', 'b@donghae.example')                   # 부서명만 다른 동명 업체
+    fields = [field('supplier_name', '동해프레시 영업부')] + FIELDS[1:]
+    result = save_structured_quote(store, ctx(), fields, [], [], [])
+    assert result['rejected'][0]['code'] == 'SUPPLIER_NOT_MATCHED'
+    assert store.quote_versions == {}
 
 
 # ── S3-7: 법인 표기 정규화 (등록 업체와 정확 일치만, 저장 값은 등록 이름) ──
 
 @pytest.mark.parametrize('written', ['동해프레시 주식회사', '주식회사 동해프레시', '(주)동해프레시', '( 주 ) 동해프레시',
-                                     '㈜동해프레시', '동해프레시(주)'])
+                                     '㈜동해프레시', '동해프레시(주)', '유한책임회사 동해프레시', '합자회사 동해프레시'])
 def test_legal_form_is_removed_to_match_registered_supplier(store, written):
     store.add_supplier('sup-donghae', '동해프레시', 'sales@donghae.example')
     store.mail_messages[MAIL]['body_text'] = BODY + f'\n{written}'
@@ -182,7 +208,7 @@ def test_legal_form_removal_does_not_pick_one_of_duplicates(store):
 def test_linked_mail_with_legal_form_of_other_supplier_is_mismatch(store):
     store.add_supplier('sup-donghae', '동해프레시', 'sales@donghae.example')
     store.add_supplier('sup-cheongsol', '청솔농산', 'sales@cheongsol.example')
-    store.mail_messages[MAIL]['supplier_id'] = 'sup-donghae'
+    link_mail(store, 'sup-donghae')
     store.mail_messages[MAIL]['body_text'] = BODY + '\n(주)청솔농산'
     fields = [field('supplier_name', '(주)청솔농산')] + FIELDS[1:]
     result = save_structured_quote(store, ctx(), fields, [], [], [])
