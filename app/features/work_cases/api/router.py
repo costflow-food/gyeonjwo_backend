@@ -308,6 +308,18 @@ def progress_error(step, code):
     return None if step == 'ON_HOLD' else {'code': 'EXTRACTION_FAILED'}
 
 
+@router.get('/{case_id}/messages', summary='업무의 송수신 메일·회신 현황 조회')
+def case_messages(case_id: UUID, request: Request, principal=Depends(require_google_user),
+                  cursor: Annotated[str | None, Query()] = None,
+                  limit: Annotated[int, Query(ge=1, le=100)] = 25):
+    """API-10 (KAN-175). Reuses the list service's client, cursor key and reply facts RPC."""
+    from app.features.work_cases.infrastructure.messages_repository import list_case_messages
+    service = get_list_service(request)
+    return api_json(list_case_messages(service.repo.client, service.codec, principal.user_id, case_id,
+                                       cursor=cursor, limit=limit, reply_summaries=service.repo.reply_summaries),
+                    headers={'Cache-Control': 'private, no-store'})
+
+
 @router.get('/{case_id}/progress', summary='저장된 검토 단계 조회')
 def case_progress(case_id: UUID, request: Request, principal=Depends(require_google_user), repo=Depends(get_runtime_repository)):
     try:
