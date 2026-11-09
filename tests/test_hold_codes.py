@@ -52,10 +52,11 @@ def tool_message(name, result):
 
 # ── 등록 품목 연결: 띄어쓰기만 무시 ──
 
-def test_registered_item_ignores_spaces_only():
+def test_registered_item_ignores_case_and_repeated_spaces_only():
     items = [{'id': 'si-1', 'item_name': '냉동딸기 (IQF)', 'specification': '특품 10kg 박스'}]
-    assert _registered_item(items, {'item_name': {'value': '냉동딸기(IQF)'}})['id'] == 'si-1'
-    assert _registered_item(items, {'item_name': {'value': '냉동딸기(iqf)'}})['id'] == 'si-1'
+    assert _registered_item(items, {'item_name': {'value': ' 냉동딸기  (iqf) '}})['id'] == 'si-1'
+    # 띄어쓰기 유무가 다르면 다른 품목이다 (DB 품목 키 기준과 같다, tools._item_key)
+    assert _registered_item(items, {'item_name': {'value': '냉동딸기(IQF)'}}) is None
     # 이름이 포함되는 정도로는 연결하지 않는다 (DB가 다른 품목으로 보고 저장을 거부한다)
     assert _registered_item(items, {'item_name': {'value': '냉동딸기'}}) is None
 
@@ -68,7 +69,9 @@ def test_unregistered_supplier_records_issue(store):
     assert result['rejected'][0]['code'] == 'SUPPLIER_NOT_MATCHED'
     [issue] = store.extraction_issues
     assert issue['code'] == 'SUPPLIER_NOT_MATCHED' and issue['field'] == 'supplier_name'
-    assert issue['supplier_name'] == '동해프레시' and issue['mail_ids'] == [MAIL]   # dev_1.0: 메일 ID로 기록
+    assert issue['supplier_name'] == '동해프레시' and issue['agent_run_id'] == 'run-1'
+    # 업체명이 적힌 원문 줄을 근거로 남긴다
+    assert issue['evidence'] == [{'evidence_id': f'{MAIL}:body', 'excerpt': '박 대리님, 안녕하세요. 동해프레시 한도윤입니다.'}]
 
 
 def test_registered_supplier_stores_without_issue(store):
@@ -78,13 +81,13 @@ def test_registered_supplier_stores_without_issue(store):
     assert store.extraction_issues == []
 
 
-def test_issue_recording_failure_propagates_in_dev(store):
-    # dev_1.0(BE 통합 7ce9a2a): 기록 실패는 도구 밖으로 나간다(PR 51 원래 설계는 삼키고 거절 결과 유지). BE 확인 대상
+def test_issue_recording_failure_keeps_rejection(store):
+    # 기록이 실패해도 거절과 다음 행동 안내는 그대로 돌려준다 (tools._record_supplier_issue)
     def refuse(*args):
         raise RuntimeError('SUPPLIER_MATCH_AVAILABLE')
     store.record_extraction_issue = refuse
-    with pytest.raises(RuntimeError):
-        save_structured_quote(store, ctx(), FIELDS, [], [], [])
+    result = save_structured_quote(store, ctx(), FIELDS, [], [], [])
+    assert result['rejected'][0]['code'] == 'SUPPLIER_NOT_MATCHED' and 'HOLD' in result['next']
 
 
 def test_not_matched_next_says_hold_for_bare_name(store):
