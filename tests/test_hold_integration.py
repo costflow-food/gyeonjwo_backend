@@ -12,7 +12,9 @@ from app.features.work_cases.infrastructure.graph_store import GraphStore
 
 def graph_store(role):
     case_id, mail_id, batch_id, run_id = (str(uuid4()) for _ in range(4))
-    repo = SimpleNamespace(call=Mock(return_value=True))
+    # 거절 기록 RPC는 {'kind': 'RECORDED'}, 나머지 RPC는 True를 돌려준다 (graph_store.record_extraction_issue)
+    repo = SimpleNamespace(call=Mock(side_effect=lambda name, **_: {'kind': 'RECORDED'}
+                                     if name == 'record_case_graph_extraction_issue' else True))
     scope = SimpleNamespace(case_id=case_id, mail_ids=[mail_id], batch_id=batch_id,
                             revision=1, repo=repo, check=Mock())
     store = GraphStore(scope, {'job_id': 'job', 'claim_token': 'claim'})
@@ -42,7 +44,9 @@ def test_supplier_rejection_records_one_scoped_rpc_and_finishes_hold(linked):
     code = 'SUPPLIER_MISMATCH' if linked else 'SUPPLIER_NOT_MATCHED'
     assert result['rejected'] == [{'field': 'supplier_name', 'code': code}]
     if not linked:
-        assert '한 번 더' in result['next']
+        # S3-7: 법인 표기는 도구가 빼고 다시 찾는다. 그래도 없으면 다시 보내지 않고 HOLD
+        assert [c.args[1] for c in store.resolve_supplier.call_args_list] == ['가나농산 주식회사', '가나농산']
+        assert 'HOLD' in result['next'] and '다시 보내지 말고' in result['next']
     store.repo.call.assert_called_once_with(
         'record_case_graph_extraction_issue', p_job='job', p_token='claim', p_revision=1, p_run=run_id,
         p_issue={'code': code, 'field': 'supplier_name', 'supplier_name': '가나농산 주식회사',

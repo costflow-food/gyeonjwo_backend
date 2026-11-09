@@ -47,7 +47,7 @@ def store():
     memory.add_supplier('sup-d', '바다유통', 'bada@example.com')
     memory.add_supplier_item('si-old', 'sup-old', ITEM, '10kg/박스', ['HACCP'], '국내산')
     memory.add_supplier_item('si-a', 'sup-a', ITEM, '10kg/박스', ['HACCP'], '국내산')
-    memory.add_supplier_item('si-b', 'sup-b', ITEM, '10kg 박스', None, '칠레산')          # 인증 모름·규격은 문장부호만 다름(같은 규격)
+    memory.add_supplier_item('si-b', 'sup-b', ITEM, '10kg 박스', None, '칠레산')          # 인증 모름·규격은 문장부호만 달라 같은 규격
     memory.add_supplier_item('si-c', 'sup-c', ITEM, '10kg/박스', ['ISO22000'], '국내산')  # HACCP 없음 → 제외
     memory.add_supplier_item('si-d', 'sup-d', ITEM, '5kg/박스', ['HACCP'], '국내산')      # 규격 다름 → 회신으로 확인
     memory.add_supplier_item('si-x', 'sup-a', '냉동 망고', '10kg/박스', ['HACCP'])        # 다른 품목
@@ -105,8 +105,7 @@ def test_required_conditions_pass_and_unknown(store):
     a, d, b = evaluate_candidates(store, ctx(), ITEMS)['candidates']
     assert states(a, True) == {'규격 10kg/박스': 'PASS', 'HACCP': 'PASS'}
     assert states(d, True) == {'규격 10kg/박스': 'UNKNOWN', 'HACCP': 'PASS'}        # 규격 차이로는 제외하지 않는다
-    # 문장부호·공백만 다른 규격은 같은 규격이다(PR #70 c935825). 인증 목록이 없으면 RFQ로 확인
-    assert states(b, True) == {'규격 10kg/박스': 'PASS', 'HACCP': 'UNKNOWN'}
+    assert states(b, True) == {'규격 10kg/박스': 'PASS', 'HACCP': 'UNKNOWN'}        # '10kg 박스' = '10kg/박스', 인증 목록이 없으면 RFQ로 확인
 
 
 def test_preference_score_is_origin_and_history_only(store):

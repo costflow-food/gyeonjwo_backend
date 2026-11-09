@@ -107,8 +107,8 @@ class MemoryStore:
                 for row in self.supplier_items.values() if row['supplier_id'] == supplier_id]
 
     def record_extraction_issue(self, case_id, agent_run_id, issue):
-        """업체 미등록·불일치 거절 근거. issue는 DB 계약 {code, field, supplier_name, evidence:[{evidence_id, excerpt}]}.
-        실서버는 GraphStore가 record_case_graph_extraction_issue RPC 한 번으로 기록한다."""
+        """업체 미등록·불일치 거절 근거. issue는 {code, field, supplier_name, evidence:[{evidence_id, excerpt}]}
+        (QuoteStore 계약). 실서버는 GraphStore가 record_case_graph_extraction_issue RPC로 기록한다."""
         self.extraction_issues.append({'case_id': case_id, 'agent_run_id': agent_run_id, **issue})
 
     def latest_quote_version(self, case_id, supplier_id):
