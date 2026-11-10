@@ -1,6 +1,8 @@
-# dev → main PR이 머지됐을 때만 백엔드 이미지를 검증·빌드해 GHCR에 올린다.
-#   ghcr.io/<owner>/gyeonjwo_backend:main, :<커밋 SHA>
-# 서버에 반영하는 단계(맨 아래 deploy job)는 배포 담당이 서버 방식에 맞춰 채운다.
+# dev → main PR이 머지됐을 때만 백엔드를 AWS Lightsail 컨테이너 서비스(gyeonjwo-api, 서울)에 배포한다.
+#
+# - AWS 인증: GitHub OIDC → IAM 역할(환경 production의 변수 AWS_DEPLOY_ROLE_ARN). 장기 키 없음
+# - 서버 비밀값(.env)은 Lightsail 서비스에만 있다. 배포 때마다 실행 중인 값을 그대로 이어 쓴다.
+#   비밀값을 바꾸려면 Lightsail 콘솔에서 수정하거나 ENV_FILE로 .github/scripts/deploy_lightsail.sh를 실행한다.
 name: Deploy server
 
 on:
@@ -16,19 +18,21 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  deploy:
     # 머지된 PR + 출발 브랜치가 이 저장소의 dev 일 때만
     if: >-
       github.event.pull_request.merged == true &&
       github.event.pull_request.head.ref == 'dev' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
+    environment: production
     permissions:
       contents: read
-      packages: write
-    outputs:
-      image: ${{ steps.meta.outputs.image }}
+      id-token: write
+    env:
+      AWS_REGION: ap-northeast-2
+      SERVICE: gyeonjwo-api
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,37 +49,32 @@ jobs:
       - name: Regression checks
         run: python -m unittest scripts.check_graph_hold scripts.check_workflow_logs scripts.check_review_queue
 
-      - id: meta
-        run: |
-          image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+      - id: rev
+        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/build-push-action@v6
+      - name: Build image
+        uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
-          build-args: BUILD_REVISION=${{ steps.meta.outputs.sha }}
-          tags: |
-            ${{ steps.meta.outputs.image }}:main
-            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.sha }}
+          platforms: linux/amd64
+          load: true
+          push: false
+          build-args: BUILD_REVISION=${{ steps.rev.outputs.sha }}
+          tags: gyeonjwo-api:${{ steps.rev.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      # TODO(배포 담당): 서버 방식에 맞춰 교체한다.
-      # 예) Docker VM이면 SSH로 접속해
-      #     docker compose pull && docker compose up -d
-      #     curl -fsS http://127.0.0.1:8000/health
-      - run: echo "이미지 ${{ needs.build.outputs.image }}:main 준비 완료. 서버 반영 단계는 아직 없음"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ap-northeast-2
+
+      - name: Install lightsailctl
+        run: |
+          sudo curl -fsSL https://s3.us-west-2.amazonaws.com/lightsailctl/latest/linux-amd64/lightsailctl -o /usr/local/bin/lightsailctl
+          sudo chmod +x /usr/local/bin/lightsailctl
+
+      - name: Deploy to Lightsail
+        run: bash .github/scripts/deploy_lightsail.sh "gyeonjwo-api:${{ steps.rev.outputs.sha }}" "${{ steps.rev.outputs.sha }}"
