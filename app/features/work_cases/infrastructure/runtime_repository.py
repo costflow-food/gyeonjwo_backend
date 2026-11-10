@@ -159,7 +159,7 @@ class CaseRuntimeRepository:
         try:
             rows = (self.client.table('work_cases').select(
                     'id,input_revision,current_batch_id,status,processing_step,archived_at,'
-                    'item_name,specification,quantity::text,unit,due_date,mandatory_conditions_jsonb,policy_jsonb').eq('owner_user_id', owner)
+                    'item_name,standardized_item_key,specification,quantity::text,unit,due_date,mandatory_conditions_jsonb,policy_jsonb').eq('owner_user_id', owner)
                     .eq('id', str(case_id)).limit(1).execute().data)
         except Exception:
             raise ServiceError('PROCESSING_UNAVAILABLE', '업무 정보를 확인할 수 없습니다.', 503) from None

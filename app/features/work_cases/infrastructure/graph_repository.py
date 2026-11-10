@@ -68,7 +68,7 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
         try:
             rows = (self.client.table('work_cases').select(
                 'id,initial_mail_id,mailbox_ref,input_revision,current_batch_id,status,processing_step,archived_at,decision,'
-                'item_name,specification,quantity::text,unit,due_date,mandatory_conditions_jsonb,policy_jsonb')
+                'item_name,standardized_item_key,specification,quantity::text,unit,due_date,mandatory_conditions_jsonb,policy_jsonb')
                 .eq('owner_user_id', str(owner)).eq('id', str(case_id)).limit(1).execute().data)
             if not isinstance(rows, list) or len(rows) > 1:
                 raise ValueError('Invalid context')
