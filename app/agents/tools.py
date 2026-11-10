@@ -199,7 +199,7 @@ def get_case_context(runtime: ToolRuntime[RunContext]) -> dict:
 @register
 @tool
 def crawl_supplier_candidates(query: str, runtime: ToolRuntime[RunContext], limit: int = 5) -> dict:
-    '''업무의 원료 품목·상태에 대한 공개 웹 검색 결과와 홈페이지 연락처를 수집한다.
+    '''업무의 원료 품목·상태에 대한 공개 웹 검색 결과와 페이지의 연락처를 수집한다.
     query에는 검색할 품목과 조건만 넣고 메일 본문·개인정보는 넣지 않는다. limit은 1~5이다.
     검색 결과는 미등록·미검증 자료다. 업체 ID나 견적 초안 대상으로 사용하지 않는다.
     반환: OK / EMPTY / ERROR / REVISION_CHANGED / CASE_NOT_FOUND.

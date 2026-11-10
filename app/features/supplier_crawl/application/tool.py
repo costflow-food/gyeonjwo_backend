@@ -1,4 +1,4 @@
-"""Keyword-in, homepage contacts-out. Not registered with any agent."""
+"""Keyword-in, public page contacts-out."""
 from langchain_core.tools import tool
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -20,10 +20,11 @@ class SupplierSearchInput(BaseModel):
 
 @tool(args_schema=SupplierSearchInput)
 def crawl_supplier_candidates(query: str, limit: int = 10) -> dict:
-    """Google 검색 결과의 홈페이지에서 공개 이메일·전화번호를 수집한다.
+    """Google 검색 결과 페이지 또는 홈페이지에서 공개 이메일·전화번호를 수집한다.
     query: 예: '냉동딸기 취급 업체'. limit: 최대 결과 수(1~20, 기본 10).
     반환: 검색 제목(search_title), 사이트 URL, emails, phones, 연락처 출처 URL·수집 상태.
-    홈페이지 첫 화면만 읽고 내부 링크는 탐색하지 않는다. 연락처가 없으면 빈 목록을 반환한다.
+    검색 결과 페이지에서 찾지 못하면 홈페이지 첫 화면을 확인한다. 다른 링크는 탐색하지 않는다.
+    연락처가 지나치게 많으면 소속을 확인할 수 없어 NEEDS_REVIEW로 반환한다.
     사이트 URL은 검색 결과의 도메인이며 해당 업체의 공식 홈페이지인지 판단하지 않는다.
     검색 제목은 법인명으로 추론하지 않는다. 현재 제조·납품 여부를 판단하지 않는다.
     EMPTY는 검색 결과 없음, ERROR는 차단·접속 실패·검색 형식 변경이다.
