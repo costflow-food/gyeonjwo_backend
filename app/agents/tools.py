@@ -1236,6 +1236,13 @@ def _questions(checks: list[dict], options: list[str] | None = None, has_due_dat
                                         if key in chosen] + extra
 
 
+def _origin_question(options: list[str] | None, origin: str | None) -> list[str]:
+    """업체 한 곳의 선택 질문에서 원산지 질문을 등록 원산지로 정한다. 원산지가 있으면 빼고, 비어 있으면 더한다.
+    고른 질문이 없으면(None) 기본 선택 질문에서 시작한다."""
+    chosen = [key for key in (RFQ_DEFAULT_OPTIONS if options is None else options) if key != 'ORIGIN']
+    return chosen if (origin or '').strip() else [*chosen, 'ORIGIN']
+
+
 def _score_text(score: Decimal) -> str:
     text = format(score.quantize(Decimal('0.01')).normalize(), 'f')
     return '0' if text in ('-0', '') else text
@@ -1534,17 +1541,19 @@ def _draft_rejected(code: str) -> dict:
 def save_mail_drafts(store: MailDraftStore, context: RunContext, purpose: str, supplier_item_ids: list[str],
                      supplier_ids: list[str], questions: list[SupplierQuestions] | None = None) -> dict:
     """create_rfq_draft의 본체. 코드 템플릿으로 업체별 초안 행을 만든다.
-    questions는 업체별로 고른 선택 질문이다. 없는 업체는 기본 선택 질문을 쓰고, 모르는 ID가 있으면 그 업체는 기본으로 둔다."""
+    questions는 업체별로 고른 선택 질문이다. 없는 업체는 기본 선택 질문을 쓰고, 모르는 ID가 있으면 그 업체는 기본으로 둔다.
+    후보는 모두 초안 대상이므로 supplier_ids에 빠진 후보는 더한다. 원산지 질문은 등록 원산지로 정한다
+    (있으면 묻지 않고, 없으면 묻는다)."""
     if purpose != 'RFQ':
         return _draft_rejected('UNSUPPORTED_PURPOSE')
-    supplier_ids = list(dict.fromkeys(supplier_ids))
-    if not supplier_ids:
-        return _draft_rejected('NO_SUPPLIERS')
     found = evaluate_candidates(store, context, supplier_item_ids)
     if found['status'] != 'OK':
         return {key: found[key] for key in ('status', 'code', 'hint', 'missing') if key in found}
     candidates = {c['supplier_id']: c for c in found['candidates']}
     excluded = {e['supplier_id']: e['code'] for e in found['excluded']}
+    supplier_ids = list(dict.fromkeys([*supplier_ids, *candidates]))
+    if not supplier_ids:
+        return _draft_rejected('NO_SUPPLIERS')
 
     chosen, adjusted = {}, []
     for entry in questions or []:
@@ -1571,7 +1580,8 @@ def save_mail_drafts(store: MailDraftStore, context: RunContext, purpose: str, s
             continue
         values = {**common, '업체명': supplier.get('name') or '담당자',
                   '질문목록': '\n'.join(f'{n}. {q}' for n, q in enumerate(
-                      _questions(candidate['checklist'], chosen.get(supplier_id), bool(facts.get('납기일'))), 1))}
+                      _questions(candidate['checklist'], _origin_question(chosen.get(supplier_id), candidate.get('origin')),
+                                 bool(facts.get('납기일'))), 1))}
         subject, body = _rfq_text(values)
         key = hashlib.sha256(f'{context.case_id}|{context.input_revision}|RFQ|{supplier_id}'.encode()).hexdigest()
         record = MailDraftRecord(

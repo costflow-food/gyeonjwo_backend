@@ -28,9 +28,12 @@ class Settings(BaseSettings):
     llm_role_reasoning_efforts: ClassVar[dict[str, ReasoningEffort]] = {
         'INFO_EXTRACTOR': 'low', 'CANDIDATE': 'low', 'INFO_PRIORITY': 'medium',
         'RESPONSE_PLAN': 'medium', 'COUNTER_OFFER': 'low'}
-    # LLM 검증자(에이전트 최종 답을 원문·도구 결과와 대조). 여기에 추론 수준이 있는 역할만 검증한다
+    # LLM 검증자(에이전트 결과를 원문·도구 결과와 대조). 여기에 추론 수준이 있는 역할만 검증한다.
+    # ②③⑤는 초안 도구를 실행하기 전에, ①④는 최종 답을 검증한다
     llm_verifier_model: ClassVar[str] = 'gpt-6-luna'
-    llm_verifier_reasoning_efforts: ClassVar[dict[str, ReasoningEffort]] = {'INFO_EXTRACTOR': 'high'}
+    llm_verifier_reasoning_efforts: ClassVar[dict[str, ReasoningEffort]] = {
+        'INFO_EXTRACTOR': 'high', 'CANDIDATE': 'high', 'INFO_PRIORITY': 'high', 'RESPONSE_PLAN': 'high',
+        'COUNTER_OFFER': 'high'}
     llm_timeout_seconds: ClassVar[int] = 60
     analysis_timeout_seconds: ClassVar[int] = 600
     calculation_rounds: ClassVar[int] = 3
