@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from app.core.errors import ServiceError
 from app.features.work_cases.application.cursor import iso_z
+from app.shared.domain.item_names import contains_ignoring_spaces
 
 SOURCE_TYPES = ('REGISTERED', 'VERIFIED_WEB')
 CERTIFICATION_STATES = {'CONFIRMED', 'UNCONFIRMED', 'NOT_MET'}
@@ -124,7 +125,7 @@ class SupplierRepository:
                                                'location')] + item_names
             if isinstance(contact, dict):
                 fields.append(contact.get('name'))
-            if not needle or any(needle in value.casefold() for value in fields if isinstance(value, str)):
+            if not needle or any(contains_ignoring_spaces(value, needle) for value in fields if isinstance(value, str)):
                 matches.append(supplier_summary(row, item_names))
 
         def position(item):

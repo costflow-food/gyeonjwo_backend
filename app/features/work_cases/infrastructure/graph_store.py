@@ -8,7 +8,10 @@ from app.features.mail.application.attachments import fetch_gmail_attachment
 from app.features.mail.domain.attachment_ids import part_reference
 from app.features.mail_management.infrastructure.repository import MailManagementRepository
 from app.features.work_cases.domain.rfq import mailbox_address
+from app.shared.domain.item_names import contains_ignoring_spaces, item_name_key, spaced_ilike_pattern
 
+# 띄어쓰기 무시 검색의 1차 조회 상한(검색어 하나당). 걸러낸 뒤 호출자 limit으로 자른다
+ITEM_SCAN_LIMIT = 200
 ITEM_COLUMNS = ('id,supplier_id,item_name,specification,unit,certifications_jsonb,origin,notes,last_purchase_id')
 
 
@@ -182,10 +185,14 @@ class GraphStore(AgentStore):
         for word in keywords:
             if not isinstance(word, str) or not 1 <= len(word) <= 100:
                 raise ValueError('Invalid candidate keyword')
-            literal = word.replace('\\', '\\\\').replace('%', r'\%').replace('_', r'\_')
+            if not item_name_key(word):
+                continue
+            # 띄어쓰기 무시(KAN-192): '냉동망고'로 '냉동 망고' 등록 품목도 찾는다. ilike는 글자 사이 공백을 허용하는
+            # 느슨한 1차 조회이고, 실제 판정은 공백을 뺀 이름에 검색어가 들어 있는지로 다시 거른다.
             rows = self.rows(self.repo.client.table('supplier_items').select(ITEM_COLUMNS)
-                .eq('owner_user_id', self.scope.owner).ilike('item_name', '%' + literal + '%')
-                .order('id').limit(limit))
+                .eq('owner_user_id', self.scope.owner).ilike('item_name', spaced_ilike_pattern(word))
+                .order('id').limit(ITEM_SCAN_LIMIT))
+            rows = [row for row in rows if contains_ignoring_spaces(row.get('item_name'), word)][:limit]
             for row in rows:
                 found[row['id']] = row
                 self.catalog_items[row['id']] = deepcopy(row)
