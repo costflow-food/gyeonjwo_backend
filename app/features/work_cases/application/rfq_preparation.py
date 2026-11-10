@@ -35,7 +35,7 @@ def rfq_text(case, style=None):
     if not amount.is_finite() or amount <= 0:
         raise ServiceError('INVALID_CONDITIONS', '요청 수량을 확인해 주세요.', 422)
     lines = ['안녕하세요. 아래 조건의 공급 가능 여부와 견적을 요청드립니다.', '',
-             '품목: ' + item, '요청 수량: ' + format(amount, 'f') + ' ' + str(unit)]
+             '품목: ' + item, '요청 수량: ' + format(amount.normalize(), 'f') + ' ' + str(unit)]
     if case.get('specification'):
         lines.append('요청 규격: ' + str(case['specification']))
     if case.get('due_date'):
