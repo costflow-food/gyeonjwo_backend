@@ -66,7 +66,7 @@ class MailManagementService:
                         initial = self.repo.mail(owner, case['initial_mail_id'])
                         candidates.append(IntakeCandidate(case_id=case['id'],
                             title=case.get('requester_name') or initial['subject'] or initial['sender'],
-                            status=case['status'], item_name=case.get('item_name') or case.get('intake_item_name'),
+                            status=case['status'], item_name=case.get('item_name'),
                             reply_evidence='답장 헤더가 기존 발송 기록을 참조합니다.'))
                 attachments = row.get('attachments_jsonb') or []
                 if not isinstance(attachments, list):
