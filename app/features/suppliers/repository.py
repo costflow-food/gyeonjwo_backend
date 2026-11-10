@@ -23,14 +23,12 @@ def evidence(value):
 
 
 def decimal_text(value):
-    """DB numeric을 소수 끝의 0 없이 문자열로 바꾼다('5200.000000' → '5200', '1234.50' → '1234.5')."""
     if value is None:
         return None
     number = Decimal(str(value))
     if not number.is_finite():
         raise ValueError('Invalid price or quantity')
-    text = format(number.normalize(), 'f')
-    return '0' if text == '-0' else text
+    return format(number, 'f')
 
 
 def certifications(values):
