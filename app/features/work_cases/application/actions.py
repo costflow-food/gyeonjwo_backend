@@ -2,13 +2,14 @@
 import hashlib
 import json
 from app.core.errors import ServiceError
+from app.core.idempotency import valid_idempotency_key
 from app.core.request_context import current_request_id
 from app.api.responses import Envelope
 from app.features.work_cases.domain.actions import DeletedCase, StartedCase
 
 
 def validate_action_key(key):
-    if not isinstance(key, str) or not 1 <= len(key) <= 200 or key.strip() != key or any(ord(c) < 32 for c in key):
+    if not valid_idempotency_key(key):
         raise ServiceError('IDEMPOTENCY_KEY_REQUIRED', '유효한 Idempotency-Key가 필요합니다.', 400, retryable=False)
 
 
