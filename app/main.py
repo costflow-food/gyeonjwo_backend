@@ -1,4 +1,5 @@
 """Application assembly. Feature endpoints live under app/features/*/api."""
+import asyncio
 import logging
 import math
 import threading
@@ -13,7 +14,6 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.responses import ErrorEnvelope, api_error, service_error_response
 from app.core.config import get_settings
 from app.core.request_context import new_request_id
-from app.shared.infrastructure.db.client import make_server_client
 from app.shared.infrastructure.db.contracts import OwnershipLost, WorkNotFound
 from app.core.errors import ServiceError
 from app.features.mail.infrastructure.gmail import verify_push
@@ -34,42 +34,13 @@ from app.features.work_cases.api.quotes import router as quotes_router
 from app.features.work_cases.api.review_card import router as review_card_router
 from app.features.mail_management.api.router import router as mail_management_router
 from app.features.system.application.diagnostics import require_startup_configuration
+from app.features.system.application.workers import (
+    create_missing_rfq_workers, retry_unavailable_workers, start_graph_worker)
 
 logger = logging.getLogger('gyeonjwo')
 RATE_WINDOW_SECONDS = 60
 RATE_LIMIT_PER_WINDOW = 120
 RATE_LIMIT_EXEMPT_PATHS = frozenset({'/api/v1/webhooks/gmail'})
-
-def start_metadata_worker(settings, mailbox_service):
-    """보낸 RFQ의 메일 헤더를 기록하는 워커를 만든다. 스키마가 없으면 경고만 남기고 None을 돌려준다."""
-    from app.features.work_cases.infrastructure.rfq_repository import RfqRepository
-    from app.features.work_cases.application.rfq_metadata_worker import RfqMetadataWorker
-    repo = RfqRepository(make_server_client(settings))
-    try:
-        repo.require_schema()
-    except Exception:
-        logger.warning('rfq metadata worker unavailable code=SCHEMA_REQUIRED; API remains available')
-        return None
-    return RfqMetadataWorker(repo, mailbox_service, repo.metadata_owners)
-
-
-def start_workflow_worker(settings, mailbox_service):
-    """RFQ 준비·발송 워커를 만든다. 발송 여부는 사용자별 발송 설정이 정한다. 스키마가 없으면 경고만 남기고 None."""
-    from app.features.work_cases.infrastructure.rfq_delivery_repository import RfqDeliveryRepository
-    from app.features.work_cases.application.rfq_preparation import RfqPreparation
-    from app.features.work_cases.application.rfq_delivery import RfqDelivery
-    from app.features.work_cases.application.rfq_workflow_worker import RfqWorkflowWorker
-    from app.shared.infrastructure.llm import JsonAgent
-    repo = RfqDeliveryRepository(make_server_client(settings))
-    try:
-        repo.require_schema()
-        repo.require_http_schema()
-    except Exception:
-        logger.warning('rfq workflow worker unavailable code=SCHEMA_REQUIRED; API remains available')
-        return None
-    return RfqWorkflowWorker(repo, RfqPreparation(repo, JsonAgent(settings), settings.llm_model),
-                             RfqDelivery(repo, mailbox_service), repo.metadata_owners)
-
 
 async def prime_work_case_reads(state):
     service = getattr(state, 'work_case_list_service', None)
@@ -99,9 +70,7 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     @asynccontextmanager
     async def lifespan(app):
         connected_worker = None
-        extraction_worker = None
-        rfq_worker = None
-        rfq_workflow = None
+        retry_task = None
         # Workers start by default; a missing secret only keeps that worker off (names were logged at startup).
         try:
             settings.require_google_connect()
@@ -113,53 +82,28 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
         except RuntimeError:
             logger.warning('mailbox worker unavailable code=CONFIGURATION_REQUIRED; API remains available')
         try:
-            if connected_worker is not None:
-                rfq_worker = start_metadata_worker(settings, app.state.mailbox_service)
-                app.state.rfq_metadata_worker = rfq_worker
-                rfq_workflow = start_workflow_worker(settings, app.state.mailbox_service)
-                app.state.rfq_workflow_worker = rfq_workflow
-            # Graph readiness is optional for receiving mail and serving APIs.
-            # No feature toggle: attempt the existing START contract each boot.
-            from app.features.work_cases.infrastructure.graph_repository import runtime_repository
-            from app.features.work_cases.application.graph_worker import GraphWorker
-            from app.features.work_cases.application.start_readiness import configuration_readiness, agent_readiness
-            try:
-                configuration_readiness(settings).require()
-                agent_readiness().require()
-                repo = runtime_repository(make_server_client(settings), settings)
-                if not repo.available():
-                    raise RuntimeError('Graph START contract unavailable')
-                if app.state.mailbox_service is None:
-                    app.state.mailbox_service = make_mailbox_service(settings)
-                extraction_worker = GraphWorker(settings, repo, app.state.mailbox_service)
-                extraction_worker.start()
-                app.state.extraction_worker = extraction_worker
-                app.state.graph_startup_code = None
-            except Exception:
-                if extraction_worker is not None:
-                    try:
-                        extraction_worker.close()
-                    except Exception:
-                        logger.warning('graph cleanup failed code=GRAPH_CLEANUP_FAILED')
-                extraction_worker = None
-                app.state.extraction_worker = None
-                app.state.graph_startup_code = 'GRAPH_RUNTIME_UNAVAILABLE'
-                logger.warning('graph unavailable code=GRAPH_RUNTIME_UNAVAILABLE; mail/API remain available')
+            rfq_workers = create_missing_rfq_workers(app.state, settings)
+            start_graph_worker(app.state, settings)
             await prime_work_case_reads(app.state)
             # Independent mail/metadata lifecycles; sender remains separately gated.
-            for prepared_worker in (connected_worker, rfq_worker, rfq_workflow):
+            for prepared_worker in (connected_worker, *rfq_workers):
                 if prepared_worker is not None:
                     prepared_worker.start()
+            # 부팅 순간 DB 계약이 어긋나 있었어도, 고쳐지면 재배포 없이 워커가 올라온다.
+            retry_task = asyncio.create_task(retry_unavailable_workers(app.state, settings))
             yield
         finally:
-            if rfq_workflow:
-                rfq_workflow.close()
-            if rfq_worker:
-                rfq_worker.close()
-            if connected_worker:
-                connected_worker.close()
-            if extraction_worker:
-                extraction_worker.close()
+            if retry_task is not None:
+                retry_task.cancel()
+                try:
+                    await retry_task
+                except asyncio.CancelledError:
+                    pass
+            # 재시도로 나중에 뜬 워커도 닫히도록 state에서 읽는다.
+            for name in ('rfq_workflow_worker', 'rfq_metadata_worker', 'connected_mailbox_worker', 'extraction_worker'):
+                worker = getattr(app.state, name, None)
+                if worker:
+                    worker.close()
 
     # Explicitly override FastAPI's default HTTPValidationError schema: runtime uses ErrorEnvelope.
     common_errors = {status: {'model': ErrorEnvelope} for status in
