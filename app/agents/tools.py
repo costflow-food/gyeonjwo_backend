@@ -807,33 +807,34 @@ def _record_supplier_issue(store: QuoteStore, context: RunContext, check: _Sourc
         pass
 
 
+_NAME_SPACES = re.compile(r'[\s\u00a0\u3000\u200b\ufeff]+')   # DB item_name_norm과 같은 공백 종류
+
+
 def _item_key(text) -> str:
-    """등록 품목 대조용 품목명: 앞뒤 공백을 빼고 연속 공백을 한 칸으로 줄인 뒤 소문자로 ('냉동  딸기' → '냉동 딸기').
-    DB(store_case_graph_quote·kan109_resolve_item_key)와 같은 기준이다. 띄어쓰기가 다르면 다른 품목으로 보는데,
-    더 넓게 연결하면 DB가 QUOTE_ITEM_IDENTITY_MISMATCH로 저장을 거부해 실행이 실패로 끝난다."""
-    return ' '.join(str(text or '').split()).lower()
+    """등록 품목 대조용 품목명: 공백을 모두 빼고 소문자로 ('냉동 망고' → '냉동망고').
+    DB internal.item_name_norm(KAN-192)과 같은 기준이다. 업무 키가 없을 때(최초 추출)만 쓴다."""
+    return _NAME_SPACES.sub('', str(text or '')).lower()
 
 
 def _registered_item(items: list[dict], current: dict, case: dict) -> dict | None:
-    """이번 메일의 품목과 같은 그 업체의 등록 품목. _item_key 기준으로 품목명이 같을 때 같은 품목으로 보고,
-    여럿이면 규격으로 좁힌다. 하나로 정해질 때만 돌려준다(애매하면 연결하지 않는다).
-    이름이 서로 포함되는 정도('냉동딸기'와 '냉동딸기 (IQF)')로는 연결하지 않는다. DB가 같은 품목으로 보지 않아 저장이 거부된다.
-    업무에 이미 품목명·품목 키가 있으면 DB가 그것과도 대조하므로(QUOTE_ITEM_IDENTITY_MISMATCH·CASE_ITEM_KEY_MISMATCH),
-    업무 품목명이 이번 메일 품목명과 다르거나 업무 키가 등록 품목 키와 다르면 연결하지 않는다."""
-    name = _item_key(current.get('item_name', {}).get('value'))
-    if not name or (case.get('item_name') and _item_key(case['item_name']) != name):
-        return None
-    found = [item for item in items if _item_key(item.get('item_name')) == name]
+    """이번 메일의 품목과 같은 그 업체의 등록 품목. 하나로 정해질 때만 돌려준다(애매하면 연결하지 않는다).
+    업무에 품목 키가 있으면 같은 키인 등록 품목만 본다. DB(KAN-190)가 같은 품목을 키로만 판정하므로 이름은 비교하지 않는다.
+    업무 키가 없으면(최초 추출) _item_key 기준으로 품목명이 같을 때만 본다.
+    이름이 서로 포함되는 정도('냉동딸기'와 '냉동딸기 (IQF)')로는 연결하지 않는다.
+    후보가 여럿이면 규격으로 좁힌다."""
+    key = case.get('standardized_item_key')
+    if key:
+        found = [item for item in items if item.get('standardized_item_key') == key]
+    else:
+        name = _item_key(current.get('item_name', {}).get('value'))
+        if not name:
+            return None
+        found = [item for item in items if _item_key(item.get('item_name')) == name]
     if len(found) > 1:
-        wanted = name + _letters(current.get('specification', {}).get('value'))
+        wanted = _letters(current.get('item_name', {}).get('value')) + _letters(current.get('specification', {}).get('value'))
         found = [item for item in found if _letters(item.get('specification')) and
                  _letters(item.get('specification')) in wanted] or found
-    if len(found) != 1:
-        return None
-    # 업무 키는 BE select에 따라 context에 없을 수 있다. 들어온 경우에만 대조한다
-    if case.get('standardized_item_key') and found[0].get('standardized_item_key') != case['standardized_item_key']:
-        return None
-    return found[0]
+    return found[0] if len(found) == 1 else None
 
 
 def _case_conditions(case: dict, current: dict, item: dict | None, initial_mails: set) -> dict | None:
