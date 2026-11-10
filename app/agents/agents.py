@@ -1218,11 +1218,6 @@ _VERIFY_FEEDBACK = ('자동 검증에서 아래 문제가 나왔다. 근거 원�
 _VERIFY_UNRESOLVED = '자동 검증에서 확인이 필요한 항목이 남았습니다'
 
 
-def _plain(text: str) -> str:
-    """원문 대조용 정규화: 호환 문자 통일(NFKC)과 공백 하나로."""
-    return ' '.join(unicodedata.normalize('NFKC', text).split())
-
-
 def _strings(value) -> list[str]:
     """JSON 값 안의 모든 문자열."""
     if isinstance(value, str):
@@ -1259,14 +1254,23 @@ def verify_packet(role: AgentRole, messages: list, answer: dict | None = None, p
 
 
 def grounded_issues(packet: dict, issues: list[VerifyIssue]) -> tuple[list[VerifyIssue], list[VerifyIssue]]:
-    """근거 구절이 입력이나 도구 결과에 있는 지적과 없는 지적. 도구 인자·최종 답은 원문이 아니라 대조하지 않는다."""
-    source = '\n'.join(_plain(text) for text in
-                       _strings(packet['role_input']) + [t for call in packet['tool_calls'] for t in _strings(call['result'])])
+    """근거 구절이 입력이나 도구 결과에 있는 지적과 없는 지적. 도구 인자·최종 답은 원문이 아니라 대조하지 않는다.
+    원문은 메일 문장 같은 값 글자와, 도구 결과 JSON 조각(②~⑤의 근거는 대개 '"quantity": "1000"' 같은 조각이다)이다.
+    공백은 무시하고, ';'·줄바꿈·말줄임으로 이은 여러 구절은 하나하나 원문에 있어야 한다."""
+    parts = [packet['role_input'], *(call['result'] for call in packet['tool_calls'])]
+    source = '\x00'.join(_squashed(text) for part in parts
+                         for text in [*_strings(part), json.dumps(part, ensure_ascii=False)])
     kept, dropped = [], []
     for issue in issues:
-        quote = _plain(issue.evidence_quote)
-        (kept if quote and quote in source else dropped).append(issue)
+        pieces = [_squashed(piece) for piece in re.split(r'[;\n…]|\.\.\.', issue.evidence_quote)]
+        pieces = [piece for piece in pieces if piece]
+        (kept if pieces and all(piece in source for piece in pieces) else dropped).append(issue)
     return kept, dropped
+
+
+def _squashed(text: str) -> str:
+    """근거 대조용 정규화: 호환 문자 통일(NFKC)과 공백 제거 (JSON 조각의 띄어쓰기 차이를 없앤다)."""
+    return ''.join(unicodedata.normalize('NFKC', text).split())
 
 
 @traceable(name='verify', run_type='chain', process_inputs=lambda inputs: {k: v for k, v in inputs.items() if k != 'model'})

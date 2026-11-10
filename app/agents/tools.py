@@ -1158,6 +1158,27 @@ def _key(text) -> str:
     return re.sub(r'\s+', '', str(text)).casefold()
 
 
+# 인증의 우리말 공식 이름 → 영문 약칭 (대조 키). 같은 인증으로 본다
+_CERT_ALIASES = {'식품안전관리인증기준': 'haccp', '식품안전관리인증': 'haccp', '안전관리인증기준': 'haccp', '해썹': 'haccp'}
+
+
+def _cert_key(name) -> str:
+    """필수 인증 이름 하나의 대조 키: 공백·대소문자를 무시하고, 우리말 공식 이름은 약칭으로."""
+    key = _key(name)
+    return _CERT_ALIASES.get(key, key)
+
+
+def _cert_keys(names) -> set[str]:
+    """보유 인증 표기들의 대조 키. 쉼표·괄호 등으로 나눈 덩어리 전체와 그 안의 띄어 쓴 낱말을 모두 키로 둔다
+    ('식품안전관리인증(HACCP), ISO 22000' → {'haccp', 'iso22000', 'iso', '22000'})."""
+    keys = set()
+    for name in names:
+        for chunk in re.split(r'[,/·()（）\[\]]+', str(name)):
+            if chunk.strip():
+                keys |= {_key(chunk), *(_key(word) for word in chunk.split())}
+    return {_CERT_ALIASES.get(key, key) for key in keys}
+
+
 def _required_names(conditions) -> list[str]:
     """mandatory_conditions_jsonb의 인증 이름. ["HACCP"], [{"condition": "HACCP"}], {"certifications": ["HACCP"]}."""
     if isinstance(conditions, dict):
@@ -1194,9 +1215,9 @@ def _required_checks(case: dict, item: dict, web: bool = False) -> list[dict]:
                                                                                item.get('specification')), ref))
     certifications = item.get('certifications_jsonb')
     unconfirmed = web or certifications is None
-    owned = set() if unconfirmed else {_key(name) for name in certifications}
+    owned = set() if unconfirmed else _cert_keys(certifications)
     for name in _required_names(case.get('mandatory_conditions')):
-        state = 'UNKNOWN' if unconfirmed else 'PASS' if _key(name) in owned else 'FAIL'
+        state = 'UNKNOWN' if unconfirmed else 'PASS' if _cert_key(name) in owned else 'FAIL'
         checks.append(_check(name, True, state, ref))
     # 수량·납기는 업체 쪽에 비교할 값이 없어 판정하지 않는다. RFQ 고정 질문으로 묻는다
     return checks
@@ -2060,8 +2081,8 @@ def _supplier_comparison(case: dict, quote_id: str, record: QuoteVersionRecord, 
     certifications = _required_names(case.get('mandatory_conditions'))
     if certifications and stated('certifications') is None:
         missing.append('certifications')
-    owned = {_key(name) for name in re.split(r'[,/·\s]+', stated('certifications') or '') if name}
-    requirements += [_requirement(name, 'certifications', name, stated('certifications'), _key(name) in owned)
+    owned = _cert_keys([stated('certifications') or ''])
+    requirements += [_requirement(name, 'certifications', name, stated('certifications'), _cert_key(name) in owned)
                      for name in certifications if stated('certifications') is not None]
     if record.available_quantity is None:
         missing.append('available_quantity')
