@@ -1305,11 +1305,12 @@ def search_summary(result: dict, item_name: str, drafted: list[str] | None = Non
 
 
 def candidate_summary(checklist: list[dict]) -> str:
-    """후보 한 곳의 사유 한 문장. 필수 조건 중 확인된 것과 견적으로 확인할 것을 나눈다."""
+    """후보 한 곳의 사유 개조식 한 줄(명사형 종결). 필수 조건 중 확인된 것과 견적으로 확인할 것을 나눈다."""
     passed = [c['condition'] for c in checklist if c['required'] and c['state'] == 'PASS']
     unknown = [c['condition'] for c in checklist if c['required'] and c['state'] == 'UNKNOWN']
-    text = f'필수 조건 {", ".join(passed)} 확인됨. ' if passed else ''
-    return text + (f'{", ".join(unknown)}은(는) 견적 회신으로 확인합니다.' if unknown else '필수 조건을 모두 확인했습니다.')
+    parts = ([f'필수 조건 {"·".join(passed)} 충족'] if passed else []) + \
+            ([f'{"·".join(unknown)} 견적 회신으로 확인 필요'] if unknown else [])
+    return ', '.join(parts) or '필수 조건 모두 충족'
 
 
 SEARCH_ITEMS_LIMIT = 30              # 품목 검색 결과 상한. 넘으면 truncated로 알리고 검색어를 좁히게 한다
