@@ -12,7 +12,7 @@ from app.features.work_cases.domain.replies import reply_summary
 from app.features.work_cases.infrastructure.candidate_repository import CandidateRepository
 from time import monotonic
 
-CASE_COLUMNS = 'id,initial_mail_id,created_at,status,processing_step,input_revision,archived_at,item_name,decision,current_batch_id'
+CASE_COLUMNS = 'id,initial_mail_id,created_at,status,processing_step,input_revision,archived_at,item_name,intake_item_name,decision,current_batch_id'
 MAIL_COLUMNS = 'id,subject,sender,sent_or_received_at,attachments_jsonb,supplier_id'
 INITIAL_MAIL_RELATION = 'mail_messages!work_cases_owner_user_id_initial_mail_id_id_fkey'
 SUPPLIER_RELATION = 'suppliers!mail_messages_owner_user_id_supplier_id_fkey'
