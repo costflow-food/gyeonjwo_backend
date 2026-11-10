@@ -118,6 +118,8 @@ def run_graph(*, settings, scope, runner_factory=None, store_factory=GraphStore)
         if output.status == schemas.RunStatus.WAITING_REPLY:
             # Graph output can contain only actual durable drafts from this run.
             ids = [str(value) for value in output.draft_ids]
-            if not ids or len(ids) != len(set(ids)) or any(value not in store.draft_ids for value in ids):
+            # 회신 한 통을 비교에서 빼고 계속 기다리는 결과(skip_wait)만 초안이 없을 수 있다. 회신 검토에서만 허용한다
+            skipped = review and not ids and graph.waits_after_skipped_reply(output)
+            if not skipped and (not ids or len(ids) != len(set(ids)) or any(value not in store.draft_ids for value in ids)):
                 raise ValueError('Unconfirmed graph drafts')
         return output
