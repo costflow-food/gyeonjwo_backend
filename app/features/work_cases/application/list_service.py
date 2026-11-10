@@ -9,6 +9,7 @@ from app.features.work_cases.domain.listing import QueueCounts, WorkCaseList, Wo
 
 from app.features.work_cases.application.case_actions import case_actions
 from app.features.work_cases.application.start_readiness import StartReadiness
+from app.shared.domain.item_names import contains_ignoring_spaces
 
 _PAGE_READS = ThreadPoolExecutor(max_workers=8, thread_name_prefix='case-page-read')
 
@@ -89,7 +90,8 @@ class WorkCaseListService:
                     continue
                 requester = (case.get('registered_requester_name') or case.get('requester_name')) if case['processing_step'] != 'PENDING_START' else None
                 searchable = [mail.get('subject'), mail.get('sender'), mail.get('sender_name'), case.get('item_name'), requester]
-                if query and not any(query in (value or '').casefold() for value in searchable):
+                # 띄어쓰기 무시: '냉동망고'로 검색해도 '냉동 망고' 업무가 나온다(KAN-192 기준)
+                if query and not any(contains_ignoring_spaces(value, query) for value in searchable):
                     continue
                 counts.total += 1
                 if case['status'] in {'Waiting', 'Running', 'Complete'}:
