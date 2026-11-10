@@ -73,7 +73,7 @@ def extract_contacts(html):
 
 
 def collect_homepage_contacts(client, homepage_url):
-    """Visit the homepage only; follow HTTP redirects, never contact-page links."""
+    """Read one public page, following redirects but not links on the page."""
     url = homepage_url
     try:
         for _ in range(4):
@@ -96,6 +96,9 @@ def collect_homepage_contacts(client, homepage_url):
                     url = urljoin(url, target.group(1).strip(' \"\''))
                     continue
                 contacts = extract_contacts(html)
+            # shortcut: many contacts may belong to multiple businesses; require review until ownership can be verified.
+            if len(contacts['phones']) > 5 or len(contacts['emails']) > 5:
+                return {'emails': [], 'phones': [], 'contact_source_url': url, 'contact_status': 'NEEDS_REVIEW'}
             return {**contacts, 'contact_source_url': url,
                     'contact_status': 'FOUND' if any(contacts.values()) else 'NOT_FOUND'}
         raise ValueError('TOO_MANY_REDIRECTS')

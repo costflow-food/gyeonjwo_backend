@@ -1,4 +1,4 @@
-"""Google search -> homepage -> published email and phone. No business inference."""
+"""Google search -> public pages -> published email and phone. No business inference."""
 from datetime import datetime, timezone
 from shutil import which
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
@@ -118,7 +118,11 @@ def search_suppliers(query, limit=10, *, transport=None):
                 if homepage in seen:
                     continue
                 seen.add(homepage)
-                contacts = collect_homepage_contacts(client, homepage)
+                contacts = collect_homepage_contacts(client, destination)
+                if contacts['contact_status'] in {'NOT_FOUND', 'FETCH_FAILED'} and destination != homepage:
+                    homepage_contacts = collect_homepage_contacts(client, homepage)
+                    if homepage_contacts['contact_status'] == 'FOUND' or contacts['contact_status'] == 'FETCH_FAILED':
+                        contacts = homepage_contacts
                 suppliers.append({**result, 'search_result_url': destination, 'homepage_url': homepage, **contacts})
             except (httpx.HTTPError, httpcore.NetworkError, httpcore.TimeoutException, ValueError, OSError):
                 suppliers.append({**result, 'homepage_url': None, 'emails': [], 'phones': [],
