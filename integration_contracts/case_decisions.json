@@ -1,0 +1,26 @@
+{
+  "status": "PROPOSED_RPC_SIGNATURES_PENDING_KAN_133",
+  "lookup_work_case_change_request": {
+    "args": ["p_owner", "p_case", "p_operation", "p_key", "p_hash"],
+    "returns": "NONE, REPLAY with original 200 envelope, or ERROR"
+  },
+  "submit_work_case_change": {
+    "args": ["p_owner", "p_case", "p_operation", "p_body", "p_key", "p_hash", "p_request_id"],
+    "operations": ["DECISION", "ARCHIVE", "RESTORE"],
+    "returns": "ACCEPTED or REPLAY with http_status=200 and response={data:{case_id,...},meta:{request_id}}, or ERROR",
+    "transaction": [
+      "Use service-role only and bind receipts to authenticated owner, operation, case and canonical body hash. Replay before mutable case guards. A conflicting hash or in-flight receipt returns 409.",
+      "Lock the owned case, or return 404 for missing or foreign case. Verify expected_revision before validating the requested plan. For DECISION require an unarchived Complete/REVIEW_READY case, a current card whose input_revision and review_revision match, and no final decision.",
+      "SELECT_PLAN must resolve a VALID plan on that card or return 422 INVALID_PLAN_SELECTION. Read plan fields and total from storage. Persist decision, selected_plan_id and selected_plan_jsonb together.",
+      "HOLD saves decision and note as a human judgment. Do not set processing_step=ON_HOLD for this judgment. Clear any previously selected plan atomically.",
+      "CONFIRM_REVIEW saves the decision and archived_at together with the log. Reuse a selected plan only when its stored input revision, card revision and VALID plan identity all match the current card.",
+      "ARCHIVE permits Waiting, Pending or Complete and checks for conflicting work or outbound leases. RESTORE requires archived_at and clears it without starting a new job or reopening a final judgment.",
+      "Commit the change, workflow log and original response receipt atomically."
+    ]
+  },
+  "verification": [
+    "Check API-14 and active/archived lists before and after each mutation. KAN-134 owns API-14 and KAN-143 owns frontend verification.",
+    "Verify foreign ownership, stale card 409 before invalid plan 422, concurrent same-key replay and changed-body rejection.",
+    "Confirm existing accept-and-delete with replay receipt stays in effect pending agreement on acceptance policy."
+  ]
+}

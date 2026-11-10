@@ -1,0 +1,42 @@
+{
+  "contract_version": 1,
+  "date": "2026-11-05",
+  "api": "API-13 GET /api/v1/work-cases/{case_id}/quotes",
+  "status": "BACKEND_IMPLEMENTED",
+  "auth": "Google-login bearer (require_google_user). Read only: no agent run, no mail, no DB write.",
+  "owner_scope": "work_cases, quote_versions, suppliers and the initial mail are all filtered by the caller's owner_user_id. A missing or another user's case returns the same 404.",
+  "response": {
+    "envelope": "{data: {case_id, items[]}, meta: {request_id}}. case_id is kept for symmetry with API-14.",
+    "item": [
+      "quote_id", "version_no", "supplier_id", "supplier_name", "is_incumbent", "source_mail_id", "extraction_status",
+      "unit_price", "unit", "currency", "tax_basis", "available_quantity", "moq{quantity, unit} or null",
+      "effective_from", "valid_until",
+      "costs[]{cost_type, amount, included_in_price, source_text}",
+      "checks[]{field, state, value}", "item_notes[] (strings)",
+      "evidence[]{field, raw_value, mail_id, location}"
+    ],
+    "numbers": "unit_price, available_quantity, moq.quantity and costs[].amount are Decimal strings without trailing zeros or exponent ('5500', '1000.5'); null when not stated.",
+    "conversion": [
+      "checks_jsonb {field: {state, value}} -> checks[]; list values are joined with ', '. tax_basis is returned top-level and not repeated in checks.",
+      "cost_terms_jsonb.items -> costs[]; basis, payer and evidence location are not exposed.",
+      "item_notes_jsonb.items[].text -> item_notes[].",
+      "evidence_jsonb {field: {raw_value, mail_id, location}} -> evidence[]; entries without mail_id are omitted.",
+      "checks and evidence follow the extractor field order (app.agents.tools.QUOTE_FIELDS); unknown fields follow by name."
+    ],
+    "supplier_name": "Current suppliers.name; '이름 미확인 업체' when the supplier row is missing.",
+    "is_incumbent": "Supplier linked to the case's initial (price-increase) mail; falls back to the supplier whose quote came from the initial mail."
+  },
+  "selection": "One item per supplier: the highest version_no. Older versions are not returned (history view not agreed).",
+  "ordering": "Incumbent first, then supplier_name, then supplier_id.",
+  "paging": "None. At most 100 suppliers and 500 stored quote rows per case; exceeding either returns 503 instead of a truncated list.",
+  "empty": "A case without quotes returns 200 with items: [].",
+  "errors": {
+    "RESOURCE_NOT_FOUND": "404: case missing or outside the owner scope",
+    "PROCESSING_UNAVAILABLE": "503: storage unavailable, stored JSON shape invalid, or the row/supplier caps exceeded",
+    "AUTH_REQUIRED": "401: missing or invalid login token"
+  },
+  "open_with_frontend": [
+    "Whether older quote versions are needed (e.g. an all_versions query option).",
+    "available_quantity_unit (pricing_terms_jsonb.available_quantity_unit) is not in the agreed spec; add only after the spec changes."
+  ]
+}

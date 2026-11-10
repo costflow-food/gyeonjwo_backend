@@ -21,8 +21,15 @@ class RequestIdentity:
     body_hash: str
 
 
+def valid_idempotency_key(key: object) -> bool:
+    """Only nonblank, printable keys with the same maximum across mutation APIs."""
+    return (isinstance(key, str) and 1 <= len(key) <= 200
+            and key.strip() == key
+            and not any(ord(char) < 32 or ord(char) == 127 for char in key))
+
+
 def request_identity(user_id: str, method: str, path: str, key: str | None, body: Any) -> RequestIdentity:
-    if not key or not key.strip():
+    if not valid_idempotency_key(key):
         raise ServiceError('INVALID_REQUEST', 'Idempotency-Key가 필요합니다.', 422,
                            fields=['header.Idempotency-Key'], retryable=False)
     if not user_id or not path.startswith('/') or method.upper() not in {'POST', 'PUT', 'PATCH', 'DELETE'}:

@@ -1,0 +1,250 @@
+{
+  "contract_version": 1,
+  "date": "2026-11-03",
+  "status": "BACKEND_START_GRAPH_AND_CANDIDATE_SELECTION_IMPLEMENTED_NOT_DEPLOYED",
+  "source": {
+    "design_file": "AGENTS_DESIGN.md supplied by user (feature/agents e403cab, 2026-11-02); public code takes precedence",
+    "base_branch": "dev_1.0",
+    "base_commit": "cdcd737",
+    "agent_sources_modified": false
+  },
+  "scope": "START graph and per-case candidate selection; later REPLY/PLAN stores/worker now implemented behind separate disabled AGENT_GRAPH_REVIEW_ENABLED flag. See graph_review.json for transaction/deployment boundary.",
+  "entrypoint": {
+    "backend": "app.features.work_cases.application.graph_boundary.run_graph",
+    "public": "app.agents.graph.build_graph(run_agent, current_revision, latest_quotes) and run_case(RunCaseInput(start_from=START))",
+    "runner": "AgentRunner with per-role models/reasoning preserved, store=False, provider POST retries disabled. Context-aware store proxy, tracing disabled.",
+    "result": "Original RunCaseOutput: status, processing_step, input_revision, draft_ids, card_id, unresolved, steps. START rejects COMPLETE/card_id or unconfirmed/duplicate draft IDs."
+  },
+  "settings": {
+    "AGENT_GRAPH_ENABLED": false,
+    "AGENT_GRAPH_TIMEOUT_SECONDS": 180,
+    "AGENT_GRAPH_REQUEST_TIMEOUT_SECONDS": 45,
+    "existing_prerequisites": [
+      "AGENT_EXTRACTION_ENABLED=true",
+      "AGENT_EXTRACTION_WORKER_ENABLED=true",
+      "LLM_*"
+    ],
+    "mode_rules": [
+      "Default false keeps legacy direct extraction and original queue/functions untouched. No .env is modified automatically.",
+      "Graph true selects GraphRuntimeRepository and GraphWorker; AGENT_STOP_AFTER_EXTRACTION is legacy-only and ignored in graph mode.",
+      "Drain legacy extraction jobs before enabling. Existing accepted requests replay their first receipt, regardless of mode. Never silently reinterpret a legacy queued job as a graph.",
+      "REPLY/PLAN supported only when AGENT_GRAPH_REVIEW_ENABLED=true and reviewed graph_review.json health capabilities are ready; default false. Sending remains separate opt-in."
+    ]
+  },
+  "stores": {
+    "CaseStore/QuoteStore/AgentRunStore": "GraphStore extends existing scoped AgentStore. Full quote RPC persists real quote IDs, metadata/fields, requester/item linkage without creating suppliers.",
+    "CandidateStore": "owner-scoped supplier_items partial-name search (five literal keywords, 31 rows), condition/evidence/supplier reads, incumbent source-mail only, actual purchase history separate from quote prices.",
+    "MailDraftStore": "Real immutable RFQ drafts are staged privately before user selection. Graph completion never publishes or dispatches them. API-12 atomically publishes only selected suppliers.",
+    "DocumentStore": "Gmail common attachment function, nodes.preprocess parsing, normalized_jsonb.documents per MIME part, no binary persistence. read_mail_part exposes stored text pages; NO_TEXT/FAILED/UNSUPPORTED preserved.",
+    "not_yet_connected": [
+      "Review RPC deployment and actual provider/DB end-to-end validation"
+    ]
+  },
+  "rpc_required": {
+    "case_graph_health": {
+      "args": {},
+      "returns": {
+        "contract_version": 1,
+        "ready": true,
+        "legacy_queue_drained": true,
+        "capabilities": [
+          "START",
+          "SCOPED_LEASES",
+          "DOCUMENTS",
+          "CANDIDATES",
+          "DRAFTS",
+          "RUNS",
+          "RESULTS",
+          "LEGACY_RFQ_GUARD",
+          "CAUTION_GUARD",
+          "CANDIDATE_SETS",
+          "USER_SELECTION_GATE",
+          "EXTRACTED_CONTINUATIONS"
+        ]
+      },
+      "rule": "Read only, service-only; ready only when all signatures/grants/guards below are deployed and verified; no automatic SQL installation."
+    },
+    "submit_case_graph_start": {
+      "args": {
+        "p_owner": "uuid",
+        "p_case": "uuid",
+        "p_revision": "int",
+        "p_key": "text",
+        "p_hash": "text",
+        "p_request_id": "text"
+      },
+      "transaction": [
+        "Use same POST canonical /api/v1/work-cases/{id}/start idempotency namespace and expected_revision-only normalized body hash as existing start. Check replay before current state.",
+        "Lock owned Waiting/PENDING_START case, reject already-started/archived/accepted/revision mismatch.",
+        "Persist Running/EXTRACTING, new batch, execution_mode=GRAPH_START_V1, start_from=START, initial mail ID, root execution/audit, ONE durable graph job and complete_api_request response in SAME connection/transaction.",
+        "In the same transaction snapshot the company policy into work_cases.policy_jsonb = {max_increase_rate:\"0.04\", incumbent_premium_rate:\"0.04\", allow_split:true, max_suppliers:2} (constants in this function until a company policy table exists; see case_conditions.json). Keep an existing non-empty policy_jsonb unchanged.",
+        "Store entire immutable HTTP 202 {data:{case_id,input_revision,batch_id,progress_url},meta:{request_id}} before returning ACCEPTED; replay returns same body/status."
+      ]
+    },
+    "claim_case_graph_run": {
+      "args": {
+        "p_start_from": "START"
+      },
+      "returns": "null or {job_id,claim_token,owner_user_id,case_id,input_revision,batch_id,mail_ids:[initial_mail_uuid],execution_mode:GRAPH_START_V1,start_from:START}",
+      "rule": "Atomic claim with lease and exclusive token; isolated from old claim_case_extraction. Old workers must not claim graph jobs and graph workers must not claim legacy jobs."
+    },
+    "heartbeat_case_graph_run": {
+      "args": {
+        "p_job": "uuid",
+        "p_token": "uuid"
+      },
+      "returns": "true only for live owned job/batch/revision; renew lease for long graph runs"
+    },
+    "recover_case_graph_runs": {
+      "args": {},
+      "rule": "Expired graph runs -> interrupted/failed or stale without rewriting newer case. No automatic mail retransmission or rerun; unfinished staged drafts remain unsendable."
+    },
+    "fail_case_graph_run": {
+      "args": {
+        "p_job": "uuid",
+        "p_token": "uuid",
+        "p_code": "fixed safe code"
+      },
+      "rule": "Idempotent conditional failure for this live job only; old batch/revision never changes newer work. Lost acknowledgement after successful completion must be a no-op, not downgrade success. Codes GRAPH_FAILED, GRAPH_TIME_LIMIT, WORKER_INTERRUPTED, INPUT_REVISION_CHANGED; no raw exception/mail. Close/invalidate still-running child role records when their token expires; retain immutable completed snapshots and staged drafts as unsendable."
+    },
+    "store_case_graph_quote": {
+      "args": {
+        "p_job": "uuid",
+        "p_token": "uuid",
+        "p_revision": "int",
+        "p_record": "full QuoteVersionRecord JSONB"
+      },
+      "returns": "{kind:STORED,quote_id:uuid,record:full stored QuoteVersionRecord} or {kind:STALE}",
+      "rule": "Same immutable quote/evidence/NUMERIC/owner contract as existing store_case_agent_quote, but GRAPH token guard. Atomic quote+price_history+mail normalized fields+case conditions/requester+audit; preserve documents and unrelated JSON keys. Do not increment input_revision solely for extraction. Never create suppliers. record.supplier_item_id (nullable) must be an owned supplier_items row of record.supplier_id; store it in quote_versions.supplier_item_id and price_history. record.case_conditions may contain item_name, specification, standardized_item_key, quantity and unit: fill only NULL/empty work_cases fields. standardized_item_key must equal the linked supplier_item key. quantity/unit come only from the INITIAL (incumbent increase notice) mail available_quantity. When standardized_item_key is set, copy the owner company_items mandatory_conditions_jsonb into empty work_cases.mandatory_conditions_jsonb and its specification into empty work_cases.specification. See case_conditions.json."
+    },
+    "begin_case_graph_agent_run": {
+      "args": {
+        "p_job": "uuid",
+        "p_token": "uuid",
+        "p_revision": "int",
+        "p_role": "INFO_EXTRACTOR|CANDIDATE|INFO_PRIORITY|RESPONSE_PLAN|COUNTER_OFFER",
+        "p_input": "role input JSONB",
+        "p_model": "text",
+        "p_prompt_version": "text"
+      },
+      "returns": "{agent_run_id:new UUID,review_batch_id:current batch UUID}",
+      "rule": "Atomic current job/owner/revision guard, distinct role execution row each call. GRAPH_START_V1 jobs accept INFO_EXTRACTOR/CANDIDATE; GRAPH_REVIEW_V1 jobs accept INFO_EXTRACTOR/INFO_PRIORITY/RESPONSE_PLAN/COUNTER_OFFER. Set processing_step by role: INFO_EXTRACTOR -> EXTRACTING, CANDIDATE -> SELECTING_CANDIDATES, INFO_PRIORITY/RESPONSE_PLAN/COUNTER_OFFER -> GENERATING_PLANS. Persist backend_execution_mode (GRAPH_START_V1 or GRAPH_REVIEW_V1) in input_snapshot_jsonb as backend-owned metadata, alongside role input. Append safe role progress log. No raw tool output logging."
+    },
+    "finish_case_graph_agent_run": {
+      "args": {
+        "p_job": "uuid",
+        "p_token": "uuid",
+        "p_revision": "int",
+        "p_run": "uuid",
+        "p_status": "COMPLETED|FAILED",
+        "p_output": "validated role output or null",
+        "p_error": "fixed code or null"
+      },
+      "returns": "true",
+      "rule": "Same owner/case/batch/run, immutable terminal record. Validated outputs are private agent_runs data. Failed partial_tool_calls/prompts/mail are discarded by backend; safe workflow logs only IDs/role/status/codes. Candidate caution is retained for completion policy checks. Role completion never sets work_cases Pending/Complete; whole-graph completion owns the business transition."
+    },
+    "save_case_graph_document": {
+      "args": {
+        "p_job": "uuid",
+        "p_token": "uuid",
+        "p_revision": "int",
+        "p_mail": "uuid",
+        "p_part": "text",
+        "p_document": "{status,pages}"
+      },
+      "returns": "{kind:STORED}",
+      "rule": "Verify source mail in owned case/current run, actual MIME part, budget and job lease. JSONB-merge normalized_jsonb.documents[p_part] without overwriting fields/item_notes or other parts. Text only; never binary/base64 or tokens. Do not advance input revision."
+    },
+    "complete_case_graph_run": {
+      "args": {
+        "p_job": "uuid",
+        "p_token": "uuid",
+        "p_revision": "int",
+        "p_batch": "uuid",
+        "p_output": "RunCaseOutput JSONB"
+      },
+      "returns": "{kind:STORED,selection_required:true,candidate_set_id:uuid} for WAITING_REPLY, {kind:STORED} for HOLD, or {kind:STALE}",
+      "transaction": [
+        "Lock owner/lease/revision/batch, require completed roles and actual staged draft IDs. START cannot COMPLETE/save a card.",
+        "WAITING_REPLY is a graph stop only: persist Running/CANDIDATES awaiting human selection. Bind candidate_set_id to completed CANDIDATE snapshot and selection_required=true. Do not expose any staged draft, wake sender, or claim mail.",
+        "ON_HOLD -> Pending/ON_HOLD with safe reason; partial drafts remain private. FAILED/STALE never complete or modify newer input.",
+        "Commit graph job/output/log together; API-12 independently publishes selected-only drafts under current policy. See candidate_selection.json."
+      ]
+    },
+    "stage_case_graph_draft": {
+      "args": {
+        "p_job": "uuid",
+        "p_token": "uuid",
+        "p_revision": "int",
+        "p_record": "MailDraftRecord JSONB"
+      },
+      "returns": "{kind:STAGED,draft_id:uuid,record:exact original MailDraftRecord} or {kind:STALE}",
+      "rule": "Owner/lease/batch/revision fenced, idempotent private draft staging. Wrap internal style with producer=graph-staged-rfq-v1 and candidate_selection_required=true; record acknowledgement remains exact original agent record. Invisible to draft APIs/settings and unclaimable by senders until API-12 selects its supplier. No Gmail calls, no automatic publication after graph finish."
+    },
+    "finish_case_graph_candidate_run": {
+      "args": {
+        "p_job": "uuid",
+        "p_token": "uuid",
+        "p_revision": "int",
+        "p_run": "uuid",
+        "p_output": "CandidateOut JSONB",
+        "p_candidate_set": "CandidateSnapshot JSONB"
+      },
+      "returns": true,
+      "rule": "One transaction verifies scope/lease/revision and completes CANDIDATE role with immutable output_jsonb.candidate_set. candidate_set_id equals p_run, review_batch_id/current batch match. All supplier/evidence/draft refs belong to this execution."
+    },
+    "schedule_case_graph_continuations": {
+      "args": {
+        "p_limit": 25
+      },
+      "returns": "integer 0..p_limit",
+      "rule": "Opt-in graph mode only. Idempotently queue new START batch for already-authorized Running extraction-completed CANDIDATES/SELECTING_CANDIDATES cases, same current revision with completed INFO_EXTRACTOR. Exclude any active legacy/graph/candidate/send job or drafts; never Waiting/Confirm/Pending/accepted/archived. Original mail is reread by public START; content-dedup quote save must avoid duplicate versions. Lock scope/revision and queue selection together."
+    }
+  },
+  "cross_host_duplicate_guard": "All updated RFQ workers skip preparation for current-batch graph agent_runs marker but continue normal dispatch. DB must also reject legacy candidate preparation/writes for graph-owned batches, including old hosts without Python guard. Legacy RFQ cases may continue through old preparation. Health LEGACY_RFQ_GUARD attests this; local flag alone is insufficient.",
+  "reply_boundary": "Backend REPLY/PLAN graph adapter and scoped stores are implemented opt-in; required durable scheduling/card commit RPCs remain undeployed. See graph_review.json. Keep review flag false before DB guards are verified.",
+  "verification": {
+    "date": "2026-11-03",
+    "actual_langgraph_with_synthetic_stores": "preprocess -> INFO_EXTRACTOR -> CANDIDATE -> RFQ template/persisted draft -> WAITING_REPLY",
+    "model_provider_calls": 0,
+    "real_gmail_sends": 0,
+    "supabase_writes": 0,
+    "published_rpc_read": "All 12 graph RPC names absent in current Supabase OpenAPI (read only).",
+    "routing_worker_checks": 28,
+    "health_scope_redaction_checks": 14,
+    "end_to_end_production_verified": false,
+    "sql_files_created": false,
+    "agent_sources_changed": false,
+    "test_files_retained": false,
+    "document_and_hold_checks": 5,
+    "http_start_checks": 7,
+    "context_isolation_checks": 1,
+    "syntax_openapi_checked": true,
+    "provider_free_model_configuration_checks": 5,
+    "diagram_review_branch_assertions": 22
+  },
+  "diagram_alignment": {
+    "source": "User-supplied 견줘 에이전트 그래프.html",
+    "tool_limits": {
+      "INFO_EXTRACTOR": 8,
+      "CANDIDATE": 8,
+      "INFO_PRIORITY": 10,
+      "RESPONSE_PLAN": 10,
+      "COUNTER_OFFER": 8
+    },
+    "role_calls_per_run": 6,
+    "unsupported_entry_guard": "START is supported; REPLY/PLAN require GRAPH_REVIEW_V1, AGENT_GRAPH_REVIEW_ENABLED and deployed review storage/queue guards. Unsupported combinations fail closed.",
+    "remaining_connection_gaps": [
+      "Graph-review backend implemented, but guarded RPC deployment/integration validation is still required; see graph_review.json.",
+      "Diagram still needs human candidate selection and explicit approval/dispatch boundary."
+    ],
+    "tool_limit_authority": "feature/agents app/agents/schemas.py TOOL_CALL_LIMITS; verified 2026-11-03. These are the agent-team integration targets. This backend PR neither changes app/agents nor overrides its runtime limits; current base code may differ until the agent PR is merged."
+  },
+  "runtime_policy_override": {
+    "source": "2026-11-04 PR41 review correction; supersedes previous runtime override",
+    "policy": "No temporary AGENT switches and no duplicate backend role lists. Graph START worker is optional: unavailable config/interfaces/DB/startup leaves API and mail receiver running. START follows the public graph through role2; no extraction-only fallback.",
+    "claim": "Only claim_case_graph_run(p_start_from=START). Unified START/REPLY/PLAN claim and review scheduling deferred until DB owner agreement; not called by this runtime.",
+    "steps": "Steps follow the deployed DB work_cases_check5 (2026-11-05) and agent schemas.ProcessingStep. Running graph steps: EXTRACTING (INFO_EXTRACTOR), SELECTING_CANDIDATES (CANDIDATE running), GENERATING_PLANS (INFO_PRIORITY/RESPONSE_PLAN/COUNTER_OFFER). CANDIDATES is the post-graph user-selection wait set by complete_case_graph_run. Terminal: REVIEW_READY/ON_HOLD/FAILED. BUILDING_PLANS and BUILDING_COUNTER_OFFER are not written (DB rejects them).",
+    "deployment": "After DB functions are deployed restart server to attach graph worker; missing graph does not prevent mail/API startup. API START still requires readiness/live worker. /ready reports mail readiness and degraded review separately."
+  }
+}

@@ -1,11 +1,14 @@
 """Local diagnostics report field names only. Never format configuration values/errors."""
+import logging
 from app.features.mailboxes.infrastructure.crypto import TokenCipher
 
+logger = logging.getLogger('gyeonjwo')
+SERVER_FIELDS = ('supabase_url', 'supabase_secret_key')
 CONNECTION_FIELDS = ('supabase_url','supabase_publishable_key','supabase_secret_key',
                      'gmail_client_id','gmail_client_secret','google_token_encryption_key')
 
 
-def configuration_report(settings, *, receiver=False):
+def configuration_report(settings):
     missing = [name.upper() for name in CONNECTION_FIELDS if not getattr(settings,name)]
     invalid = []
     for name, prefix in (('supabase_secret_key', 'sb_secret_'),
@@ -20,13 +23,8 @@ def configuration_report(settings, *, receiver=False):
             TokenCipher(settings.google_token_encryption_key)
         except Exception:
             invalid.append('GOOGLE_TOKEN_ENCRYPTION_KEY')
-    if settings.worker_enabled:
-        invalid.append('WORKER_ENABLED')
-    if receiver:
-        for name in ('llm_base_url','llm_api_key'):
-            if not getattr(settings,name): missing.append(name.upper())
-        if not (settings.llm_classification_model or settings.llm_model):
-            missing.append('LLM_CLASSIFICATION_MODEL_OR_LLM_MODEL')
+    for name in ('llm_base_url','llm_api_key'):
+        if not getattr(settings,name): missing.append(name.upper())
     push_fields = ('gmail_topic', 'gmail_subscription', 'pubsub_audience', 'pubsub_service_account')
     if any(getattr(settings, name) for name in push_fields):
         missing.extend(name.upper() for name in push_fields if not getattr(settings, name))
@@ -35,8 +33,12 @@ def configuration_report(settings, *, receiver=False):
 
 
 def require_startup_configuration(settings):
-    report = configuration_report(settings, receiver=settings.google_mailbox_worker_enabled)
-    fields = sorted(set(report['missing'] + report['invalid']))
-    if fields:
+    """Stop only on malformed values or a missing DB server; other missing secrets disable their workers."""
+    report = configuration_report(settings)
+    fatal = sorted(set(report['invalid'] + [name.upper() for name in SERVER_FIELDS if not getattr(settings, name)]))
+    if fatal:
         # SystemExit avoids Pydantic/SDK exception rendering of configuration values.
-        raise SystemExit(', '.join(sorted(set(fields))))
+        raise SystemExit(', '.join(fatal))
+    if report['missing']:
+        logger.warning('configuration missing=%s; dependent workers stay off, API remains available',
+                       ','.join(sorted(set(report['missing']))))

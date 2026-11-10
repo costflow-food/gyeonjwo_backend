@@ -8,7 +8,6 @@ from app.shared.infrastructure.db.references import ReferenceRepository
 from app.shared.infrastructure.db.storage import SourceStorage, mail_path
 from app.features.review.infrastructure.documents import parse_mail, source_file
 from app.core.errors import ReviewRequired, ServiceError
-from app.features.mail.infrastructure.gmail import GmailClient
 from app.core.leases import LeaseHeartbeat
 from app.shared.infrastructure.llm import JsonAgent
 from app.features.review.application.pipeline import AnalysisPipeline
@@ -20,11 +19,11 @@ PUBLIC_WORK_COLUMNS = ('work_id', 'received_at', 'sender', 'subject', 'classific
 
 
 class Services:
-    def __init__(self, settings, client, agent=None, gmail=None):
+    def __init__(self, settings, client, agent=None):
         self.settings, self.client = settings, client
         self.rpc = RpcRepository(client)
         self.references, self.storage = ReferenceRepository(client), SourceStorage(client)
-        self.agent, self.gmail = agent or JsonAgent(settings), gmail or GmailClient(settings)
+        self.agent = agent or JsonAgent(settings)
         self.analysis_lock = threading.Lock()
         self.pipeline = AnalysisPipeline(settings, self.agent, self.references, self.storage, client)
 

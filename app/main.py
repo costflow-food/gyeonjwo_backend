@@ -3,7 +3,9 @@ import logging
 import math
 import threading
 import time
+import httpx
 from contextlib import asynccontextmanager
+from anyio import move_on_after, to_thread
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,13 +18,21 @@ from app.shared.infrastructure.db.contracts import OwnershipLost, WorkNotFound
 from app.core.errors import ServiceError
 from app.features.mail.infrastructure.gmail import verify_push
 from app.features.review.application.services import Services
-from app.features.mail.application.worker import GmailWorker
 from app.core.http_limits import BodyLimitMiddleware
 from app.features.system.api.router import router as system_router
 from app.features.mail.api.router import router as mail_router
 from app.features.review.api.router import router as review_router
 from app.features.mailboxes.api.router import router as mailbox_router, make_mailbox_service
 from app.features.mailboxes.application.worker import ConnectedMailboxWorker
+from app.features.work_cases.api.router import get_list_service, router as work_cases_router
+from app.features.work_cases.api.revisions import router as work_revisions_router
+from app.features.workflow_logs.router import router as workflow_logs_router
+from app.features.suppliers.router import router as suppliers_router
+from app.features.work_cases.api.mail_drafts import router as mail_drafts_router
+from app.features.work_cases.api.candidates import router as candidates_router
+from app.features.work_cases.api.quotes import router as quotes_router
+from app.features.work_cases.api.review_card import router as review_card_router
+from app.features.mail_management.api.router import router as mail_management_router
 from app.features.system.application.diagnostics import require_startup_configuration
 
 logger = logging.getLogger('gyeonjwo')
@@ -30,50 +40,143 @@ RATE_WINDOW_SECONDS = 60
 RATE_LIMIT_PER_WINDOW = 120
 RATE_LIMIT_EXEMPT_PATHS = frozenset({'/api/v1/webhooks/gmail'})
 
+def start_metadata_worker(settings, mailbox_service):
+    """보낸 RFQ의 메일 헤더를 기록하는 워커를 만든다. 스키마가 없으면 경고만 남기고 None을 돌려준다."""
+    from app.features.work_cases.infrastructure.rfq_repository import RfqRepository
+    from app.features.work_cases.application.rfq_metadata_worker import RfqMetadataWorker
+    repo = RfqRepository(make_server_client(settings))
+    try:
+        repo.require_schema()
+    except Exception:
+        logger.warning('rfq metadata worker unavailable code=SCHEMA_REQUIRED; API remains available')
+        return None
+    return RfqMetadataWorker(repo, mailbox_service, repo.metadata_owners)
+
+
+def start_workflow_worker(settings, mailbox_service):
+    """RFQ 준비·발송 워커를 만든다. 발송 여부는 사용자별 발송 설정이 정한다. 스키마가 없으면 경고만 남기고 None."""
+    from app.features.work_cases.infrastructure.rfq_delivery_repository import RfqDeliveryRepository
+    from app.features.work_cases.application.rfq_preparation import RfqPreparation
+    from app.features.work_cases.application.rfq_delivery import RfqDelivery
+    from app.features.work_cases.application.rfq_workflow_worker import RfqWorkflowWorker
+    from app.shared.infrastructure.llm import JsonAgent
+    repo = RfqDeliveryRepository(make_server_client(settings))
+    try:
+        repo.require_schema()
+        repo.require_http_schema()
+    except Exception:
+        logger.warning('rfq workflow worker unavailable code=SCHEMA_REQUIRED; API remains available')
+        return None
+    return RfqWorkflowWorker(repo, RfqPreparation(repo, JsonAgent(settings), settings.llm_model),
+                             RfqDelivery(repo, mailbox_service), repo.metadata_owners)
+
+
+async def prime_work_case_reads(state):
+    service = getattr(state, 'work_case_list_service', None)
+    if service is None:
+        return
+
+    def connect():
+        client = service.repo.client
+        # Warm the list's own connection without reading any user's rows.
+        try:
+            postgrest = client.postgrest
+            postgrest.session.head(
+                str(client.rest_url).rstrip('/') + '/work_cases',
+                headers=postgrest.headers, params={'select': 'id', 'limit': 0}, timeout=0.2)
+        except httpx.HTTPError:
+            pass
+
+    # Startup and API availability must not depend on the optional probe.
+    with move_on_after(0.2):
+        await to_thread.run_sync(connect, abandon_on_cancel=True)
+
+
 def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_service=None):
     settings = settings or get_settings()
     require_startup_configuration(settings)
 
     @asynccontextmanager
     async def lifespan(app):
-        worker = None
         connected_worker = None
-        if settings.worker_enabled and settings.google_mailbox_worker_enabled:
-            raise RuntimeError('Legacy and connected-mailbox workers cannot run together')
-        if settings.worker_enabled:
-            settings.require_server()
-            settings.require_gmail()
-            settings.require_llm()
-            if app.state.services is None:
-                app.state.services = Services(settings, make_server_client(settings))
-            worker = GmailWorker(app.state.services)
-            app.state.worker = worker
-            worker.start()
-        if settings.google_mailbox_worker_enabled:
+        extraction_worker = None
+        rfq_worker = None
+        rfq_workflow = None
+        # Workers start by default; a missing secret only keeps that worker off (names were logged at startup).
+        try:
             settings.require_google_connect()
             settings.require_classification()
             if app.state.mailbox_service is None:
                 app.state.mailbox_service = make_mailbox_service(settings)
             connected_worker = ConnectedMailboxWorker(app.state.mailbox_service)
             app.state.connected_mailbox_worker = connected_worker
-            connected_worker.start()
+        except RuntimeError:
+            logger.warning('mailbox worker unavailable code=CONFIGURATION_REQUIRED; API remains available')
         try:
+            if connected_worker is not None:
+                rfq_worker = start_metadata_worker(settings, app.state.mailbox_service)
+                app.state.rfq_metadata_worker = rfq_worker
+                rfq_workflow = start_workflow_worker(settings, app.state.mailbox_service)
+                app.state.rfq_workflow_worker = rfq_workflow
+            # Graph readiness is optional for receiving mail and serving APIs.
+            # No feature toggle: attempt the existing START contract each boot.
+            from app.features.work_cases.infrastructure.graph_repository import runtime_repository
+            from app.features.work_cases.application.graph_worker import GraphWorker
+            from app.features.work_cases.application.start_readiness import configuration_readiness, agent_readiness
+            try:
+                configuration_readiness(settings).require()
+                agent_readiness().require()
+                repo = runtime_repository(make_server_client(settings), settings)
+                if not repo.available():
+                    raise RuntimeError('Graph START contract unavailable')
+                if app.state.mailbox_service is None:
+                    app.state.mailbox_service = make_mailbox_service(settings)
+                extraction_worker = GraphWorker(settings, repo, app.state.mailbox_service)
+                extraction_worker.start()
+                app.state.extraction_worker = extraction_worker
+                app.state.graph_startup_code = None
+            except Exception:
+                if extraction_worker is not None:
+                    try:
+                        extraction_worker.close()
+                    except Exception:
+                        logger.warning('graph cleanup failed code=GRAPH_CLEANUP_FAILED')
+                extraction_worker = None
+                app.state.extraction_worker = None
+                app.state.graph_startup_code = 'GRAPH_RUNTIME_UNAVAILABLE'
+                logger.warning('graph unavailable code=GRAPH_RUNTIME_UNAVAILABLE; mail/API remain available')
+            await prime_work_case_reads(app.state)
+            # Independent mail/metadata lifecycles; sender remains separately gated.
+            for prepared_worker in (connected_worker, rfq_worker, rfq_workflow):
+                if prepared_worker is not None:
+                    prepared_worker.start()
             yield
         finally:
-            if worker:
-                worker.close()
+            if rfq_workflow:
+                rfq_workflow.close()
+            if rfq_worker:
+                rfq_worker.close()
             if connected_worker:
                 connected_worker.close()
+            if extraction_worker:
+                extraction_worker.close()
 
     # Explicitly override FastAPI's default HTTPValidationError schema: runtime uses ErrorEnvelope.
     common_errors = {status: {'model': ErrorEnvelope} for status in
                      (400, 401, 403, 404, 405, 409, 413, 422, 429, 502, 503, 504)}
     app = FastAPI(title='견줘 Python Backend', version='1.0.0', lifespan=lifespan,
                   responses=common_errors)
-    app.state.settings, app.state.services, app.state.worker = settings, services, None
+    app.state.settings, app.state.services = settings, services
     app.state.mailbox_service = mailbox_service
     app.state.connected_mailbox_worker = None
+    app.state.extraction_worker = None
+    app.state.graph_startup_code = 'GRAPH_RUNTIME_UNAVAILABLE'
+    app.state.rfq_metadata_worker = None
+    app.state.rfq_workflow_worker = None
     app.state.service_lock = threading.Lock()
+    if getattr(settings, 'google_token_encryption_key', None):
+        # Build the list clients before accepting requests. Connections remain lazy.
+        get_list_service(app.state)
     app.state.push_verifier = push_verifier
     app.add_middleware(BodyLimitMiddleware)
     rate_lock, rates = threading.Lock(), {}
@@ -115,7 +218,7 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False,
                        allow_methods=['GET', 'POST', 'PATCH', 'PUT'],
                        allow_headers=['Authorization', 'Content-Type', 'Idempotency-Key', 'Cache-Control'],
-                       expose_headers=['X-Request-ID', 'Retry-After'])
+                       expose_headers=['X-Request-ID', 'Retry-After', 'Content-Disposition'])
 
     @app.exception_handler(ServiceError)
     async def service_error(request, error):
@@ -151,6 +254,15 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     app.include_router(mail_router)
     app.include_router(review_router)
     app.include_router(mailbox_router)
+    app.include_router(work_cases_router)
+    app.include_router(work_revisions_router)
+    app.include_router(workflow_logs_router)
+    app.include_router(suppliers_router)
+    app.include_router(mail_drafts_router)
+    app.include_router(candidates_router)
+    app.include_router(quotes_router)
+    app.include_router(review_card_router)
+    app.include_router(mail_management_router)
     return app
 
 

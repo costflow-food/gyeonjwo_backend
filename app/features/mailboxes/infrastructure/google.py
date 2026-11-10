@@ -8,6 +8,11 @@ import json
 import logging
 import ssl
 import time
+import base64
+from email.message import EmailMessage
+from email.policy import SMTP
+from email.utils import format_datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 from dataclasses import dataclass
 from urllib.parse import quote, urlencode
@@ -53,8 +58,11 @@ def https_json(method, host, path, headers, body):
     try:
         conn.request(method, path, body=body, headers=headers)
         response = conn.getresponse()
-        raw = response.read(4 * 1024 * 1024 + 1)
-        if len(raw) > 4 * 1024 * 1024:
+        # Full messages can embed attachment data; attachment JSON is base64 encoded.
+        # Do not apply the small control-response cap to either content endpoint.
+        content = host == 'gmail.googleapis.com' and '/messages/' in path
+        raw = response.read() if content else response.read(4 * 1024 * 1024 + 1)
+        if not content and len(raw) > 4 * 1024 * 1024:
             raise ValueError('Response limit exceeded')
         return response.status, json.loads(raw)
     finally:
@@ -152,7 +160,8 @@ class GoogleAPI:
         if sending or (method != 'GET' and not (method == 'POST' and path == 'watch')):
             logger.warning('gmail operation_blocked operation=%s code=APPROVED_SEND_NODE_REQUIRED',
                            'send' if sending else 'write')
-            # An OAuth connection is not approval to send; only the future approved-send node may do that.
+            # An OAuth connection is not approval to send; only send_claimed()
+            # accepts the internal node's validated DB authorization snapshot.
             raise ServiceError('ACTION_NOT_ALLOWED', '메일은 승인 설정을 검사하는 발송 노드를 통해 보내야 합니다.', 409)
         return self._call(method, 'gmail.googleapis.com', '/gmail/v1/users/me/' + path,
                           token=grant.access_token, payload=payload)
@@ -170,6 +179,39 @@ class GoogleAPI:
     def message(self, grant, message_id):
         return self.gmail(grant, 'messages/' + quote(message_id, safe='') + '?format=full')
 
+    def message_headers(self, grant, message_id):
+        query = urlencode([('format', 'metadata')] + [('metadataHeaders', name)
+                           for name in ('Message-ID', 'From', 'To', 'Cc', 'Subject', 'X-Gyeonjwo-Dispatch-ID')])
+        return self.gmail(grant, 'messages/' + quote(message_id, safe='') + '?' + query)
+
+    def send_claimed(self, grant, claim):
+        """Internal node only: accept a validated DB-authorized content snapshot."""
+        from app.features.work_cases.domain.rfq import AuthorizedMail
+        if not isinstance(claim, AuthorizedMail) or SEND_SCOPE not in grant.scopes:
+            raise ServiceError('ACTION_NOT_ALLOWED', '검증된 발송 접수가 필요합니다.', 409)
+        message = EmailMessage(policy=SMTP)
+        message['From'], message['To'] = grant.email, claim.recipient
+        message['Subject'], message['Message-ID'] = claim.subject, claim.rfc_message_id
+        message['X-Gyeonjwo-Dispatch-ID'] = claim.draft_id
+        message['Date'] = format_datetime(datetime.now(timezone.utc))
+        message.set_content(claim.body_text)
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode().rstrip('=')
+        # Deliberately bypass gmail()'s public read-only facade only here. The
+        # caller has claimed SENDING; transport is one-shot with no POST retry.
+        return self._call('POST', 'gmail.googleapis.com', '/gmail/v1/users/me/messages/send',
+                          token=grant.access_token, payload={'raw': raw})
+
+    def recent_sent_ids(self, grant):
+        page = self.gmail(grant, 'messages?' + urlencode({'labelIds': 'SENT', 'maxResults': 100}))
+        return [row['id'] for row in page.get('messages', [])]
+
+    def sent_by_message_id(self, grant, rfc_message_id):
+        data = self.gmail(grant, 'messages?' + urlencode({'q': 'in:sent rfc822msgid:' + rfc_message_id,
+                                                        'maxResults': 10}))
+        if data.get('nextPageToken'):
+            raise ServiceError('SEND_RESULT_UNKNOWN', '발송 결과를 확정할 수 없습니다.', 409)
+        return [row['id'] for row in data.get('messages', [])]
+
     def attachment(self, grant, message_id, attachment_id):
         return self.gmail(grant, 'messages/' + quote(message_id, safe='') + '/attachments/' + quote(attachment_id, safe=''))
 
@@ -179,7 +221,7 @@ class GoogleAPI:
         Sample the history cursor BEFORE listing so arrivals during import remain
         eligible for the next incremental pass. Do not follow initial nextPageToken:
         maxResults alone is only a page size and otherwise imports the whole inbox.
-        The same bound applies when the caller recovers an expired history cursor.
+        Expired cursors use the separate paginated recovery path.
         """
         ids, token, seen_tokens = set(), None, set()
         if history_id is None:
@@ -211,3 +253,25 @@ class GoogleAPI:
             if token in seen_tokens:
                 raise ServiceError('GOOGLE_UNAVAILABLE', '메일 목록의 페이지를 확인할 수 없습니다.', 503)
             seen_tokens.add(token)
+
+    def recover_message_ids(self, grant, last_synced_at):
+        latest = str(self.profile(grant)['historyId'])
+        params = {'labelIds': 'INBOX', 'maxResults': 100}
+        if last_synced_at is not None:
+            timestamp = datetime.fromisoformat(last_synced_at.replace('Z', '+00:00'))
+            if timestamp.tzinfo is None:
+                raise ValueError('Recovery timestamp must include a timezone')
+            # A sync finishes after sampling its cursor. Re-read an overlap
+            # around that finish time and rely on durable message deduplication.
+            params['q'] = f'after:{int(timestamp.timestamp()) - 86400}'
+        ids, seen_tokens = {}, set()
+        while True:
+            page = self.gmail(grant, 'messages?' + urlencode(params))
+            ids.update(dict.fromkeys(row['id'] for row in page.get('messages', [])))
+            token = page.get('nextPageToken')
+            if not token:
+                return list(ids), latest
+            if token in seen_tokens:
+                raise ServiceError('GOOGLE_UNAVAILABLE', '메일 복구 페이지를 확인할 수 없습니다.', 503)
+            seen_tokens.add(token)
+            params['pageToken'] = token

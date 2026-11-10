@@ -3,6 +3,7 @@ import base64
 import re
 from datetime import datetime, timezone
 from email.utils import getaddresses
+from email.header import decode_header, make_header
 from email.message import Message
 from html.parser import HTMLParser
 from uuid import UUID
@@ -74,11 +75,20 @@ def message_metadata(raw):
                 visit(child, depth + 1)
 
         visit(payload)
-        sender = [address.casefold() for _, address in getaddresses([headers.get('from', '')]) if address]
+        authors = [(name, address.casefold()) for name, address in getaddresses([headers.get('from', '')]) if address]
+        sender = [address for _, address in authors]
+        sender_name = None
+        if len(authors) == 1 and authors[0][0]:
+            name = authors[0][0]
+            try:
+                name = str(make_header(decode_header(name)))
+            except (LookupError, UnicodeError, ValueError):
+                pass
+            sender_name = ' '.join(name.split())[:200] or None
         recipients = [address.casefold() for _, address in getaddresses([headers.get('to', ''), headers.get('cc', '')]) if address]
         return {'gmail_message_id': raw['id'], 'gmail_thread_id': raw.get('threadId'),
             'received_at': datetime.fromtimestamp(int(raw['internalDate']) / 1000, timezone.utc).isoformat().replace('+00:00', 'Z'),
-            'subject': headers.get('subject', ''), 'sender': sender, 'recipients': recipients,
+            'subject': headers.get('subject', ''), 'sender': sender, 'sender_name': sender_name, 'recipients': recipients,
             'message_id_header': headers.get('message-id'), 'in_reply_to': headers.get('in-reply-to'),
             'references': headers.get('references'), 'body_text': '\n'.join(texts or html_texts),
             'attachments': attachments, 'source_type': 'GMAIL'}
@@ -101,6 +111,9 @@ def determine_link(message, candidates):
     if len(verified) == 1:
         case_id, row = next(iter(verified.items()))
         return {'kind': 'EXISTING_CASE', 'case_id': case_id, 'matched_reference': row['matched_reference']}
+    # Reply headers without a verified link go to intake (AMBIGUOUS) even when no
+    # candidate matched. The DB ingest rejects NEW_MESSAGE that carries reply
+    # headers (23514), and that rejection halts the whole mailbox sync (KAN-155 S1-14).
     if candidates or message.get('in_reply_to') or message.get('references'):
         return {'kind': 'AMBIGUOUS', 'case_id': None}
     return {'kind': 'NEW_MESSAGE', 'case_id': None}

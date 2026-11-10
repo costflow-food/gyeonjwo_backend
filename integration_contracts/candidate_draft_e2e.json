@@ -1,0 +1,17 @@
+{
+  "ticket": "BE-3",
+  "status": "VERIFIER_PREPARED_REAL_E2E_PENDING",
+  "target_prefix": "ce6994f4",
+  "inventory": "Owned standardized_item_key of target case; expect12 supplier_items, distinct supplier business emails checked without displaying addresses.",
+  "no_send": "There is no server send switch. Require RFQ approval ON in the effective settings before selection; no approve/send/settings mutation endpoints.",
+  "mutation": "Only explicitly listed supplier UUIDs through API-12, deterministic idempotency key, then API-17 and owned logs.",
+  "operator": "Run on teammate Mac; hidden token prompt, local API only, no redirect/proxy. First run inventory without --supplier-id.",
+  "verification": {
+    "synthetic_checks": 16,
+    "real_db_reads": false,
+    "real_selection": false,
+    "real_mail_sends": false,
+    "real_http_e2e": false
+  },
+  "remaining": "Deploy code on Mac; run inventory and explicit candidate selection with test user; share safe JSON output with FE. No completion claimed until actual WAITING_APPROVAL and logs verified."
+}

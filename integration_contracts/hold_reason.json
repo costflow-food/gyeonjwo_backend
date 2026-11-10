@@ -1,0 +1,59 @@
+{
+  "contract_version": 1,
+  "apis": [
+    "API-01 GET /api/v1/work-cases",
+    "API-03 GET /api/v1/work-cases/{case_id}/progress"
+  ],
+  "hold": {
+    "nullable": true,
+    "shape": {
+      "code": "closed enum",
+      "message": "server-owned Korean text"
+    },
+    "codes": {
+      "SUPPLIER_NOT_MATCHED": "등록된 거래처와 연결되지 않아 견적을 저장하지 못했어요.",
+      "SUPPLIER_MISMATCH": "메일에 연결된 거래처와 견적의 업체가 달라 확인이 필요해요.",
+      "MISSING_FIELD": "견적을 저장하는 데 필요한 필수 정보가 없어 검토를 보류했어요.",
+      "MISSING_EVIDENCE": "견적 정보의 원문 근거를 확인할 수 없어 검토를 보류했어요.",
+      "SOURCE_READ_FAILED": "메일이나 첨부의 내용을 읽을 수 없어 검토를 보류했어요.",
+      "NO_QUOTE_DATA": "메일에서 검토할 수 있는 견적 정보를 찾지 못했어요.",
+      "CONDITIONS_MISSING": "검토에 필요한 요청 조건이 부족해 확인이 필요해요.",
+      "NO_SUITABLE_CANDIDATES": "요청 조건에 맞는 거래처 후보를 찾지 못했어요.",
+      "SEND_POLICY_REQUIRED": "견적 요청에 필요한 발송 설정을 확인해야 해요.",
+      "HOLD_REASON_UNAVAILABLE": "보류 사유를 확인할 수 없어 담당자 확인이 필요해요."
+    },
+    "missing_field_messages": {
+      "supplier_name": "업체명이 확인되지 않아 견적을 저장하지 못했어요.",
+      "item_name": "품목명이 확인되지 않아 검토를 보류했어요.",
+      "unit_price": "견적 단가가 확인되지 않아 검토를 보류했어요.",
+      "unit": "견적의 단위가 확인되지 않아 검토를 보류했어요.",
+      "quantity": "요청 수량이 확인되지 않아 검토를 보류했어요."
+    }
+  },
+  "rules": [
+    "Only ON_HOLD returns hold; other steps return null.",
+    "Read only verified owner, current input_revision and current_batch_id completed AGENT runs.",
+    "Latest completed run takes precedence; never reuse stale holds.",
+    "Legacy reason is normalized to fixed templates, never forwarded. Unknown reason uses HOLD_REASON_UNAVAILABLE.",
+    "Exception to frontend-copy ownership: hold.message is safe server-owned display copy.",
+    "Public read endpoints use fixed text and do not expose model text or internal fields."
+  ],
+  "graph_extraction": {
+    "status": "BACKEND_ADAPTER_LOCAL_TESTED_DB_SIGNATURE_UNVERIFIED",
+    "rpc": "record_case_graph_extraction_issue",
+    "proposed_arguments": ["p_job", "p_token", "p_revision", "p_run", "p_issue"],
+    "issue_fields": ["case_id", "mail_id", "batch_id", "input_revision", "code", "field", "supplier_name"],
+    "database_checks": "Verify service-role access, live claim, owner, case, extraction run, batch, revision and mail membership. Deduplicate identical evidence and acknowledge with true. Confirm deployed signature and acknowledgement with KAN-133.",
+    "priority": "One acknowledged supplier rejection code from this role run overrides agent output. Conflicting acknowledged codes fall back to HOLD_REASON_UNAVAILABLE. Otherwise use the closed structured hold.code, then legacy reason extraction. DB remains authoritative for supplier codes and must verify stored evidence.",
+    "reason_storage": "Role finish receives the original reason in p_output.reason. KAN-133 must preserve it before normalization in a restricted internal record keyed by run, expose it only to authorized internal staff and retain fixed public copy. The graph completion payload omits the original HOLD reason."
+  },
+  "validation": {
+    "date": "2026-11-02",
+    "normalization_assertions": 20,
+    "live_readonly_case_ids": [
+      "4223056e-7632-4b8a-a3be-848902023174",
+      "ab17b3c8-7275-45b7-8f16-a5fb09600cf4"
+    ],
+    "remote_deployment_verified": false
+  }
+}

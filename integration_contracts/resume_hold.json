@@ -1,0 +1,99 @@
+{
+  "contract_version": 1,
+  "status": "BACKEND_IMPLEMENTED_DB_RPC_REQUIRED_NOT_DEPLOYED",
+  "endpoint": "POST /api/v1/work-cases/{case_id}/resume",
+  "request": {
+    "expected_revision": "positive integer",
+    "reason": [
+      "RESUME_HOLD",
+      "RETRY_FAILED",
+      "REOPEN_REVIEW",
+      "REOPEN_ACCEPTED"
+    ]
+  },
+  "scope": "This release supports RESUME_HOLD only. Other defined reasons return 409 ACTION_NOT_ALLOWED; unknown reasons return 422.",
+  "headers": [
+    "Authorization: Bearer verified Supabase access token",
+    "Idempotency-Key"
+  ],
+  "response": {
+    "http_status": 202,
+    "data": {
+      "case_id": "uuid",
+      "input_revision": "same as expected_revision",
+      "batch_id": "new UUID, distinct from previous batch",
+      "progress_url": "/api/v1/work-cases/{case_id}/progress"
+    },
+    "meta": {
+      "request_id": "immutable first request ID"
+    }
+  },
+  "ownership": "Owner is derived only from JWT. Foreign/missing case returns 404 before readiness. Never trust body owner or batch.",
+  "rpc_support_required": {
+    "lookup_work_case_resume_request": {
+      "args": {
+        "p_owner": "uuid",
+        "p_case": "uuid",
+        "p_key": "text",
+        "p_hash": "text"
+      },
+      "returns": "{kind:NONE} or {kind:REPLAY,http_status:202,response:{data,meta}} or {kind:ERROR,code}",
+      "rules": [
+        "Read only; service_role only; owner/method/canonical resume path/key scope.",
+        "Compare request hash including revision AND reason; different body returns IDEMPOTENCY_KEY_REUSED.",
+        "PROCESSING returns REQUEST_IN_PROGRESS; never execute or claim a job."
+      ]
+    },
+    "submit_work_case_resume": {
+      "args": {
+        "p_owner": "uuid",
+        "p_case": "uuid",
+        "p_revision": "integer",
+        "p_reason": "text",
+        "p_key": "text",
+        "p_hash": "text",
+        "p_request_id": "text"
+      },
+      "returns": "Same ACCEPTED/REPLAY/ERROR envelope as submit_work_case_start, HTTP 202 on success.",
+      "single_transaction": [
+        "begin_api_request for POST /api/v1/work-cases/{canonical UUID}/resume; replay before revision/state guards; same key/different body rejected.",
+        "Lock owned case; verify revision, Pending/ON_HOLD, not archived/accepted; reason must be RESUME_HOLD.",
+        "Require latest completed current-batch/current-revision hold to be INFO_EXTRACTOR. Reject later-role holds, unresolved approval, DRAFT/SENDING/UNKNOWN send intents, and any live extraction job. Do not bypass send policy.",
+        "Keep original mail/evidence and prior agent_runs/logs; never register suppliers automatically or delete prior results.",
+        "Use resume/start_review guard appropriate to current schema; create a NEW batch and INFO_EXTRACTOR run, set Running/EXTRACTING, clear current error, clear active HOLD decision (keep audit), and append RESUME log. Input revision does not change solely for retry.",
+        "Create exactly one durable job for the new batch in the EXISTING extraction queue, using owner, mail IDs, revision, run/batch references; no body/token copied into logs or jobs.",
+        "complete_api_request with immutable 202 response on the SAME connection/transaction; rollback everything on failure. Never sequence independent REST writes."
+      ],
+      "errors": {
+        "RESOURCE_NOT_FOUND": 404,
+        "REVISION_CONFLICT": 409,
+        "WORK_ALREADY_STARTED": 409,
+        "ACTION_NOT_ALLOWED": 409,
+        "REQUEST_IN_PROGRESS": 409,
+        "IDEMPOTENCY_KEY_REUSED": 409
+      }
+    }
+  },
+  "readiness": "Read-only PostgREST OpenAPI signature check for both functions plus existing extraction configuration/adapter/storage/worker checks. Missing RPCs hide RESUME with RESUME_INTEGRATION_REQUIRED. No mutation probe or automatic schema installation.",
+  "worker": "Wake existing extraction worker after durable 202; HTTP never runs a model. claim_case_extraction supplies the new batch; existing worker checks owner/revision/batch and starts extraction. Replays wake only, never create jobs.",
+  "failed_reply_retry_acceptance": {
+    "reason": "RETRY_FAILED",
+    "failed_reply_route": "When the latest failed job is a GRAPH_REVIEW_V1 / REPLY job, retry must enqueue GRAPH_REVIEW_V1 / REPLY on the same input revision under a new batch. Revalidate the original trigger mail IDs and full evidence against the current owner, case, revision and RFQ linkage. Reject stale evidence, newer active jobs and unresolved sends. Never redirect a failed REPLY to START.",
+    "atomicity": "The existing submit_work_case_resume transaction must perform mode selection, guards, enqueue and receipt persistence together. Identical retries reuse the original batch.",
+    "verification": "A 202 proves acceptance only. Verify the claimed job mode and its two trigger mail IDs, the source-linked quote versions, and the committed latest review card. Live RETRY_FAILED routing remains unverified until the deployed SQL or a controlled acceptance run confirms it."
+  },
+  "supplier_policy": "Registering a supplier does not itself resume any case. User explicitly resumes; normal extraction/registered-supplier checks apply again. Suppliers are never auto-created.",
+  "validation": {
+    "date": "2026-11-02",
+    "http_policy_assertions": 32,
+    "live_schema_read": "Existing Supabase OpenAPI inspected read only; resume functions absent.",
+    "actual_resume_not_executed": true,
+    "database_structure_changes": false,
+    "sql_files_created": false,
+    "eligibility_schema_assertions": 18,
+    "real_data_list_detail_policy_assertions": 10,
+    "real_data_readiness_simulated": true
+  },
+  "release_dependency": "DB owner must provide/review these transactional RPCs. This JSON is a proposed integration contract, not proof of DB deployment. Actual 202->EXTRACTING->completion acceptance test remains pending.",
+  "read_only_eligibility": "List page and detail inspect owner-scoped latest completed current-batch/current-revision INFO_EXTRACTOR HOLD and active leaf drafts. Later-role HOLD, unknown evidence, unresolved DRAFT/SENDING/UNKNOWN and lookup failure hide RESUME with a safe reason. Mutation rechecks under lock; UI hints do not authorize execution."
+}

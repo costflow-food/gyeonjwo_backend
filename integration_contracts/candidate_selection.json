@@ -1,0 +1,90 @@
+{
+  "contract_version": 1,
+  "date": "2026-11-03",
+  "status": "SERVER_IMPLEMENTED_RPC_NOT_DEPLOYED_LIVE_FLOW_UNVERIFIED",
+  "frontend_reference": "gyeonjwo_frontend dev: candidate.dart, work_queue_repository_impl.dart; candidate methods still use preview data source until frontend switches to HTTP",
+  "api": {
+    "GET /api/v1/work-cases/{case_id}/candidates": "data: candidate_set_id,revision,items,selected_supplier_ids,is_stale,selection_revision,allowed_actions,disabled_actions. Items: supplier_id,name,contact_email,handling_evidence,checks(label,status=MET/UNMET/UNKNOWN,required),preference_score(nullable exact integer),preference_score_exact,is_web_candidate,evidence_refs,unknown_fields,caution.",
+    "PUT /api/v1/work-cases/{case_id}/candidate-selection": {
+      "body": [
+        "expected_revision",
+        "candidate_set_id",
+        "selected_supplier_ids"
+      ],
+      "headers": [
+        "Authorization",
+        "Idempotency-Key"
+      ],
+      "response": "200 {data:{case_id,candidate_set_id,revision,selection_revision,selected_supplier_ids,drafts:[{draft_id,supplier_id,dispatch_state}],selection_policy},meta:{request_id}}. 200 is selection/draft acceptance, never Gmail SENT."
+    }
+  },
+  "policy": {
+    "decision": "DECIDED 2026-11-05: registered supplier contacts, mailbox default covers every case",
+    "mode": "REGISTERED_CONTACT",
+    "targets": "User selects case candidates. Send judgment (team decision 2026-11-05): choose the case override if it has a boolean for the purpose, else the mailbox default (work_case_id null), which applies to every case. Configured = row.configured and approval_required_by_purpose[purpose] is boolean (null/missing = unset, no send). Recipient must equal the owner's REGISTERED/VERIFIED_WEB supplier contact_email for the draft supplier_id. allowed_recipients_jsonb and allowed_scope_jsonb (purposes/work_case_ids/supplier_ids) are not used. Auto send only when the user saved false.",
+    "ON": "WAITING_APPROVAL; existing APIs16-19 then guarded claim",
+    "OFF": "Only chosen suppliers whose contact matches the registered supplier may AUTO_QUEUED. Candidate caution requires manual confirmation. Sender unavailable blocks new automatic submission before mutation. Final current-policy check remains atomic at DB claim.",
+    "pending_team_agreement": "Whether mailbox allowlist remains independent restriction must be agreed with frontend/DB; no removal assumed."
+  },
+  "storage": {
+    "candidate_set": "Completed CANDIDATE agent_runs.output_jsonb.candidate_set, immutable; id equals run UUID; owner/case/input_revision/review_batch_id checked. No new SQL/table created here.",
+    "selection": "workflow_logs event CANDIDATE_SELECTION payload is full CandidateSelectionResponse. One selection per candidate set; new key cannot replace an already chosen/sending/unknown intent.",
+    "drafts": "Graph creates private proposals with real IDs. API-12 publishes selected only and atomically retires unselected proposals as FAILED with safe CANDIDATE_NOT_SELECTED reason; never sends them. Retired proposals stay hidden. Do not leave terminal private DRAFTs blocking commit_review. Selected IDs remain unchanged for evidence checks."
+  },
+  "rpc_required": {
+    "candidate_selection_health": {
+      "args": {},
+      "returns": {
+        "contract_version": 1,
+        "ready": true,
+        "policy_mode": "PRESERVE_MAILBOX_LIMIT",
+        "user_selection_gate": true,
+        "send_claim_guard": true,
+        "unselected_drafts_closed": true
+      }
+    },
+    "lookup_case_candidate_selection_request": {
+      "args": [
+        "p_owner",
+        "p_case",
+        "p_key",
+        "p_hash"
+      ],
+      "returns": "NONE, REPLAY(http_status=200,response), or ERROR(code). Immutable original response replay before status/revision guards; method/path/user/key/body hash verified."
+    },
+    "submit_case_candidate_selection": {
+      "args": [
+        "p_owner",
+        "p_case",
+        "p_body",
+        "p_key",
+        "p_hash",
+        "p_request_id",
+        "p_dispatch_ready",
+        "p_policy_mode"
+      ],
+      "returns": "ACCEPTED or REPLAY with http_status=200,response full envelope; ERROR(code).",
+      "transaction": [
+        "begin_api_request, case/set/selection/settings locks and revision validation in one DB connection/transaction",
+        "Verify current owned set and selectable members, current registered contacts/evidence, no conflicting or UNKNOWN intent; request IDs are not authority",
+        "Open common RFQ round for selected targets and publish exactly their staged drafts. No duplicate trigger-owned RFQ rows",
+        "Evaluate current effective ON/OFF and retained mailbox scope. No permission widening. Enforce caution; off eligible needs p_dispatch_ready",
+        "Save selection audit/full first response and complete_api_request atomically; rollback all on errors",
+        "Atomically retire all unselected proposals in this candidate set/batch as FAILED/CANDIDATE_NOT_SELECTED (no provider call); leave no unresolved terminal unselected DRAFT that would block existing commit_review. If equivalent lifecycle is agreed, health must attest that closure guard."
+      ]
+    },
+    "graph_functions": "Updated graph_start.json defines stage_case_graph_draft, finish_case_graph_candidate_run, complete_case_graph_run and schedule_case_graph_continuations."
+  },
+  "send_guard": "Promotion: producer=rfq-v1,candidate_selection_required=true,candidate_selection={state:SELECTED,case_id,candidate_set_id,supplier_id,revision,selection_revision}. DB submit_rfq_draft_action and claim_mail_send must lock/recheck latest set, trusted selection, revision, intent, caution, policy and permissions. Python screening alone is insufficient. No unselected draft via new ID/key/round or approval bypass.",
+  "errors": "Foreign/missing404; invalid members422 INVALID_CANDIDATE_SELECTION; input409 REVISION_CONFLICT; set409 CANDIDATES_CHANGED; repeat-body replay; different-body409 IDEMPOTENCY_KEY_REUSED; concurrent409 REQUEST_IN_PROGRESS; UNKNOWN409 SEND_RESULT_UNKNOWN; missing storage503 CANDIDATE_SELECTION_INTEGRATION_REQUIRED.",
+  "verification": {
+    "synthetic_http_and_dispatch_assertions": 36,
+    "actual_graph_synthetic_store_assertions": 8,
+    "real_llm_calls": 0,
+    "real_emails_sent": 0,
+    "remote_schema_modified": false,
+    "temporary_tests_retained": false,
+    "explicit_supplier_allowlist_assertions": 5
+  },
+  "rollout": "Keep AGENT_GRAPH_ENABLED=false until DB functions/guards and frontend live wiring are deployed and integration-tested. No remote DDL, SQL file, .env change or auto-publication performed."
+}

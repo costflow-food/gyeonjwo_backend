@@ -1,0 +1,163 @@
+{
+  "contract_version": 1,
+  "status": "GET_REAL_DB_VERIFIED_MUTATION_RPC_AND_FRONTEND_CONNECTION_PENDING",
+  "frontend_reference": {
+    "repository": "costflow-food/gyeonjwo_frontend",
+    "branch": "dev",
+    "commit": "ae66460a07f7b64347282f179682ee48e3630dc5",
+    "files": [
+      "lib/features/mail_intake/data/mail_intake_repository_impl.dart",
+      "lib/features/mail_intake/data/mail_intake_data_source.dart",
+      "lib/features/send_settings/data/send_settings_repository_impl.dart",
+      "lib/features/send_settings/data/send_settings_data_source.dart"
+    ]
+  },
+  "spec_reference": "User-provided Notion 08 API-21..24, sections 1, 6, 8, 10. Five work-case states follow the approved latest 06.",
+  "paths": {
+    "GET /api/v1/mail-intake": "data.items, data.next_cursor, data.total_pending; item matches IntakeMail Dart mapper",
+    "POST /api/v1/mail-messages/{mail_id}/resolve": "resolution, target_case_id, expected_revision, reason; HTTP 200 {data:{mail_id,resolution,case_id,case_status,total_pending},meta:{request_id}}",
+    "GET /api/v1/mail-send-settings": "Optional mailbox_ref and case_id. Omitted mailbox_ref uses case mailbox or sole owned mailbox. Full SendSettings Dart mapper fields.",
+    "PUT /api/v1/mail-send-settings": "Exact SendSettingsUpdate fields; integer expected_settings_version; same GET DTO in HTTP 200 envelope."
+  },
+  "read_contract": {
+    "intake_population": "owner_user_id=user AND work_case_id IS NULL AND processing_status=NEEDS_REVIEW AND (mail_classification=UNCERTAIN OR link_status=AMBIGUOUS); identical to API-01 intake_pending",
+    "intake_sort": "sent_or_received_at DESC, id DESC; stable created_at snapshot and signed owner/resource keyset cursor; limit 25, maximum 100",
+    "intake_reason": "For this SCR-009 DTO only, mail_classification is the reason enum UNCERTAIN/AMBIGUOUS, matching Dart. API-25 keeps actual stored classification. reason_detail uses short safe fixed text, never model trace.",
+    "candidate_evidence": "Only actual own outbound RFC-header references. No speculative sender/subject matching. DB rechecks participant/company/item/conditions before a manual link.",
+    "cache": "Cache-Control: private, no-store; no GET writes, extraction, OCR, Gmail calls or acknowledgements."
+  },
+  "version_contract": {
+    "mail_revision": "mail_messages has no revision column. revision is a deterministic positive <=52-bit integer snapshot token, not a work-case revision. This internal compatibility mechanism must be reviewed with DB owner; no public DTO type change.",
+    "mail_snapshot_fields": [
+      "id",
+      "work_case_id",
+      "mail_classification",
+      "processing_status",
+      "link_status",
+      "classification_reason",
+      "normalized_jsonb"
+    ],
+    "mail_token_algorithm": "UTF-8 compact JSON sorted keys ensure_ascii=false of mail snapshot; first 8 bytes SHA256 interpreted unsigned big endian; modulo (2^52-1), plus 1. Server compares expected_revision then DB compares FULL p_snapshot.mail under lock, never merely this truncated token.",
+    "settings_version": "Cantor pair of immutable source version_no counters (missing source=0): (a+b)*(a+b+1)//2+b, <=2^52-1. Also compare both current source IDs under lock. This is distinct from draft API-17/19 opaque UUID-pair token; do not replace that token.",
+    "settings_version_vectors": [
+      {
+        "mailbox": 0,
+        "case": 0,
+        "settings_version": 0
+      },
+      {
+        "mailbox": 1,
+        "case": 0,
+        "settings_version": 1
+      },
+      {
+        "mailbox": 2,
+        "case": 1,
+        "settings_version": 7
+      },
+      {
+        "mailbox": 1,
+        "case": 2,
+        "settings_version": 8
+      }
+    ]
+  },
+  "rpc_support_required": {
+    "lookup_mail_management_request": {
+      "args": {
+        "p_owner": "uuid",
+        "p_method": "text",
+        "p_path": "text",
+        "p_key": "text",
+        "p_hash": "text"
+      },
+      "returns": "{kind:NONE} or {kind:REPLAY,http_status:200,response:{data,meta}} or {kind:ERROR,code}",
+      "rules": [
+        "Read only, service_role only. Owner+method+canonical path+key identity. REPLAY before current state/version checks.",
+        "Same key/different normalized body -> IDEMPOTENCY_KEY_REUSED; PROCESSING -> REQUEST_IN_PROGRESS. Preserve first full response and request ID."
+      ]
+    },
+    "submit_mail_intake_resolution": {
+      "args": {
+        "p_owner": "uuid",
+        "p_mail": "uuid",
+        "p_body": "jsonb",
+        "p_snapshot": "jsonb",
+        "p_key": "text",
+        "p_hash": "text",
+        "p_request_id": "text"
+      },
+      "transaction": [
+        "Atomic begin_api_request -> replay or lock own source mail -> compare full p_snapshot.mail -> validate pending population and supplied snapshot revision.",
+        "NON_BUSINESS: keep mail/classification audit but no work case; set resolved/non-business/ignored atomically. Never delete or lose provider duplicate receipts.",
+        "CREATE_CASE: one new UUID Work ID/Waiting only, connect initial mail and append audit; no extraction. Use existing create_work_case invariants within this same connection/transaction.",
+        "LINK_CASE: owner+same mailbox, not archived, verify full target snapshot revision and company/item/mandatory conditions + reply/send evidence. Do not treat ambiguous headers as automatic approval.",
+        "Only existing active eligible reviews may enqueue durable re-extraction and advance input revision/new batch; Waiting/Confirm/Pending/accepted/archived do not auto-run. Preserve safe receipt/source and audit.",
+        "Complete request with full ResolvedMail DTO, same-filter total_pending and immutable meta.request_id in SAME transaction. Roll back mutation/job/idempotency together on failure."
+      ]
+    },
+    "submit_mail_send_settings": {
+      "args": {
+        "p_owner": "uuid",
+        "p_body": "jsonb",
+        "p_snapshot": "jsonb",
+        "p_key": "text",
+        "p_hash": "text",
+        "p_request_id": "text"
+      },
+      "transaction": [
+        "Atomic begin_api_request -> replay or lock mailbox/settings namespace and own case/draft references in deterministic order. No REST write sequence.",
+        "Compare both current source IDs, immutable counters/Cantor token, case revision/archive and exact selected leaf draft snapshots. Concurrent mailbox default change invalidates case settings save.",
+        "p_body.allowed_supplier_ids is accepted for frontend compatibility and ignored. Store approval_required_by_purpose and style only; write configured=true for a user-saved row, allowed_recipients_jsonb=[] and allowed_scope_jsonb={}. Do not create a row on Gmail connection. Send judgment (team decision 2026-11-05): choose the case override if it has a boolean for the purpose, else the mailbox default (work_case_id null), which applies to every case. Configured = row.configured and approval_required_by_purpose[purpose] is boolean (null/missing = unset, no send). Recipient must equal the owner's REGISTERED/VERIFIED_WEB supplier contact_email for the draft supplier_id. allowed_recipients_jsonb and allowed_scope_jsonb (purposes/work_case_ids/supplier_ids) are not used. Auto send only when the user saved false.",
+        "Append immutable setting version with replaces_id, configured according to validated complete policy, updater and effective_at; retain history. Null approval keys mean inheritance (omit those keys); false means explicit OFF.",
+        "FUTURE_DRAFTS must not authorize existing ON-created drafts. OFF->ON must block every automatic draft that has not claimed SENDING; do not cancel already-sending Gmail requests.",
+        "SPECIFIED_DRAFTS requires server-confirmed dispatch_ready, own case, selected current DRAFTs, same suppliers/recipients/purposes and latest input. Block SENDING/SENT/UNKNOWN and any unresolved same send intent. Revalidate current policy at dispatch.",
+        "For selected eligible OFF drafts integrate with EXISTING RFQ delivery worker: producer rfq-v1, auto_policy_eligible=true, auto_settings_version=the EXISTING opaque baseUUID:caseUUID token, and verified policy snapshot. If schema cannot amend eligibility safely, use supported immutable replacement chain. Never directly send from this HTTP transaction or mark SENDING without an executable durable path.",
+        "Return full SendSettings DTO and persist first 200 response in same transaction. Source IDs/counters, purpose source references, allowed suppliers/style and pending leaf drafts must match GET formatter. Roll back entirely on any failure."
+      ]
+    }
+  },
+  "error_codes": {
+    "RESOURCE_NOT_FOUND": 404,
+    "REVISION_CONFLICT": 409,
+    "SETTINGS_CHANGED": 409,
+    "DRAFT_CHANGED": 409,
+    "SEND_RESULT_UNKNOWN": 409,
+    "REQUEST_IN_PROGRESS": 409,
+    "IDEMPOTENCY_KEY_REUSED": 409,
+    "INVALID_LINK_TARGET": 422,
+    "SEND_SCOPE_REQUIRED": 422,
+    "INTAKE_INTEGRATION_REQUIRED": 503,
+    "SETTINGS_INTEGRATION_REQUIRED": 503
+  },
+  "frontend_remaining": [
+    "Both frontend providers currently return Preview*DataSource unconditionally. 정훈 must implement/select authenticated real HTTP data sources using existing ApiClient.",
+    "Replace hardcoded demo-purchase-mailbox in saveSettings with GET data.mailbox_ref. Do NOT alias that fake mailbox in backend.",
+    "Use /api/v1 prefix once, pass JWT and Idempotency-Key, preserve key on retry, feed existing repository DTO mappers, invalidate API-01/intake providers after resolve.",
+    "Refresh SendSettings with SETTINGS_CHANGED; never fake success, approve automatically, or convert null inheritance to false."
+  ],
+  "validation": {
+    "date": "2026-11-02",
+    "mock_http_service_assertions": 47,
+    "live_readonly_assertions": 6,
+    "actual_intake_pending": 2,
+    "api01_count_matches": true,
+    "actual_settings_configured": false,
+    "supabase_schema_read": "Existing tables present; three proposed RPCs above absent.",
+    "actual_mutations_run": false,
+    "frontend_end_to_end_run": false,
+    "remote_schema_changes": false,
+    "sql_files_created": false,
+    "test_files_retained": false,
+    "additional_policy_and_scope_checks": 6,
+    "source_version_pairs_checked": 900,
+    "final_schema_and_policy_checks": 10
+  },
+  "security": [
+    "JWT principal matches connect API; owner filters on every source/case/mailbox/supplier/settings/draft read and write.",
+    "Service-role-only RPCs; never accept owner/batch/recipient lists outside validated server scope.",
+    "Never log bodies, tokens, filenames, contact details, model prompts or responses. Errors expose fixed safe codes/messages only.",
+    "No Gmail/LLM calls or mail sending performed during development verification."
+  ],
+  "candidate_selection_policy": "Per-case API-12 determines targets. API-22 allowed_supplier_ids is no longer a restriction (ignored). Send judgment (team decision 2026-11-05): choose the case override if it has a boolean for the purpose, else the mailbox default (work_case_id null), which applies to every case. Configured = row.configured and approval_required_by_purpose[purpose] is boolean (null/missing = unset, no send). Recipient must equal the owner's REGISTERED/VERIFIED_WEB supplier contact_email for the draft supplier_id. allowed_recipients_jsonb and allowed_scope_jsonb (purposes/work_case_ids/supplier_ids) are not used. Auto send only when the user saved false."
+}

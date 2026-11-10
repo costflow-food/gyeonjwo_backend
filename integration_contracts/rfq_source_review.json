@@ -1,0 +1,33 @@
+{
+  "checked_at": "2026-10-30",
+  "repository": "costflow-food/gyeonjwo_backend",
+  "branches": [
+    {
+      "branch": "feature/agents-1-2",
+      "sha": "0f900470c5bd740e636495924001d114c1c7a946"
+    },
+    {
+      "branch": "feature/agents",
+      "sha": "1185b120e8e3dd57d5d86c073ea71a38f0b520d1"
+    },
+    {
+      "branch": "feature/agents-orchestration",
+      "sha": "4f908a9931d39d8c50ede4d8691427a816b04ddc"
+    },
+    {
+      "branch": "feature/agents-4-5",
+      "sha": "85501db870d69da226a911992532b33145b2312e"
+    }
+  ],
+  "missing": [
+    "CANDIDATE prompt",
+    "search_supplier_evidence implementation",
+    "create_mail_draft RFQ persistence implementation",
+    "claim_mail_send/finish_mail_send server caller"
+  ],
+  "notes": [
+    "PR 18 implements INFO_EXTRACTOR, not CANDIDATE.",
+    "feature/agents-4-5 includes synthetic repository and counter-offer review drafts, not RFQ send integration.",
+    "No existing sender implementation was imported or auto-enabled."
+  ]
+}

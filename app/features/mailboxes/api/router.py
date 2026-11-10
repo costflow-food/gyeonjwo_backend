@@ -83,3 +83,21 @@ def connect(payload: GoogleConnectRequest, request: Request,
 @router.get('/connection', response_model=Envelope[GoogleConnection])
 def connection(principal=Depends(require_google_user), service=Depends(get_mailbox_service)):
     return api_json(service.connection(principal).model_dump(mode='json'))
+
+
+@router.get('/sync-status', summary='연결 메일함 동기화 상태')
+def sync_status(request: Request, principal=Depends(require_google_user)):
+    try:
+        client = make_server_client(request.app.state.settings)
+        rows = (client.table('mail_sync_states')
+                .select('mailbox_ref,status:sync_status,last_synced_at,last_error_jsonb')
+                .eq('owner_user_id', str(principal.user_id))
+                .limit(2).execute().data)
+        if not isinstance(rows, list) or len(rows) > 1:
+            raise ValueError('Invalid mailbox sync state')
+        data = rows[0] if rows else {'mailbox_ref': None, 'status': 'NOT_CONNECTED', 'last_synced_at': None}
+        error = data.pop('last_error_jsonb', None)
+        data['last_error'] = 'GMAIL_SYNC_FAILED' if error else None
+    except Exception:
+        raise ServiceError('PROCESSING_UNAVAILABLE', '메일 동기화 상태를 조회할 수 없습니다.', 503) from None
+    return api_json(data, headers={'Cache-Control': 'private, no-store'})

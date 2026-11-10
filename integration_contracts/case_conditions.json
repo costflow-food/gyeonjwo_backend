@@ -1,0 +1,72 @@
+{
+  "contract_version": 1,
+  "date": "2026-11-05",
+  "status": "DEV_DB_APPLIED_INTEGRATION_PENDING",
+  "scope": "Where work_cases comparison conditions come from: quantity/unit, mandatory conditions, company policy. Agents read only work_cases (get_work_case); DB functions fill it.",
+  "quantity": {
+    "source": "Incumbent increase notice (INITIAL mail) supply quantity extracted by INFO_EXTRACTOR as available_quantity, e.g. \"11월 공급 계획 1,000kg에 대해 5,000원에서 5,500원으로 인상\" -> quantity 1000, unit kg.",
+    "rules": [
+      "KAN-131: explicitly entered buyer quantity and unit override the supply quantity. If omitted, preserve the existing extraction fallback.",
+      "store_case_graph_quote fills work_cases.quantity/unit from record.case_conditions only when they are empty.",
+      "unit is the quantity unit; if absent, the same mail price unit.",
+      "Alternative supplier replies never set the case quantity; their available_quantity is only a supply capacity check.",
+      "Missing quantity may produce CONDITIONS_MISSING. API-06 can save comparison conditions; continuing the review is a separate operation."
+    ]
+  },
+  "company_items": {
+    "purpose": "Buyer-side required conditions per purchased item. Not supplier attributes.",
+    "columns": {
+      "id": "uuid PK",
+      "owner_user_id": "uuid",
+      "created_at": "timestamptz",
+      "standardized_item_key": "text, same key space as supplier_items.standardized_item_key",
+      "item_name": "text",
+      "specification": "text nullable",
+      "unit": "text nullable",
+      "mandatory_conditions_jsonb": "jsonb, e.g. {\"certifications\": [\"HACCP\"], \"specification\": \"특품\"}"
+    },
+    "constraints": [
+      "UNIQUE(owner_user_id, standardized_item_key)"
+    ],
+    "linking": [
+      "INFO_EXTRACTOR links the quote to the supplier registered item and sends supplier_item_id only when one item is decided. If work_cases.standardized_item_key is set, it considers only registered items with the same key (names are not compared, KAN-190/191). Otherwise (first extraction) it considers items whose name matches after removing all whitespace and lowercasing (same as internal.item_name_norm). Several candidates are narrowed by specification. On first extraction it also sends the linked item's standardized_item_key in case_conditions.",
+      "store_case_graph_quote copies company_items.mandatory_conditions_jsonb and specification into empty work_cases fields for that key. No company_items row: conditions stay empty (comparison without required conditions)."
+    ],
+    "registration": "Seed data by SQL for MVP; no CRUD API in this scope."
+  },
+  "company_policy": {
+    "policy_jsonb": {
+      "max_increase_rate": "decimal string. Accepted increase rate; a requested increase at or below it is a recommendation to accept, above it the counter-offer upper bound is previous price x (1 + rate).",
+      "incumbent_premium_rate": "decimal string. Incumbent may stay up to this much above the alternative; competitive line = keep ceiling x (1 + rate).",
+      "allow_split": "boolean, RESPONSE_PLAN split plans",
+      "max_suppliers": "int, split supplier limit (default 2)",
+      "preferred_origin": "text, PROPOSED key name. ② CANDIDATE preferred origin; absent -> '국내산'.",
+      "origin_weight": "decimal string, PROPOSED. Score added when origin matches preferred_origin; absent, non-numeric or negative -> '2'.",
+      "history_weight": "decimal string, PROPOSED. Score added when purchase history exists; absent, non-numeric or negative -> '1'. Preference weights only order candidates and never offset a required-condition FAIL."
+    },
+    "defaults_2026_11_05": {
+      "max_increase_rate": "0.04",
+      "incumbent_premium_rate": "0.04",
+      "allow_split": true,
+      "max_suppliers": 2
+    },
+    "snapshot": "submit_case_graph_start writes the defaults as constants into work_cases.policy_jsonb at START. A company policy table may replace the constants later without agent changes.",
+    "counter_offer_statuses": {
+      "PROPOSABLE": "counter-offer within allowed_range [previous, min(requested, previous x (1+max_increase_rate), competitive line if inside)]; above_alternative=true when the whole range is above the competitive line",
+      "WITHIN_POLICY": "requested increase <= max_increase_rate: COUNTER_OFFER_SKIPPED (recommend accepting)",
+      "NOT_NEEDED": "requested price already cheaper than the alternative: COUNTER_OFFER_SKIPPED",
+      "NO_POLICY": "no max_increase_rate: HOLD with reference calculation only",
+      "PREVIOUS_UNKNOWN / COSTS_UNKNOWN / NOT_COMPUTABLE": "recheck source, ask evidence, or HOLD"
+    }
+  },
+  "api_04": {
+    "request": "expected_revision, optional quantity (positive decimal string, 14 integer and 6 fractional digits), unit, due_date (ISO date). Quantity and unit are paired.",
+    "storage": "Existing submit_case_graph_start signature for revision-only requests. When conditions are present, send p_conditions JSONB to the extended signature; missing signature returns 503 START_CONDITIONS_INTEGRATION_REQUIRED. Save explicit conditions and immutable START receipt atomically before enqueue. No overwrite by extraction.",
+    "idempotency": "Canonical quantity/unit/date included in submit and lookup hashes. Revision-only hashes remain compatible."
+  },
+  "api_06": {
+    "request": "PATCH conditions with expected_revision, changes (quantity, unit, due_date), optional reason and string-array evidence_refs, Idempotency-Key.",
+    "storage": "Reuse KAN-136 submit_work_revision EDIT_CONDITIONS. Check ownership and revision, persist the change and invalidate the prior review atomically. Dev migration 20261106150401 does not schedule PLAN automatically after condition edits.",
+    "resume": "Candidate reselection, automatic PLAN scheduling, and treatment of unsent drafts are separate follow-up policies."
+  }
+}

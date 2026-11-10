@@ -1,10 +1,13 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import ClassVar, Literal
 
-from pydantic import Field, HttpUrl, SecretStr, ValidationError, field_validator
+from pydantic import HttpUrl, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[2]
+# OpenAI reasoning effort 값 (2026-11-02 문서 기준). 모델마다 받는 값이 다르다 (예: gpt-5.4-mini는 minimal·max 없음)
+ReasoningEffort = Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
 
 class Settings(BaseSettings):
@@ -14,49 +17,70 @@ class Settings(BaseSettings):
     supabase_publishable_key: SecretStr | None = None
     llm_base_url: HttpUrl | None = None
     llm_api_key: SecretStr | None = None
-    llm_model: str = ''
-    llm_classification_model: str = ''
-    llm_timeout_seconds: int = Field(default=60, ge=5, le=180)
-    analysis_timeout_seconds: int = Field(default=600, ge=30, le=1800)
-    calculation_rounds: int = Field(default=3, ge=2, le=5)
-    max_document_characters: int = Field(default=120000, ge=1000, le=300000)
+    # 모델·추론 수준·시간 제한은 env가 아닌 코드 상수다. 모델과 추론 수준은 한 쌍으로 바꾼다
+    llm_model: ClassVar[str] = 'gpt-6-luna'
+    llm_classification_model: ClassVar[str] = 'gpt-5-nano'
+    llm_classification_reasoning_effort: ClassVar[ReasoningEffort] = 'minimal'
+    # 에이전트 역할별 모델. 없는 역할은 llm_model을 쓴다
+    llm_role_models: ClassVar[dict[str, str]] = {}
+    # 에이전트 역할별 추론 수준. 없는 역할은 llm_reasoning_effort(None이면 보내지 않음)
+    llm_reasoning_effort: ClassVar[ReasoningEffort | None] = None
+    llm_role_reasoning_efforts: ClassVar[dict[str, ReasoningEffort]] = {
+        'INFO_EXTRACTOR': 'low', 'CANDIDATE': 'low', 'INFO_PRIORITY': 'medium',
+        'RESPONSE_PLAN': 'medium', 'COUNTER_OFFER': 'low'}
+    # LLM 검증자(에이전트 결과를 원문·도구 결과와 대조). 여기에 추론 수준이 있는 역할만 검증한다.
+    # ②③⑤는 초안 도구를 실행하기 전에, ①④는 최종 답을 검증한다
+    llm_verifier_model: ClassVar[str] = 'gpt-6-luna'
+    llm_verifier_reasoning_efforts: ClassVar[dict[str, ReasoningEffort]] = {
+        'INFO_EXTRACTOR': 'high', 'CANDIDATE': 'high', 'INFO_PRIORITY': 'high', 'RESPONSE_PLAN': 'high',
+        'COUNTER_OFFER': 'high'}
+    llm_timeout_seconds: ClassVar[int] = 60
+    analysis_timeout_seconds: ClassVar[int] = 600
+    calculation_rounds: ClassVar[int] = 3
+    max_document_characters: ClassVar[int] = 120000
+    # 최초 메일함 가져오기와 만료된 history 복구에만 쓴다. 새 메일은 개수 제한이 없다
+    gmail_initial_sync_limit: ClassVar[int] = 10
+    agent_graph_review_timeout_seconds: ClassVar[int] = 300
+    agent_graph_timeout_seconds: ClassVar[int] = 180
+    agent_graph_request_timeout_seconds: ClassVar[int] = 45
     cors_origins: list[str] = ['http://localhost:3000']
-    gmail_email: str = ''
     gmail_client_id: str = ''
     gmail_client_secret: SecretStr | None = None
-    gmail_refresh_token: SecretStr | None = None
     gmail_topic: str = ''
     gmail_subscription: str = ''
     pubsub_audience: str = ''
     pubsub_service_account: str = ''
-    worker_enabled: bool = False
-    worker_poll_seconds: int = Field(default=10, ge=1, le=60)
-    worker_sync_seconds: int = Field(default=300, ge=60, le=3600)
     google_token_encryption_key: SecretStr | None = None
-    google_mailbox_worker_enabled: bool = False
-    google_mailbox_poll_seconds: int = Field(default=90, ge=60, le=120)
-    gmail_initial_sync_limit: int = Field(default=10, ge=1, le=500)
+    # 빌드 시 주입한다
     app_build_revision: str = 'development'
+    # 에이전트 실행은 항상 LangSmith에 기록한다(MVP는 합성 데이터만 쓴다). 키가 없을 때만 기록하지 않는다
+    langsmith_api_key: SecretStr | None = None
+    langsmith_project: str = 'gyeonjwo-dev'
+    # 조직 단위 Service Key는 기록할 작업 공간 ID가 있어야 한다(LangSmith Settings 화면에서 확인)
+    langsmith_workspace_id: str | None = None
 
     @field_validator('supabase_url', 'llm_base_url', 'supabase_secret_key', 'supabase_publishable_key',
-                     'llm_api_key', 'gmail_client_secret', 'gmail_refresh_token', 'google_token_encryption_key', mode='before')
+                     'llm_api_key', 'gmail_client_secret', 'google_token_encryption_key', 'langsmith_api_key',
+                     'langsmith_workspace_id', mode='before')
     @classmethod
     def empty_optional_values(cls, value):
         return None if isinstance(value, str) and not value.strip() else value
 
     def require_llm(self):
-        if not self.llm_base_url or not self.llm_api_key or not self.llm_api_key.get_secret_value() or not self.llm_model:
-            raise RuntimeError('LLM endpoint, key and model must be configured')
+        if not self.llm_base_url or not self.llm_api_key or not self.llm_api_key.get_secret_value():
+            raise RuntimeError('LLM endpoint and key must be configured')
+
+    def llm_model_for(self, role: str) -> str:
+        """에이전트 역할(INFO_EXTRACTOR 등)에 쓸 모델. 역할별 상수가 없으면 llm_model."""
+        return self.llm_role_models.get(str(role), self.llm_model)
+
+    def llm_reasoning_effort_for(self, role: str | None) -> str | None:
+        """에이전트 역할에 쓸 추론 수준. 역할별 상수가 없으면 llm_reasoning_effort, 둘 다 없으면 None(보내지 않음)."""
+        return self.llm_role_reasoning_efforts.get(str(role), self.llm_reasoning_effort) if role else self.llm_reasoning_effort
 
     def require_classification(self):
-        if not self.llm_base_url or not self.llm_api_key or not (self.llm_classification_model or self.llm_model):
-            raise RuntimeError('Classification endpoint, key and model must be configured')
-
-    def require_gmail(self):
-        names = ('gmail_email', 'gmail_client_id', 'gmail_client_secret', 'gmail_refresh_token',
-                 'gmail_topic', 'gmail_subscription', 'pubsub_audience', 'pubsub_service_account')
-        if any(not getattr(self, name) for name in names):
-            raise RuntimeError('Gmail OAuth and Pub/Sub settings must be configured')
+        if not self.llm_base_url or not self.llm_api_key:
+            raise RuntimeError('Classification endpoint and key must be configured')
 
     def require_server(self) -> None:
         if not self.supabase_url or not self.supabase_secret_key or not self.supabase_secret_key.get_secret_value():
@@ -68,8 +92,6 @@ class Settings(BaseSettings):
         self.require_server()
         if not self.gmail_client_id or not self.gmail_client_secret or not self.google_token_encryption_key:
             raise RuntimeError('Google OAuth client and token encryption key must be configured')
-        if self.worker_enabled:
-            raise RuntimeError('Disable the legacy receiver before using connected Google mailboxes')
 
     @property
     def gmail_push_configured(self):
