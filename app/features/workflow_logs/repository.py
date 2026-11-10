@@ -11,6 +11,9 @@ TEXT_FIELDS = (
     'send_policy', 'tool_name', 'tool_result_ref', 'error_code', 'mail_id', 'draft_id',
 )
 VERSION_FIELDS = ('quote_version', 'settings_version')
+# DB가 실제로 남기는 값. 로그 payload의 키는 role·status이고, 주체 종류는 actor_type 컬럼에 있다.
+COMPONENT_TYPES = frozenset({'AGENT', 'NODE', 'TOOL', 'USER', 'SYSTEM'})
+RUN_OUTCOMES = {'COMPLETED': 'SUCCESS', 'FAILED': 'FAILURE', 'HOLD': 'WAITING'}
 
 
 def public_log(row, titles):
@@ -36,6 +39,20 @@ def public_log(row, titles):
     for key in TEXT_FIELDS:
         if isinstance(payload.get(key), str):
             item[key] = payload[key]
+    # 그래프 실행 로그는 payload에 agent_role·run_status 대신 role·status를 남긴다.
+    # 응답 계약(component_type·agent_role·run_status·outcome)은 그대로 두고 여기서 채운다.
+    if 'component_type' not in item and row.get('actor_type') in COMPONENT_TYPES:
+        item['component_type'] = row['actor_type']
+    if 'agent_role' not in item and isinstance(payload.get('role'), str):
+        item['agent_role'] = payload['role']
+    status = payload.get('status')
+    if 'run_status' not in item and isinstance(status, str):
+        item['run_status'] = status
+    if 'outcome' not in item:
+        if item['event_type'] == 'GRAPH_FAILED':
+            item['outcome'] = 'FAILURE'
+        elif item['event_type'] == 'GRAPH_ROLE_FINISHED' and status in RUN_OUTCOMES:
+            item['outcome'] = RUN_OUTCOMES[status]
     for key in VERSION_FIELDS:
         if type(payload.get(key)) in (int, str):
             item[key] = payload[key]
@@ -60,7 +77,7 @@ def list_workflow_logs(client, codec, owner, filters):
     try:
         total = filtered(client.table('workflow_logs').select('id', count='exact', head=True)).execute().count
         query = filtered(client.table('workflow_logs').select(
-            'id,created_at,event_type,work_case_id,payload_jsonb'))
+            'id,created_at,event_type,work_case_id,actor_type,payload_jsonb'))
         if after:
             timestamp, log_id = after
             query = query.or_(f'created_at.lt.{timestamp},and(created_at.eq.{timestamp},id.lt.{log_id})')
