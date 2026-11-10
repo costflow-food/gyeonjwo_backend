@@ -67,7 +67,7 @@ class MailManagementRepository:
         ids = sorted({row['work_case_id'] for row in messages if row.get('work_case_id')})
         if not ids:
             return []
-        return self.rows(self.client.table('work_cases').select('id,status,item_name,intake_item_name,requester_name,initial_mail_id')
+        return self.rows(self.client.table('work_cases').select('id,status,item_name,requester_name,initial_mail_id')
                          .eq('owner_user_id', str(owner)).eq('mailbox_ref', mail['mailbox_ref']).in_('id', ids)
                          .is_('archived_at', 'null').limit(101))
 

@@ -9,6 +9,7 @@ from app.features.work_cases.domain.listing import QueueCounts, WorkCaseList, Wo
 
 from app.features.work_cases.application.case_actions import case_actions
 from app.features.work_cases.application.start_readiness import StartReadiness
+from app.shared.domain.item_names import contains_ignoring_spaces
 
 _PAGE_READS = ThreadPoolExecutor(max_workers=8, thread_name_prefix='case-page-read')
 
@@ -88,10 +89,9 @@ class WorkCaseListService:
                 if utc_time(case['created_at']) > utc_time(snapshot):
                     continue
                 requester = (case.get('registered_requester_name') or case.get('requester_name')) if case['processing_step'] != 'PENDING_START' else None
-                # 화면 품목명: ①이 정한 item_name, 아직 없으면 접수 때 회사 품목에서 찾은 intake_item_name
-                item_name = case.get('item_name') or case.get('intake_item_name')
-                searchable = [mail.get('subject'), mail.get('sender'), mail.get('sender_name'), item_name, requester]
-                if query and not any(query in (value or '').casefold() for value in searchable):
+                searchable = [mail.get('subject'), mail.get('sender'), mail.get('sender_name'), case.get('item_name'), requester]
+                # 띄어쓰기 무시: '냉동망고'로 검색해도 '냉동 망고' 업무가 나온다(KAN-192 기준)
+                if query and not any(contains_ignoring_spaces(value, query) for value in searchable):
                     continue
                 counts.total += 1
                 if case['status'] in {'Waiting', 'Running', 'Complete'}:
@@ -111,7 +111,7 @@ class WorkCaseListService:
                     title=requester or mail['sender'], sender=mail['sender'], sender_name=mail.get('sender_name'),
                     requester_name=case.get('requester_name'),
                     received_at=received, status=case['status'], processing_step=step,
-                    input_revision=case['input_revision'], archived_at=archived_at, item_name=item_name,
+                    input_revision=case['input_revision'], archived_at=archived_at, item_name=case['item_name'],
                     attachment_count=len(attachments), step_detail={'code': step, 'message': STEP_MESSAGES.get(step, '처리 상태 확인')},
                     allowed_actions=[])
                 page_cases[str(row.case_id)] = case
