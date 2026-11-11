@@ -99,7 +99,8 @@ def tools_for(role: AgentRole) -> list[BaseTool]:
 #   06 work_cases·mail_messages·agent_runs 기준. 업무·revision·실행 ID는 runtime.context(RunContext),
 #   역할은 build_agent가 정한 에이전트 이름에서 읽는다 (LLM 인자 아님).
 
-MAX_EVIDENCE_CHARS = 4000            # read_mail_evidence가 한 번에 돌려주는 원문 길이 (제안값)
+# read_mail_evidence가 한 번에 돌려주는 원문 길이 (제안값). 단가표 한 쪽을 대개 한 번에 읽어 도구 호출 한도를 아낀다 (KAN-212)
+MAX_EVIDENCE_CHARS = 12000
 _CASE_KEYS = ('input_revision', 'item_name', 'specification', 'mandatory_conditions', 'quantity', 'unit', 'due_date',
               'policy', 'latest_quote_version_ids')
 _MAIL_KEYS = ('mail_id', 'message_role', 'direction', 'supplier_id', 'received_at', 'subject', 'attachments')
@@ -163,8 +164,17 @@ def load_case_context(store: CaseStore, context: RunContext) -> dict:
             'mails': [{key: mail.get(key) for key in _MAIL_KEYS} for mail in mails]}
 
 
-def load_evidence(store: CaseStore, context: RunContext, mail_id: str, part: str, page: int | None) -> dict:
-    item = _read(lambda: store.read_mail_part(context.case_id, mail_id, part, page))
+def load_evidence(store: CaseStore, context: RunContext, mail_id: str, part: str, page: int | None,
+                  offset: int = 0) -> dict:
+    try:
+        item = _read(lambda: store.read_mail_part(context.case_id, mail_id, part, page))
+    except ServiceError as error:
+        if error.code != 'EXTRACTION_DOCUMENT_LIMIT':
+            raise
+        # 업무 한 번 실행에서 읽을 수 있는 원문 양(12만 자)을 넘었다. 일부만 읽고 판단하지 않는다 (KAN-212)
+        return {'status': 'LIMIT_EXCEEDED', 'mail_id': mail_id, 'part': part, 'page': page,
+                'next': '원문이 처리 한도를 넘었다. 다른 쪽을 더 읽지 말고 바로 HOLD로 최종 응답한다. '
+                        'hold.code가 있으면 SOURCE_READ_FAILED로 하고, hold가 없는 역할은 reason에 SOURCE_READ_FAILED를 함께 적는다.'}
     if item is None:
         result = {'status': 'NOT_FOUND', 'mail_id': mail_id, 'part': part, 'page': page}
         mail = next((row for row in _read(lambda: store.list_case_mails(context.case_id))
@@ -179,11 +189,18 @@ def load_evidence(store: CaseStore, context: RunContext, mail_id: str, part: str
         return {'status': 'UNREADABLE', 'mail_id': mail_id, 'part': part, 'page': page,
                 'attempts': item.get('attempts'), 'retry_exhausted': bool(item.get('retry_exhausted'))}
     text = item['text']
+    if type(offset) is not int or not 0 <= offset <= max(len(text) - 1, 0):
+        return {'status': 'NOT_FOUND', 'mail_id': mail_id, 'part': part, 'page': page, 'offset': offset,
+                'length': len(text)}
+    end = offset + MAX_EVIDENCE_CHARS
     # empty: 글자가 없는 쪽(스캔 이미지 등). 이 쪽에서는 어떤 값도 근거가 되지 않는다
     # text_source OCR: 그림을 글자로 읽은 결과라 잘못 읽은 글자가 있을 수 있다
-    return {'status': 'OK', 'mail_id': mail_id, 'part': part, 'page': page, 'text': text[:MAX_EVIDENCE_CHARS],
-            'location': item.get('location'), 'truncated': len(text) > MAX_EVIDENCE_CHARS, 'empty': not text.strip(),
-            'text_source': item.get('text_source') or 'TEXT'}
+    result = {'status': 'OK', 'mail_id': mail_id, 'part': part, 'page': page, 'offset': offset,
+              'text': text[offset:end], 'location': item.get('location'), 'truncated': len(text) > end,
+              'empty': not text.strip(), 'text_source': item.get('text_source') or 'TEXT'}
+    if len(text) > end:     # 긴 단가표의 뒷부분은 같은 쪽을 next_offset부터 다시 읽는다 (KAN-212)
+        result['next_offset'] = end
+    return result
 
 
 @register
@@ -235,17 +252,21 @@ def crawl_supplier_candidates(query: str, runtime: ToolRuntime[RunContext], limi
 @register
 @tool
 def read_mail_evidence(mail_id: str, runtime: ToolRuntime[RunContext], part: str = 'body',
-                       page: int | None = None) -> dict:
-    '''이 업무에 속한 메일의 본문 또는 첨부 한 쪽(page)의 원문과 위치를 읽는다.
+                       page: int | None = None, offset: int = 0) -> dict:
+    '''이 업무에 속한 메일의 본문 또는 첨부 한 쪽(page)의 원문과 위치를 읽는다. 한 번에 12,000자까지 준다.
     part: 본문은 'body', 첨부는 get_case_context 메일 목록의 attachment_ref 값(예: 'att-1'). 'attachment_ref'라는 글자가 아니다.
     page: 첨부의 쪽 번호(1부터). 본문은 비운다.
+    offset: 그 본문·쪽에서 읽기 시작할 글자 위치(0부터). 처음에는 비운다. truncated면 next_offset을 넣어 이어 읽는다.
 
-    반환 status: OK면 text·location·truncated(원문이 길어 앞부분만 줬으면 true)·empty(글자가 없는 쪽)·
+    반환 status: OK면 text·location·truncated(뒤에 더 있으면 true. 같은 part·page를 offset=next_offset으로 다시 읽는다)·
+      empty(글자가 없는 쪽)·
       text_source(TEXT 또는 OCR: 스캔 그림을 글자로 읽은 쪽. 원문 그대로 옮기되 없는 글자를 짐작해 채우지 않는다)
-      / NOT_FOUND(이 업무의 메일인데 part·page가 틀렸으면 available_parts로 읽을 수 있는 part·쪽수를 알려준다)
+      / NOT_FOUND(이 업무의 메일인데 part·page가 틀렸으면 available_parts로 읽을 수 있는 part·쪽수를 알려준다.
+        offset이 범위 밖이면 length로 그 본문·쪽의 글자 수를 알려준다)
       / UNREADABLE(이 쪽을 읽지 못했다. 다시 불러도 같다. 이 쪽의 값은 근거로 쓰지 않는다)
+      / LIMIT_EXCEEDED(원문이 처리 한도를 넘었다. 더 읽지 말고 next대로 HOLD한다)
     '''
-    return load_evidence(_case_store, _run_context(_case_store, runtime), mail_id, part, page)
+    return load_evidence(_case_store, _run_context(_case_store, runtime), mail_id, part, page, offset)
 
 
 # ① INFO_EXTRACTOR: store_structured_mail

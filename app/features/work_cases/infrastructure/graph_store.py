@@ -352,6 +352,7 @@ class GraphStore(AgentStore):
         location = f'{part}:page:{page}'
         text = doc['pages'][page - 1]
         if text.strip():
+            self.charge(mail_id, part, page, text)
             return {'text': text, 'location': location}
         key = (str(mail_id), part, page)
         if key not in self.ocr_pages:
@@ -365,4 +366,5 @@ class GraphStore(AgentStore):
                                    'unreadable': result['status'] != 'READ', 'attempts': result['attempts'],
                                    'retry_exhausted': result['retry_exhausted'], 'error_kind': result['error_kind']}
             self.cache_document(mail_id, part, doc)
+        self.charge(mail_id, part, page, self.ocr_pages[key]['text'])
         return dict(self.ocr_pages[key])

@@ -15,7 +15,7 @@ class AgentStore:
     def __init__(self, scope, job):
         self.scope, self.repo, self.job = scope, scope.repo, job
         self.saved_ids, self.records, self.pages = set(), {}, {}
-        self.body_lengths = {}
+        self.read_chars = {}     # (mail_id, part, page) → 에이전트에게 실제로 준 본문·쪽의 글자 수 (KAN-212)
         self.document_status = {}
         self.final_output = None
         self.model_id, self.prompt_version = '', ''
@@ -94,13 +94,19 @@ class AgentStore:
                 'attachments': attachments})
         return result
 
-    def check_document_budget(self):
+    def check_document_budget(self, extra=0):
         self.scope.remaining_seconds()
-        total = sum(self.body_lengths.values()) + sum(len(text) for pages in self.pages.values() for text in pages)
-        if total > self.scope.max_characters:
-            # Sticky across tool retries: cached pages may never bypass a limit.
-            self.scope.blocked = True
+        # 읽지 않은 첨부 쪽은 세지 않는다. 쪽수를 알려 주려고 PDF를 연 것은 읽은 것이 아니다 (KAN-212)
+        if sum(self.read_chars.values()) + extra > self.scope.max_characters:
             raise ServiceError('EXTRACTION_DOCUMENT_LIMIT', '문서 처리 한도를 초과했습니다.', 503)
+
+    def charge(self, mail_id, part, page, text):
+        """본문·쪽을 에이전트에게 주기 전에 한도를 확인하고 센다. 넘으면 세지 않고 거절한다.
+        거절된 쪽은 다시 불러도(캐시에 있어도) 매번 같은 확인을 거치므로 한도를 우회하지 못한다."""
+        key = (str(mail_id), part, page)
+        if key not in self.read_chars:
+            self.check_document_budget(len(text))
+            self.read_chars[key] = len(text)
 
     def document(self, mail_id, attachment):
         self.check_document_budget()
@@ -134,13 +140,13 @@ class AgentStore:
             if page is not None:
                 return None
             text=mail.get('body_text') or ''
-            self.body_lengths[mail_id]=len(text)
-            self.check_document_budget()
+            self.charge(mail_id, part, page, text)
             return {'text':text,'location':'body'}
         for a in mail.get('attachments_jsonb') or []:
             if part_reference(a)==part and a.get('mime_type')=='application/pdf':
                 pages=self.document(mail_id,a)
                 if type(page) is int and 1<=page<=len(pages):
+                    self.charge(mail_id, part, page, pages[page-1])
                     return {'text':pages[page-1],'location':f'{part}:page:{page}'}
         return None
 
