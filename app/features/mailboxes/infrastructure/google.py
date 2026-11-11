@@ -43,6 +43,16 @@ class GoogleRejected(Exception):
     """Definitive OAuth rejection. Never retains Google's raw error response."""
 
 
+# 토큰 요청(/token)에서 사용자 권한이 철회·만료됐다는 뜻의 오류. 이것만 메일함을 재연결 상태로 바꾼다.
+# invalid_client·unauthorized_client 등은 서버의 client 설정 문제라 메일함 상태를 건드리지 않는다
+TOKEN_REJECTED_ERRORS = frozenset({'invalid_grant'})
+# 로그에 남겨도 되는 Google OAuth 표준 오류 코드(RFC 6749 5.2). 그 밖의 값은 OTHER로 적는다
+OAUTH_ERROR_CODES = frozenset({'invalid_request', 'invalid_client', 'invalid_grant', 'unauthorized_client',
+                               'unsupported_grant_type', 'invalid_scope', 'access_denied', 'admin_policy_enforced'})
+# 캐시한 access token을 만료 몇 초 전부터 쓰지 않을지
+ACCESS_TOKEN_MARGIN_SECONDS = 300
+
+
 @dataclass(frozen=True, repr=False)
 class Grant:
     access_token: str
@@ -50,6 +60,7 @@ class Grant:
     email: str
     scopes: frozenset[str]
     refresh_token: str | None = None
+    expires_at: float | None = None     # access token 만료 시각(time.monotonic 기준). 모르면 None
 
 
 def https_json(method, host, path, headers, body):
@@ -102,6 +113,12 @@ class GoogleAPI:
         if status == 429 or status >= 500:
             raise ServiceError('GOOGLE_UNAVAILABLE', 'Google 요청을 잠시 후 다시 시도해 주세요.', 503)
         if oauth and status in (400, 401, 403):
+            if path.split('?', 1)[0] == '/token':
+                error = data.get('error') if isinstance(data, dict) else None
+                if error not in TOKEN_REJECTED_ERRORS:
+                    logger.warning('gmail provider_failed operation=%s operation_id=%s code=OAUTH_CLIENT_ERROR oauth_error=%s',
+                                   operation, operation_id, error if error in OAUTH_ERROR_CODES else 'OTHER')
+                    raise ServiceError('GOOGLE_OAUTH_UNAVAILABLE', 'Google 인증 설정을 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.', 503)
             raise GoogleRejected() from None
         if status == 404:
             raise ServiceError('GMAIL_NOT_FOUND', '메일 또는 동기화 커서를 찾을 수 없습니다.', 404)
@@ -143,11 +160,14 @@ class GoogleAPI:
         access = data.get('access_token')
         if not isinstance(access, str) or not access or str(data.get('token_type', '')).casefold() != 'bearer':
             raise GoogleRejected()
+        started = time.monotonic()
         grant = self.inspect(access, principal)
         rotated = data.get('refresh_token') or refresh_token
         if not isinstance(rotated, str):
             raise GoogleRejected()
-        return Grant(grant.access_token, grant.google_sub, grant.email, grant.scopes, rotated)
+        expires_in = data.get('expires_in')
+        expires_at = started + expires_in if type(expires_in) is int and expires_in > 0 else None
+        return Grant(grant.access_token, grant.google_sub, grant.email, grant.scopes, rotated, expires_at)
 
     def gmail(self, grant, path, *, method='GET', payload=None):
         # Called on every request, including watch renewal and worker reads.

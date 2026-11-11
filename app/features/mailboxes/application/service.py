@@ -1,13 +1,16 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID
+import hashlib
 import logging
+import threading
+import time
 
 from app.core.errors import ServiceError, error_payload
 from app.core.idempotency import request_in_progress, valid_idempotency_key
 from app.core.request_context import current_request_id
 from app.features.mailboxes.domain.schemas import GoogleConnection, READ_SCOPE, SEND_SCOPE, GooglePrincipal
-from app.features.mailboxes.infrastructure.google import GoogleRejected
+from app.features.mailboxes.infrastructure.google import ACCESS_TOKEN_MARGIN_SECONDS, GoogleRejected
 
 logger = logging.getLogger('uvicorn.error.gmail_receive')
 
@@ -31,8 +34,30 @@ def watch_result(raw):
 
 
 class GoogleConnectionService:
-    def __init__(self, settings, repository, google, cipher):
+    def __init__(self, settings, repository, google, cipher, *, clock=time.monotonic):
         self.settings, self.repo, self.google, self.cipher = settings, repository, google, cipher
+        # (user_id, refresh token 해시) → 갱신한 Grant. access token을 만료 전까지 다시 쓰고 토큰 요청을 줄인다.
+        # refresh token이 바뀌거나 메일함이 재연결 상태가 되면 쓰지 않는다
+        self.clock, self._grants, self._grants_lock = clock, {}, threading.Lock()
+
+    def _refreshed(self, user_id, refresh, principal):
+        """refresh token으로 받은 Grant. 같은 refresh token으로 받은 access token이 만료 전이면 그대로 쓴다."""
+        key = (str(user_id), hashlib.sha256(refresh.encode()).hexdigest())
+        with self._grants_lock:
+            cached = self._grants.get(key)
+        if cached and cached.expires_at is not None and cached.expires_at - ACCESS_TOKEN_MARGIN_SECONDS > self.clock():
+            return cached
+        grant = self.google.refresh(refresh, principal)
+        with self._grants_lock:
+            self._grants = {k: v for k, v in self._grants.items() if k[0] != key[0]}
+            if grant.expires_at is not None and (grant.refresh_token or refresh) == refresh:
+                self._grants[key] = grant
+        return grant
+
+    def forget_grant(self, user_id):
+        """그 사용자의 캐시한 access token을 버린다(재연결 상태로 바꿀 때)."""
+        with self._grants_lock:
+            self._grants = {k: v for k, v in self._grants.items() if k[0] != str(user_id)}
 
     def connection(self, principal):
         row = self.repo.get(principal.user_id)
@@ -132,12 +157,14 @@ class GoogleConnectionService:
         principal = GooglePrincipal(user_id, row['google_sub'], row['email'])
         refresh = self.cipher.decrypt(user_id, principal.google_sub, row['encrypted_refresh_token'])
         try:
-            grant = self.google.refresh(refresh, principal)
+            grant = self._refreshed(user_id, refresh, principal)
         except GoogleRejected:
+            self.forget_grant(user_id)
             self.repo.mark_reconnect(row)
             raise ServiceError('GOOGLE_RECONNECT_REQUIRED', 'Google 권한이 만료되거나 철회됐습니다.', 401) from None
         scope = READ_SCOPE if capability == 'read' else SEND_SCOPE
         if scope not in grant.scopes:
+            self.forget_grant(user_id)
             self.repo.mark_reconnect(row)
             raise ServiceError('GMAIL_SCOPE_REQUIRED', 'Google 권한을 다시 확인해 주세요.', 403)
         if grant.refresh_token and grant.refresh_token != refresh:
