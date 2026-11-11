@@ -116,8 +116,9 @@ def list_work_cases(
     """Read only: never starts extraction or changes work state.
 
     Reset cursor when status, archive filter or search changes. Counts ignore only
-    status, not search/archive. Pending/Confirm rows remain unchanged when status
-    is omitted; total includes them, while named counters use API-01's three tabs.
+    status, not search/archive. Counts and the Waiting/Running/Complete filters use
+    the queue tabs: Waiting includes Confirm, Running includes Pending, so the three
+    counters add up to total. status=Pending or Confirm returns only that status.
     sender_name is null when the source column or its value is unavailable.
     Actions may be temporarily disabled while integration checks finish.
     reply_summary counts distinct suppliers from SENT RFQs and verified quote
