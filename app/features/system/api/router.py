@@ -11,13 +11,20 @@ def health(request: Request):
             'api_contract':'google-mailbox-v1', 'build_revision':request.app.state.settings.app_build_revision}
 
 
+def _not_ready(checks, revision):
+    return JSONResponse({'status': 'not_ready', 'mode': 'google-mailbox', 'checks': checks,
+                         'build_revision': revision}, status_code=503)
+
+
 @router.get('/ready')
 def ready(request: Request):
     settings=request.app.state.settings
+    # KAN-202: 배포 스크립트가 이 응답이 새 컨테이너에서 왔는지 확인한다(200·503 모두).
+    revision = settings.app_build_revision
     checks={'configuration':'not_ready','database':'not_checked','gmail_worker':'not_running'}
     report=configuration_report(settings)
     if report['status']!='ready':
-        return JSONResponse({'status':'not_ready','mode':'google-mailbox','checks':checks},status_code=503)
+        return _not_ready(checks, revision)
     checks['configuration']='ready'
     try:
         service = get_mailbox_service(request)
@@ -26,10 +33,10 @@ def ready(request: Request):
         checks['database']='ready'
     except Exception:
         checks['database']='rpc_missing_or_unavailable'
-        return JSONResponse({'status':'not_ready','mode':'google-mailbox','checks':checks},status_code=503)
+        return _not_ready(checks, revision)
     worker=request.app.state.connected_mailbox_worker
     if not worker or not worker.running:
-        return JSONResponse({'status':'not_ready','mode':'google-mailbox','checks':checks},status_code=503)
+        return _not_ready(checks, revision)
     checks['gmail_worker']='running'
     metadata_worker = getattr(request.app.state, 'rfq_metadata_worker', None)
     checks['rfq_metadata_worker'] = 'running' if metadata_worker and metadata_worker.running else 'not_running'
@@ -66,4 +73,5 @@ def ready(request: Request):
         degraded.append('rfq_metadata')
     if checks['rfq_dispatch'] != 'running':
         degraded.append('rfq_dispatch')
-    return {'status':'ready','mode':'google-mailbox','checks':checks,'degraded_features':degraded}
+    return {'status':'ready','mode':'google-mailbox','checks':checks,'degraded_features':degraded,
+            'build_revision': revision}
