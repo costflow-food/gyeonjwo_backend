@@ -3,6 +3,7 @@
 # - AWS 인증: GitHub OIDC → IAM 역할(환경 production의 변수 AWS_DEPLOY_ROLE_ARN). 장기 키 없음
 # - 서버 비밀값(.env)은 Lightsail 서비스에만 있다. 배포 때마다 실행 중인 값을 그대로 이어 쓴다.
 #   비밀값을 바꾸려면 Lightsail 콘솔에서 수정하거나 ENV_FILE로 .github/scripts/deploy_lightsail.sh를 실행한다.
+#   코드가 읽지 않는 이름은 배포 로그에 경고로 나온다. 저장소 변수 PRUNE_UNREAD_ENV=1 이면 그 배포에서 뺀다(KAN-204).
 name: Deploy server
 
 on:
@@ -33,6 +34,8 @@ jobs:
     env:
       AWS_REGION: ap-northeast-2
       SERVICE: gyeonjwo-api
+      # 1이면 코드가 읽지 않는 운영 환경변수를 그 배포에서 뺀다(KAN-204). 기본은 경고만
+      PRUNE_UNREAD_ENV: ${{ vars.PRUNE_UNREAD_ENV }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,7 +50,7 @@ jobs:
 
       # README의 로컬 회귀 점검. 외부 서비스(Supabase·Gmail·LLM) 실호출 없음
       - name: Regression checks
-        run: python -m unittest scripts.check_graph_hold scripts.check_workflow_logs scripts.check_review_queue
+        run: python -m unittest scripts.check_graph_hold scripts.check_workflow_logs scripts.check_review_queue scripts.check_env_names
 
       - id: rev
         run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"

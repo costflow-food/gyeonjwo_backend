@@ -32,6 +32,32 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 - 운영 컨테이너는 메모리 1GB·CPU 0.5개 한 대입니다. API·메일 수신·워커·PDF 워커가 같이 돕니다.
 - 프론트엔드(Flutter Web)는 별도 저장소에서 Vercel로 배포합니다. 운영 `CORS_ORIGINS`에 그 주소가 있어야 합니다.
 
+## 환경변수와 긴급 정지
+
+- 서버가 읽는 환경변수는 `.env.example`에 있는 이름이 전부입니다. 그 밖의 이름은 넣어도 조용히 무시됩니다
+  (`Settings`가 `extra='ignore'`). 모델·시간 제한(`LLM_MODEL`, `LLM_TIMEOUT_SECONDS` 등)도 코드 상수라 환경변수로 바뀌지 않습니다.
+- **워커·발송을 끄는 환경변수는 없습니다.** `WORKER_ENABLED`, `RFQ_MAIL_SENDING_ENABLED`,
+  `GOOGLE_MAILBOX_WORKER_ENABLED` 같은 이름은 예전 코드의 것이고, 지금은 값을 바꿔도 아무 일도 일어나지 않습니다.
+- `FORWARDED_ALLOW_IPS`는 프록시 뒤에서 꼭 맞춰야 합니다(Lightsail `172.26.0.0/16`). 틀리면 계정 연결이 `HTTPS_REQUIRED`로 거절됩니다.
+- 이름 점검(값은 출력하지 않습니다):
+
+  ```bash
+  python -m scripts.check_env_names                      # .env.example ↔ 코드
+  python -m scripts.check_env_names --env-file prod.env  # 운영 값(.env 또는 Lightsail environment JSON)
+  ```
+
+  배포할 때도 같은 점검이 돌아 코드가 읽지 않는 이름을 경고로 알려 줍니다. 저장소 변수 `PRUNE_UNREAD_ENV=1`로
+  배포하면 그 이름을 빼고, 배포 확인에 실패하면 직전 환경변수로 되돌립니다. 정리가 끝나면 변수를 지웁니다.
+
+실제로 멈추는 방법:
+
+| 멈출 것 | 방법 | 되돌리기 |
+|---|---|---|
+| 메일 발송 | 메일함 기본 `mail_send_settings`에 `configured=false`인 새 버전을 추가합니다(DB, 메일함 단위, 즉시). 업무별 설정이 있으면 그 업무도 같은 방식입니다. 기존 행은 고칠 수 없고(append-only), 이미 받은 승인도 무효가 됩니다 | `configured=true` 새 버전 추가 |
+| 메일 수신 | 사용자가 Google 연결을 해제합니다. `poll_seconds`는 간격만 늘릴 뿐 끄는 값이 없습니다 | 다시 연결 |
+| 워커 전체 | 컨테이너를 내리거나 직전 배포로 되돌립니다. DB·환경변수 스위치는 없습니다 | 재배포 |
+| 워커 일부 | 그 워커에 필요한 비밀값을 비우고 다시 배포합니다. 수신·RFQ는 `GMAIL_CLIENT_ID`·`GMAIL_CLIENT_SECRET`·`GOOGLE_TOKEN_ENCRYPTION_KEY`, 그래프(에이전트)는 `LLM_BASE_URL`·`LLM_API_KEY`(LLM 값을 비우면 분류가 필요한 수신 워커도 함께 꺼집니다) | 값을 다시 넣고 배포 |
+
 ## 코드 위치
 
 | 위치 | 내용 |
@@ -60,7 +86,7 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 Supabase·Gmail·LLM 실호출 없이 그래프 보류 코드, 로그 커서, 회신 큐 분기와 실패 경로를 확인합니다.
 
 ```bash
-python -m unittest scripts.check_graph_hold scripts.check_workflow_logs scripts.check_review_queue
+python -m unittest scripts.check_graph_hold scripts.check_workflow_logs scripts.check_review_queue scripts.check_env_names
 ```
 
 VS Code에서는 `gyeonjwo-backend.code-workspace`를 엽니다.
