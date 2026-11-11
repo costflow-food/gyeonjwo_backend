@@ -112,6 +112,7 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
                   responses=common_errors)
     app.state.settings, app.state.services = settings, services
     app.state.mailbox_service = mailbox_service
+    app.state.membership_checker = None
     app.state.connected_mailbox_worker = None
     app.state.extraction_worker = None
     app.state.graph_startup_code = 'GRAPH_RUNTIME_UNAVAILABLE'
