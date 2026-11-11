@@ -5,7 +5,39 @@ from app.core.idempotency import request_identity
 from app.core.request_context import current_request_id
 from app.features.work_cases.application.cursor import utc_time, iso_z
 from app.features.work_cases.domain.mail_drafts import DraftAccepted, snapshot_hash
-from app.features.work_cases.domain.candidates import selection_staged
+from app.features.work_cases.domain.candidates import selected_for_dispatch, selection_staged
+
+# 초안이 지금 어떤 발송 상태인지(send_state.code)와 화면 문구. 발송 워커(rfq_delivery.send)와 같은 기준으로 계산한다
+SEND_STATE_MESSAGES = {
+    'SENT': '보냈습니다.',
+    'SENDING': '보내는 중입니다.',
+    'AUTO_QUEUED': '자동 발송 대기 중입니다.',
+    'APPROVED_QUEUED': '승인했습니다. 곧 보냅니다.',
+    'APPROVAL_REQUIRED': '승인하면 보냅니다.',
+    'CAUTION_APPROVAL_REQUIRED': '주의 표시가 있는 업체라 승인하면 보냅니다.',
+    'SETTINGS_CHANGED': '초안을 만든 뒤 발송 설정이 바뀌었습니다. 승인하면 보냅니다.',
+    'SEND_SETTINGS_REQUIRED': '발송 설정을 먼저 저장해 주세요.',
+    'RECIPIENT_NOT_REGISTERED': '받는 주소가 거래처에 등록된 연락처가 아니라 보낼 수 없습니다.',
+    'CANDIDATE_SELECTION_REQUIRED': '견적 요청 업체를 먼저 선택해 주세요.',
+    'DRAFT_STALE': '업무 내용이 바뀌어 이 초안은 보내지 않습니다.',
+    'SEND_RESULT_UNKNOWN': '발송 결과를 확인하지 못했습니다. 보낸편지함 대조가 필요합니다.',
+    'SEND_SNAPSHOT_CHANGED': '보내기 직전에 초안 내용이 바뀌어 보내지 않았습니다.',
+    'SEND_SETTINGS_CHANGED': '보내기 직전에 발송 설정이 바뀌어 보내지 않았습니다.',
+    'SEND_FAILED': '보내지 못했습니다.',
+}
+# 승인·대조 요청 오류 코드별 문구
+SUBMIT_ERROR_MESSAGES = {
+    'RESOURCE_NOT_FOUND': '메일 초안을 찾을 수 없습니다.',
+    'REVISION_CONFLICT': '업무 내용이 바뀌었습니다. 최신 초안을 확인해 주세요.',
+    'DRAFT_CHANGED': '초안이 바뀌었습니다. 최신 초안을 확인해 주세요.',
+    'SETTINGS_CHANGED': '발송 설정이 바뀌었습니다. 최신 설정을 확인한 뒤 다시 승인해 주세요.',
+    'SEND_RESULT_UNKNOWN': '발송 결과를 확인하는 중인 초안입니다. 보낸편지함 대조를 먼저 해 주세요.',
+    'ACTION_NOT_ALLOWED': '지금 업무 상태에서는 이 초안을 보낼 수 없습니다.',
+    'REQUEST_IN_PROGRESS': '같은 요청을 처리하고 있습니다. 잠시 후 확인해 주세요.',
+    'IDEMPOTENCY_KEY_REUSED': '같은 요청 키로 다른 내용을 보낼 수 없습니다.',
+    'SEND_SCOPE_REQUIRED': '발송 설정이나 받는 주소를 확인해 주세요.',
+    'PROCESSING_UNAVAILABLE': '발송 처리를 잠시 할 수 없습니다. 잠시 후 다시 시도해 주세요.',
+}
 
 
 def dispatch_state(draft, case, policy):
@@ -22,6 +54,39 @@ def dispatch_state(draft, case, policy):
     approval_available = pending and policy.get('configured') is True and (
         policy.get('approval_required') is True or not auto_eligible)
     return auto_eligible, approval_available
+
+
+def send_state(owner, draft, case, policy, auto_eligible):
+    """초안의 지금 발송 상태 {code, message}. 보내지 않은 초안은 발송 워커가 왜 보내지 않는지를,
+    실패·불확실 초안은 저장된 실패 코드를 알려 준다."""
+    status = draft['status']
+    if status in {'SENT', 'SENDING'}:
+        code = status
+    elif status in {'FAILED', 'UNKNOWN'}:
+        stored = (draft.get('error_jsonb') or {}).get('code')
+        code = {'SETTINGS_CHANGED': 'SEND_SETTINGS_CHANGED', 'SEND_SNAPSHOT_CHANGED': 'SEND_SNAPSHOT_CHANGED',
+                'SEND_RESULT_UNKNOWN': 'SEND_RESULT_UNKNOWN'}.get(stored, 'SEND_RESULT_UNKNOWN' if status == 'UNKNOWN'
+                                                                   else 'SEND_FAILED')
+    elif draft['input_revision'] != case['input_revision']:
+        code = 'DRAFT_STALE'
+    elif not selected_for_dispatch(draft, case):
+        code = 'CANDIDATE_SELECTION_REQUIRED'
+    elif draft.get('approved_by') == owner and draft.get('approved_at'):
+        code = 'APPROVED_QUEUED'
+    elif policy.get('configured') is not True:
+        code = approval_block_reason(policy)
+    elif auto_eligible:
+        code = 'AUTO_QUEUED'
+    else:
+        style = draft.get('style_snapshot_jsonb') or {}
+        if style.get('candidate_caution'):
+            code = 'CAUTION_APPROVAL_REQUIRED'
+        elif (style.get('auto_policy_eligible') is True and policy.get('auto_eligible') is True
+              and policy.get('settings_version') != style.get('auto_settings_version')):
+            code = 'SETTINGS_CHANGED'
+        else:
+            code = 'APPROVAL_REQUIRED'
+    return {'code': code, 'message': SEND_STATE_MESSAGES[code]}
 
 
 def approval_block_reason(policy):
@@ -61,6 +126,7 @@ class MailDraftService:
             'auto_policy_eligible': auto_eligible,
             'approval_available': approval_available,
             'approval_block_reason': approval_block_reason(policy),
+            'send_state': send_state(owner, draft, case, policy, auto_eligible),
         }
 
     def get(self, owner, draft_id):
@@ -92,7 +158,7 @@ class MailDraftService:
                         'REQUEST_IN_PROGRESS': 409, 'IDEMPOTENCY_KEY_REUSED': 409,
                         'SEND_SCOPE_REQUIRED': 422, 'PROCESSING_UNAVAILABLE': 503}
             if code in statuses:
-                raise ServiceError(code, '최신 초안·설정과 서버 실행 상태를 확인해 주세요.', statuses[code])
+                raise ServiceError(code, SUBMIT_ERROR_MESSAGES[code], statuses[code])
         try:
             if result['kind'] not in {'ACCEPTED', 'REPLAY'} or result['http_status'] != 202:
                 raise ValueError('Invalid acceptance')
