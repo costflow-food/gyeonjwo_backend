@@ -10,10 +10,13 @@ from app.features.work_cases.domain.candidates import selection_staged
 
 def dispatch_state(draft, case, policy):
     """(auto_policy_eligible, approval_available) for API-16/17. Mirrors RfqDelivery's auto gate;
-    the DB submit_rfq_draft_action still re-checks every condition on approval."""
+    the DB submit_rfq_draft_action still re-checks every condition on approval.
+    초안을 만든 뒤 발송 설정을 다시 저장해 설정 버전이 바뀌면 워커가 자동 발송하지 않으므로(SETTINGS_CHANGED)
+    자동 발송 대상이 아니고 승인 버튼을 띄운다."""
     style = draft.get('style_snapshot_jsonb') or {}
     auto_eligible = (style.get('auto_policy_eligible') is True and not style.get('candidate_caution')
-                     and policy.get('auto_eligible') is True)
+                     and policy.get('auto_eligible') is True and bool(style.get('auto_settings_version'))
+                     and policy.get('settings_version') == style['auto_settings_version'])
     pending = (draft['status'] == 'DRAFT' and not draft.get('approved_by')
                and draft['input_revision'] == case['input_revision'])
     approval_available = pending and policy.get('configured') is True and (
