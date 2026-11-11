@@ -16,14 +16,12 @@ from app.api.responses import ErrorEnvelope, api_error, service_error_response
 from app.core.config import get_settings
 from app.core.logs import configure_logging, error_origin, stack_summary
 from app.core.request_context import current_request_id, new_request_id
-from app.shared.infrastructure.db.contracts import OwnershipLost, WorkNotFound
+from app.shared.infrastructure.db.contracts import OwnershipLost
 from app.core.errors import ServiceError
 from app.features.mail.infrastructure.gmail import verify_push
-from app.features.review.application.services import Services
 from app.core.http_limits import BodyLimitMiddleware
 from app.features.system.api.router import router as system_router
 from app.features.mail.api.router import router as mail_router
-from app.features.review.api.router import router as review_router
 from app.features.mailboxes.api.router import router as mailbox_router, make_mailbox_service
 from app.features.mailboxes.application.worker import ConnectedMailboxWorker
 from app.features.work_cases.api.router import get_list_service, router as work_cases_router
@@ -89,7 +87,7 @@ def log_unexpected(request, error: BaseException, request_id: str) -> None:
                  route_template(request), request_id, type(error).__name__, error_origin(error), stack_summary(error))
 
 
-def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_service=None):
+def create_app(settings=None, push_verifier=verify_push, mailbox_service=None):
     settings = settings or get_settings()
     configure_logging()
     require_startup_configuration(settings)
@@ -135,9 +133,11 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     # Explicitly override FastAPI's default HTTPValidationError schema: runtime uses ErrorEnvelope.
     common_errors = {status: {'model': ErrorEnvelope} for status in
                      (400, 401, 403, 404, 405, 409, 413, 422, 429, 502, 503, 504)}
+    # 운영에서는 API 문서(/docs·/redoc·/openapi.json)를 열지 않는다
+    docs = {} if settings.app_environment != 'production' else {'docs_url': None, 'redoc_url': None, 'openapi_url': None}
     app = FastAPI(title='견줘 Python Backend', version='1.0.0', lifespan=lifespan,
-                  responses=common_errors)
-    app.state.settings, app.state.services = settings, services
+                  responses=common_errors, **docs)
+    app.state.settings = settings
     app.state.mailbox_service = mailbox_service
     app.state.membership_checker = None
     app.state.connected_mailbox_worker = None
@@ -212,10 +212,6 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
     async def ownership_error(request, error):
         return api_error('REVISION_CONFLICT', '업무 상태 또는 작업 소유권이 변경됐습니다. 최신 내용을 확인해 주세요.', 409)
 
-    @app.exception_handler(WorkNotFound)
-    async def missing_work(request, error):
-        return api_error('RESOURCE_NOT_FOUND', '업무를 찾을 수 없습니다.', 404)
-
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request, error):
         if error.status_code == 404:
@@ -236,7 +232,6 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
 
     app.include_router(system_router)
     app.include_router(mail_router)
-    app.include_router(review_router)
     app.include_router(mailbox_router)
     app.include_router(work_cases_router)
     app.include_router(work_revisions_router)

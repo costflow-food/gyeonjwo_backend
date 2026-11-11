@@ -5,13 +5,10 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
 from fastapi.security import HTTPAuthorizationCredentials
 from starlette.concurrency import run_in_threadpool
-from app.api.dependencies import bearer, require_member
+from app.api.dependencies import bearer
 from app.api.responses import api_json, Envelope
 from app.core.errors import ServiceError
 from app.features.mail.infrastructure.gmail import parse_notification
-from app.shared.infrastructure.llm import JsonAgent
-from app.features.mail.domain.schemas import Classification, MailClassificationRequest
-from app.features.mail.application.classification import classify_or_raise
 from app.features.mailboxes.api.router import get_mailbox_service
 from app.features.mailboxes.api.router import require_google_user
 from app.features.mail.application.attachments import fetch_gmail_attachment
@@ -25,7 +22,6 @@ from app.features.mail.application.original import OriginalMailService
 from app.features.mail.infrastructure.original import OriginalMailRepository
 
 router = APIRouter(tags=['mail'])
-protected = [Depends(require_member)]
 receive_logger = logging.getLogger('uvicorn.error.gmail_receive')
 
 
@@ -116,17 +112,3 @@ async def gmail_webhook(request: Request, credentials: Annotated[HTTPAuthorizati
     if worker:
         worker.wake.set()
     return Response(status_code=204)
-
-
-@router.post('/api/v1/llm/classify-mail', dependencies=protected, deprecated=True, tags=['legacy-mail'])
-def classify_mail(payload: MailClassificationRequest, request: Request):
-    """Authenticated, bounded LLM call; does not create work or send mail."""
-    settings = request.app.state.settings
-    try:
-        settings.require_classification()
-    except RuntimeError:
-        raise ServiceError('CONFIGURATION_REQUIRED', 'LLM 연결 설정이 필요합니다.', 503) from None
-    result = classify_or_raise(JsonAgent(settings), payload.subject, payload.body)
-    return api_json({'classification': {'TRUE': 'BUSINESS', 'FALSE': 'NON_BUSINESS', 'PENDING': 'UNCERTAIN'}[result.status],
-                     'reason': result.reason, 'persisted': False})
-
