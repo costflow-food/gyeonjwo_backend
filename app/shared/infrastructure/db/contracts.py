@@ -1,4 +1,4 @@
-"""Notion 06 v2.2 (2026-10-26). No result tables or direct DML."""
+"""Notion 06 v2.2. No result tables or direct DML."""
 from datetime import date, datetime
 import re
 from uuid import UUID

@@ -1,7 +1,7 @@
 """Resolve Google identity from Supabase Auth's verified user response.
 
 Do not use request user IDs, decoded-but-unverified JWTs or editable user_metadata.
-Allowed-user (app_members) check runs right after this in require_google_user (KAN-203, membership.py).
+Allowed-user (app_members) check runs right after this in require_google_user (membership.py).
 """
 from uuid import UUID
 

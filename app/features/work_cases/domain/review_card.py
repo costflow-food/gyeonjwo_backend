@@ -4,7 +4,7 @@ from uuid import UUID
 from pydantic import Field
 from app.shared.domain.schemas import StrictModel
 
-# DB(review_card_check)가 카드 저장 때 정해 강제하는 종료 코드를 그대로 보낸다 (2026-11-06 결정)
+# DB(review_card_check)가 카드 저장 때 정해 강제하는 종료 코드를 그대로 보낸다
 ReviewOutcome = Literal['COMPLETED', 'REVIEW_REQUIRED_CLOSED', 'NO_VALID_PLAN']
 REVIEW_ACTIONS = ('SELECT_PLAN', 'HOLD', 'CONFIRM_REVIEW')
 

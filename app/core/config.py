@@ -6,7 +6,7 @@ from pydantic import HttpUrl, SecretStr, ValidationError, field_validator, model
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[2]
-# OpenAI reasoning effort 값 (2026-11-02 문서 기준). 모델마다 받는 값이 다르다 (예: gpt-5.4-mini는 minimal·max 없음)
+# OpenAI reasoning effort 값. 모델마다 받는 값이 다르다 (예: gpt-5.4-mini는 minimal·max 없음)
 ReasoningEffort = Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
 

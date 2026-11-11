@@ -113,7 +113,7 @@ def determine_link(message, candidates):
         return {'kind': 'EXISTING_CASE', 'case_id': case_id, 'matched_reference': row['matched_reference']}
     # Reply headers without a verified link go to intake (AMBIGUOUS) even when no
     # candidate matched. The DB ingest rejects NEW_MESSAGE that carries reply
-    # headers (23514), and that rejection halts the whole mailbox sync (KAN-155 S1-14).
+    # headers (23514), and that rejection halts the whole mailbox sync.
     if candidates or message.get('in_reply_to') or message.get('references'):
         return {'kind': 'AMBIGUOUS', 'case_id': None}
     return {'kind': 'NEW_MESSAGE', 'case_id': None}

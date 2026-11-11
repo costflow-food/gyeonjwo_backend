@@ -32,7 +32,7 @@ EXIT_TECHNICAL, EXIT_CONTENT, EXIT_OCR_UNAVAILABLE = 1, 2, 3
 # 고정한 OCR 모델 (rapidocr 3.10.0 기본 모델 목록 기준, 파일은 SHA256으로 확인된다)
 #   검출: PP-OCRv6 det small / 인식: 한국어 PP-OCRv5 rec mobile
 #   글자 방향 판단(cls)은 끈다. 켜면 표 안의 바른 글자를 뒤집힌 것으로 보고 '냉동딸기(IQF)'를 '(O|<움'으로 읽었다
-#   (2026-11-05 strawberry 공문 3개·합성 스캔 2개 비교: 끔 31/31, 켬 23/31 원문 대조 통과)
+#   (strawberry 공문 3개·합성 스캔 2개 비교: 끔 31/31, 켬 23/31 원문 대조 통과)
 OCR_MODEL_FILES = ('PP-OCRv6_det_small.onnx', 'korean_PP-OCRv5_rec_mobile.onnx')
 
 
@@ -80,7 +80,7 @@ def _engine(model_dir: str):
         'Det.ocr_version': OCRVersion.PPOCRV6, 'Det.model_type': ModelType.SMALL,
         'Rec.lang_type': LangRec.KOREAN, 'Rec.ocr_version': OCRVersion.PPOCRV5, 'Rec.model_type': ModelType.MOBILE,
         # 스레드는 하나. 기본값(-1)은 호스트 코어 수만큼 띄워, CPU 0.5개 컨테이너에서 A4 한 쪽이 82초 걸렸다(1개면 13초,
-        # 결과 같음. 2026-11-11 서버 이미지·--cpus=0.5 측정)
+        # 결과 같음. 서버 이미지·--cpus=0.5 측정)
         'EngineConfig.onnxruntime.intra_op_num_threads': OCR_THREADS,
         'EngineConfig.onnxruntime.inter_op_num_threads': OCR_THREADS})
 

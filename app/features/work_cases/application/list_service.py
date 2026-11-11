@@ -92,7 +92,7 @@ class WorkCaseListService:
                     continue
                 requester = (case.get('registered_requester_name') or case.get('requester_name')) if case['processing_step'] != 'PENDING_START' else None
                 searchable = [mail.get('subject'), mail.get('sender'), mail.get('sender_name'), case.get('item_name'), requester]
-                # 띄어쓰기 무시: '냉동망고'로 검색해도 '냉동 망고' 업무가 나온다(KAN-192 기준)
+                # 띄어쓰기 무시: '냉동망고'로 검색해도 '냉동 망고' 업무가 나온다
                 if query and not any(contains_ignoring_spaces(value, query) for value in searchable):
                     continue
                 counts.total += 1

@@ -19,7 +19,7 @@ def _not_ready(checks, revision):
 @router.get('/ready')
 def ready(request: Request):
     settings=request.app.state.settings
-    # KAN-202: 배포 스크립트가 이 응답이 새 컨테이너에서 왔는지 확인한다(200·503 모두).
+    # 배포 스크립트가 이 응답이 새 컨테이너에서 왔는지 확인한다(200·503 모두).
     revision = settings.app_build_revision
     checks={'configuration':'not_ready','database':'not_checked','gmail_worker':'not_running'}
     report=configuration_report(settings)
@@ -40,7 +40,7 @@ def ready(request: Request):
     checks['gmail_worker']='running'
     metadata_worker = getattr(request.app.state, 'rfq_metadata_worker', None)
     checks['rfq_metadata_worker'] = 'running' if metadata_worker and metadata_worker.running else 'not_running'
-    # KAN-161 S4-16: RFQ preparation/sending worker. Per-user send settings still gate actual sending.
+    # RFQ preparation/sending worker. Per-user send settings still gate actual sending.
     dispatch_worker = getattr(request.app.state, 'rfq_workflow_worker', None)
     checks['rfq_dispatch'] = 'running' if dispatch_worker and dispatch_worker.running else 'not_running'
     checks['review_execution_mode'] = 'GRAPH_START'

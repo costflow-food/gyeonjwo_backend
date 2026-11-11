@@ -260,7 +260,7 @@ class AgentRole(StrEnum):
 # 확인 우선순위는 비용 누락도 원문을 다시 읽고, 대응안은 평균 5.5~6.2회를 써서 8회를 가끔 넘었다.
 TOOL_CALL_LIMITS = {AgentRole.INFO_PRIORITY: 10, AgentRole.RESPONSE_PLAN: 10}
 # ① 회신 검토는 쌓인 회신을 한 번에 받는다. 메일 한 통에 본문·첨부 읽기와 저장(다시 보내기 포함)이 들므로
-# 두 번째 메일부터 메일마다 한도를 늘리고 상한을 둔다 (2026-11-06 실제 LLM: 회신 3통에서 10/8회로 실패)
+# 두 번째 메일부터 메일마다 한도를 늘리고 상한을 둔다 (실제 LLM: 회신 3통에서 10/8회로 실패)
 EXTRACTION_TOOL_CALLS_PER_EXTRA_MAIL = 4
 EXTRACTION_TOOL_CALL_CAP = 24
 
@@ -332,9 +332,9 @@ class AgentOutput(StrictModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
-# 보류 코드 (KAN-146). 서버(work_cases/domain/hold.py)가 이 코드로 화면 문구를 정한다. reason은 한국어 문장만 쓴다.
+# 보류 코드. 서버(work_cases/domain/hold.py)가 이 코드로 화면 문구를 정한다. reason은 한국어 문장만 쓴다.
 # HOLD인데 hold가 None이면 서버가 HOLD_REASON_UNAVAILABLE로 본다. 실행 중 업무가 바뀌어 멈춘 경우
-# (REVISION_CHANGED·CASE_NOT_FOUND)와 원인을 정하지 못한 경우만 None이다(2026-11-06 결정).
+# (REVISION_CHANGED·CASE_NOT_FOUND)와 원인을 정하지 못한 경우만 None이다.
 ExtractionHoldCode = Literal['SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH', 'MISSING_FIELD', 'MISSING_EVIDENCE',
                              'SOURCE_READ_FAILED', 'NO_QUOTE_DATA']
 # MISSING_FIELD에서 빠진 항목. quantity는 기존 업체 인상 통보의 공급 물량(업무 비교 수량)이다
