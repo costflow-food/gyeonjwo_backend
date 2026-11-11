@@ -36,6 +36,11 @@ class WorkCaseListRepository:
         from app.features.work_cases.infrastructure.resume_repository import ResumeEligibilityRepository
         return ResumeEligibilityRepository(self.client).blocks(owner, cases)
 
+    def proceed_blocks(self, owner, cases, summaries):
+        """'현재 회신으로 진행'을 미리 끌 업무와 사유(초안 미해결·회신 없음)."""
+        from app.features.work_cases.infrastructure.resume_repository import ResumeEligibilityRepository
+        return ResumeEligibilityRepository(self.client).proceed_blocks(owner, cases, summaries)
+
     def candidate_blocks(self, owner, cases):
         return self.candidates.blocks(owner, cases)
 

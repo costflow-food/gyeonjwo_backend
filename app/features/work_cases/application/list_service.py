@@ -143,12 +143,18 @@ class WorkCaseListService:
             summaries = summaries_read.result() if summaries_read else {}
             hold_reasons = hold_read.result() if hold_read else {}
             candidate_blocks = candidate_read.result() if candidate_read else {}
+            proceeding = [page_cases[str(row.case_id)] for _, row in page if 'PROCEED' in row.allowed_actions]
+            proceed_blocks = self.repo.proceed_blocks(owner, proceeding, summaries) if proceeding else {}
             for _, row in page:
                 row.hold = hold_reasons.get(str(row.case_id))
                 if str(row.case_id) in resume_blocks:
                     row.allowed_actions.remove('RESUME')
                     code, message = resume_blocks[str(row.case_id)]
                     row.disabled_actions.append({'action': 'RESUME', 'reason_code': code, 'message': message})
+                if str(row.case_id) in proceed_blocks:
+                    row.allowed_actions.remove('PROCEED')
+                    code, message = proceed_blocks[str(row.case_id)]
+                    row.disabled_actions.append({'action': 'PROCEED', 'reason_code': code, 'message': message})
                 if page_cases[str(row.case_id)].get('current_rfq_round_id', True) is not None:
                     row.reply_summary = summaries[str(row.case_id)]
                 if str(row.case_id) in candidate_blocks:

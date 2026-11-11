@@ -1,5 +1,6 @@
 """One action policy for the list and detail views; SQL rechecks mutations."""
 from app.features.work_cases.application.start_readiness import StartReadiness
+from app.features.work_cases.domain.proceed import PROCEED_BLOCK_MESSAGES
 
 
 def case_actions(case, readiness: StartReadiness, resume_readiness: StartReadiness | None = None,
@@ -45,6 +46,23 @@ def case_actions(case, readiness: StartReadiness, resume_readiness: StartReadine
                 blocked = (unavailable.code, unavailable.message)
         if blocked:
             disabled.append({'action': 'RESUME', 'reason_code': blocked[0], 'message': blocked[1]})
+    # 회신 대기 중에만 '현재 회신으로 진행'을 연다. 초안·회신 수 확인은 목록·상세가 DB를 읽어 덧붙인다
+    if case.get('status') == 'Running' and case.get('processing_step') == 'WAITING_REPLY':
+        blocked = None
+        if archived:
+            blocked = ('CASE_ARCHIVED', '보관된 업무는 먼저 복원해야 합니다.')
+        elif (decision in {'HOLD', 'CONFIRM_REVIEW', 'ACCEPT_INCREASE'} or not case.get('current_batch_id')
+              or case.get('current_rfq_round_id', True) is None):
+            blocked = ('STATE', PROCEED_BLOCK_MESSAGES['STATE'])
+        else:
+            graph = resume_readiness or StartReadiness('RESUME_INTEGRATION_REQUIRED', '그래프 재개 저장 기능이 아직 준비되지 않았습니다.')
+            unavailable = readiness if not readiness.available else graph
+            if unavailable.available:
+                actions.append('PROCEED')
+            else:
+                blocked = (unavailable.code, unavailable.message)
+        if blocked:
+            disabled.append({'action': 'PROCEED', 'reason_code': blocked[0], 'message': blocked[1]})
     can_archive = not archived and case.get('status') in {'Waiting', 'Pending', 'Complete'}
     pending_actions = ['RESTORE'] if archived else []
     if can_archive:
