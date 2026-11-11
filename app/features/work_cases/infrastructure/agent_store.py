@@ -15,7 +15,7 @@ class AgentStore:
     def __init__(self, scope, job):
         self.scope, self.repo, self.job = scope, scope.repo, job
         self.saved_ids, self.records, self.pages = set(), {}, {}
-        self.read_chars = {}     # (mail_id, part, page) → 에이전트에게 실제로 준 본문·쪽의 글자 수 (KAN-212)
+        self.read_chars = {}     # (mail_id, part, page) → 에이전트에게 실제로 준 본문·쪽의 글자 수
         self.document_status = {}
         self.final_output = None
         self.model_id, self.prompt_version = '', ''
@@ -96,7 +96,7 @@ class AgentStore:
 
     def check_document_budget(self, extra=0):
         self.scope.remaining_seconds()
-        # 읽지 않은 첨부 쪽은 세지 않는다. 쪽수를 알려 주려고 PDF를 연 것은 읽은 것이 아니다 (KAN-212)
+        # 읽지 않은 첨부 쪽은 세지 않는다. 쪽수를 알려 주려고 PDF를 연 것은 읽은 것이 아니다
         if sum(self.read_chars.values()) + extra > self.scope.max_characters:
             raise ServiceError('EXTRACTION_DOCUMENT_LIMIT', '문서 처리 한도를 초과했습니다.', 503)
 

@@ -337,7 +337,7 @@ def progress_waiting_reason(step):
 
 def progress_error(step, code):
     """API-03 error. ON_HOLD already explains itself through `hold`, so an unknown
-    stored code there is not re-labelled as EXTRACTION_FAILED (KAN-161 S7-12)."""
+    stored code there is not re-labelled as EXTRACTION_FAILED."""
     if not code:
         return None
     if isinstance(code, str) and code in PROGRESS_ERROR_CODES:
@@ -349,7 +349,7 @@ def progress_error(step, code):
 def case_messages(case_id: UUID, request: Request, principal=Depends(require_google_user),
                   cursor: Annotated[str | None, Query()] = None,
                   limit: Annotated[int, Query(ge=1, le=100)] = 25):
-    """API-10 (KAN-175). Reuses the list service's client, cursor key and reply facts RPC."""
+    """API-10. Reuses the list service's client, cursor key and reply facts RPC."""
     from app.features.work_cases.infrastructure.messages_repository import list_case_messages
     service = get_list_service(request.app.state)
     return api_json(list_case_messages(service.repo.client, service.codec, principal.user_id, case_id,
@@ -423,7 +423,7 @@ def get_case(case_id: UUID, request: Request, principal=Depends(require_google_u
         block = CandidateRepository(repo.client).blocks(principal.user_id, [row]).get(str(case_id))
         apply_candidate_action(row, actions, disabled, block)
     batch_id = row.pop('current_batch_id')
-    # KAN-161 S2-6: API-02 carries the stored goal conditions and policy (08 §5).
+    # API-02 carries the stored goal conditions and policy (08 §5).
     row['mandatory_conditions'] = row.pop('mandatory_conditions_jsonb', None)
     row['policy'] = row.pop('policy_jsonb', None)
     return api_json({'case_id': row.pop('id'), **row,

@@ -58,7 +58,7 @@ def require_google_user(request: Request,
     if not credentials:
         raise ServiceError('AUTH_REQUIRED', '로그인이 필요합니다.', 401)
     principal = google_principal(credentials.credentials, request.app.state.settings)
-    # KAN-203: 허용 목록에 있는 활성 사용자만 통과(오류는 거부)
+    # 허용 목록에 있는 활성 사용자만 통과(오류는 거부)
     get_membership_checker(request).require(principal)
     return principal
 

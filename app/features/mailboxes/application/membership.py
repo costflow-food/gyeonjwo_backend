@@ -1,4 +1,4 @@
-"""허용 사용자 확인 (KAN-203).
+"""허용 사용자 확인.
 
 Google 신원 확인(google_principal) 바로 뒤에 DB `public.check_app_member`로 허용 목록을 확인한다.
 - 허용: user_id별 60초 메모리 캐시. 거부·오류는 캐시하지 않는다(새로 등록한 사람이 바로 쓰게).

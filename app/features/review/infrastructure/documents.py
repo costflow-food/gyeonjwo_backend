@@ -81,12 +81,12 @@ def source_file(source: dict, work_id: str, filename: str) -> dict:
 PDF_MAX_ATTEMPTS = 4             # 기술 오류는 최초 1회 + 재시도 3회까지 (내용 문제는 다시 시도하지 않는다)
 PDF_TEXT_TIMEOUT_SECONDS = 20    # 텍스트 레이어 읽기 한 번의 시간 제한
 # OCR 엔진: RapidOCR + PaddleOCR 한국어 모델 (모델·설정은 pdf_worker.OCR_MODEL_FILES)
-# 2026-11-05 비교(strawberry 공문 3개·합성 스캔 2개, 정답 값 31개의 원문 대조 통과):
+# 엔진 비교(strawberry 공문 3개·합성 스캔 2개, 정답 값 31개의 원문 대조 통과):
 #   RapidOCR 한국어 v5 31/31, Tesseract 5.4 kor+eng 17/31 ('원'→'21', '10kg'→'1069' 등 오인식)
 OCR_DPI = 300                    # 제안값. 위 비교에 쓴 해상도
 OCR_TIMEOUT_SECONDS = 45         # 한 쪽 OCR 한 번의 시간 제한. CPU 0.5개 서버에서 A4 한 쪽이 약 13초(모델 로딩 포함)
 # PDF 워커 자식 프로세스의 실제 메모리 상한(MB, /proc가 있는 리눅스만). 넘으면 끝내고 내용 문제로 본다.
-# 서버는 메모리 1GB 컨테이너 하나에 API·메일 수신·워커가 같이 돈다(2026-11-11 운영 스펙). 서버 이미지에서 잰 OCR 한 쪽의
+# 서버는 메모리 1GB 컨테이너 하나에 API·메일 수신·워커가 같이 돈다(운영 스펙). 서버 이미지에서 잰 OCR 한 쪽의
 # 최고 실제 메모리: A4·A3 약 620MB, 픽셀 상한까지 줄인 A0 약 700MB. 서버 프로세스는 기동 직후 약 120MB.
 # 환경변수 PDF_WORKER_MEMORY_MB로 바꿀 수 있다
 PDF_WORKER_MEMORY_MB = 760
