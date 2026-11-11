@@ -1292,10 +1292,37 @@ def verify_output(model: BaseChatModel, role: AgentRole, attempt: int, packet: d
     return {'verdict': answer.verdict, 'issues': [i.model_dump() for i in kept], 'dropped': [i.model_dump() for i in dropped]}
 
 
-def verify_feedback(issues: list[dict], lead: str = _VERIFY_FEEDBACK) -> str:
-    """에이전트에 돌려줄 지적 안내. lead는 맨 앞 안내 문장(최종 답 검증·초안 전 검증에 따라 다르다)."""
-    lines = [f"- {i['target']} ({i['code']}): {i['explanation']}"
-             + (f" 원문: \"{i['evidence_quote']}\"" if i.get('evidence_quote') else '') for i in issues]
+# LLM 검증자 지적을 에이전트에 돌려줄 때 쓰는 고칠 방법 (역할, 확인 항목 코드별). 검증자가 쓴 설명·인용한 메일 문장은
+# 에이전트에 넘기지 않는다(메일 속 문장이 지시처럼 에이전트에 들어가지 않게). 표에 없는 코드는 _VERIFY_HINT_DEFAULT
+_VERIFY_HINTS = {
+    (AgentRole.INFO_EXTRACTOR, 'VALUE_MISMATCH'): '원문에서 그 항목의 뜻에 맞는 값을 다시 골라 저장한다(인상 전 단가·다른 품목·예시 물량이 아닌 값).',
+    (AgentRole.INFO_EXTRACTOR, 'WRONG_FIELD'): '그 값의 뜻에 맞는 필드로 옮겨 다시 저장한다(적용일은 effective_from, 유효기간은 valid_until, 포장 단위 수량은 공급 물량이 아님).',
+    (AgentRole.INFO_EXTRACTOR, 'COST_MISREAD'): '비용 원문을 다시 읽고 included_in_price·payer·basis_type을 원문 뜻대로 고쳐 다시 저장한다.',
+    (AgentRole.INFO_EXTRACTOR, 'MISSING_VALUE'): '읽은 원문에 있는 그 항목(단가·단위·공급 물량·부대비용)을 근거와 함께 저장한다.',
+    (AgentRole.INFO_EXTRACTOR, 'WRONG_ITEM'): '업무 품목(get_case_context의 item_name)의 견적만 저장한다.',
+    (AgentRole.INFO_EXTRACTOR, 'WRONG_HOLD'): '읽은 원문에 업무 품목 단가가 있으면 HOLD하지 말고 저장한다.',
+    (AgentRole.CANDIDATE, 'WRONG_ITEM'): '업무 품목과 원재료·상태가 같은 등록 품목만 supplier_item_ids에 넣는다.',
+    (AgentRole.CANDIDATE, 'MISSED_ITEM'): 'search_supplier_items 결과에서 업무 품목과 같은 품목을 빠짐없이 supplier_item_ids에 넣는다.',
+    (AgentRole.CANDIDATE, 'QUESTION_ALREADY_ANSWERED'): '그 업체의 등록 비고에 이미 답이 있는 선택 질문은 questions에서 뺀다.',
+    (AgentRole.INFO_PRIORITY, 'ANSWER_IN_SOURCE'): '그 업체 메일 원문에 답이 있으면 묻지 말고 recheck로 재추출한다.',
+    (AgentRole.INFO_PRIORITY, 'WRONG_REQUIREMENT'): 'requirements의 stated가 required를 충족하는지 다시 판단한다. 충족하면 묻지 않고, 충족하지 않으면 묻는다.',
+    (AgentRole.INFO_PRIORITY, 'WRONG_RECHECK'): 'recheck의 source_text를 그 항목의 답이 적힌 원문 구절로 고친다.',
+    (AgentRole.RESPONSE_PLAN, 'WRONG_REQUIREMENT'): 'met_requirements를 다시 판단한다. stated가 required를 분명히 충족할 때만 넣는다.',
+    (AgentRole.RESPONSE_PLAN, 'PLAN_REASON'): '안의 reason을 validate_purchase_plan 결과(금액 순서·성립 조건)와 맞게 고친다.',
+    (AgentRole.RESPONSE_PLAN, 'WRONG_RECHECK'): 'recheck의 source_text를 그 항목의 답이 적힌 원문 구절로 고친다.',
+    (AgentRole.COUNTER_OFFER, 'CONDITION_UNGROUNDED'): 'conditions는 업무 수량·견적·도구 결과에 있는 조건만 쓴다. 근거 없는 약속은 뺀다.',
+    (AgentRole.COUNTER_OFFER, 'WRONG_RECHECK'): 'recheck의 source_text를 인상 전 단가가 적힌 원문 구절로 고친다.',
+}
+_VERIFY_HINT_DEFAULT = '그 항목을 근거 원문·도구 결과와 다시 대조해 고친다.'
+
+
+def verify_feedback(issues: list[dict], lead: str = _VERIFY_FEEDBACK, role: AgentRole | None = None) -> str:
+    """에이전트에 돌려줄 지적 안내. lead는 맨 앞 안내 문장(최종 답 검증·초안 전 검증에 따라 다르다).
+    LLM 검증자 지적은 항목·코드와 코드가 정한 고칠 방법(_VERIFY_HINTS)만 넘긴다. 코드 규칙 지적(근거 구절 없음)은
+    설명을 코드가 썼으므로 그대로 넘긴다."""
+    lines = [f"- {i['target']} ({i['code']}): "
+             + (_VERIFY_HINTS.get((role, i['code']), _VERIFY_HINT_DEFAULT) if i.get('evidence_quote') else i['explanation'])
+             for i in issues]
     return '\n'.join([lead, *lines])
 
 
@@ -1377,10 +1404,9 @@ class DraftGateMiddleware(AgentMiddleware):
             return self._mark(handler(request), 'UNRESOLVED', issues)
         return self._not_run(call, 'REVISE', 'VERIFY_REVISE', issues, _GATE_FEEDBACK)
 
-    @staticmethod
-    def _not_run(call: dict, state: str, code: str, issues: list[dict], lead: str) -> ToolMessage:
+    def _not_run(self, call: dict, state: str, code: str, issues: list[dict], lead: str) -> ToolMessage:
         """초안 도구를 실행하지 않고 지적을 도구 결과로 돌려준다. state는 artifact에, code는 LLM이 보는 결과에 남는다."""
-        content = json.dumps({'status': 'NOT_RUN', 'code': code, 'message': verify_feedback(issues, lead)},
+        content = json.dumps({'status': 'NOT_RUN', 'code': code, 'message': verify_feedback(issues, lead, self.role)},
                              ensure_ascii=False)
         return ToolMessage(content=content, name=call['name'], tool_call_id=call['id'],
                            artifact={'verify_gate': state, 'issues': issues})
@@ -1767,7 +1793,7 @@ class AgentRunner:
             if attempt == MAX_VERIFY_ATTEMPTS:
                 break
             try:
-                output, messages = run([*messages, HumanMessage(verify_feedback(issues))])
+                output, messages = run([*messages, HumanMessage(verify_feedback(issues, role=role))])
             except ServiceError:
                 raise
             except Exception as error:
