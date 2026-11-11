@@ -80,6 +80,8 @@ PROMPTS = {
    읽은 것이다. 보이는 글자를 그대로 옮기고, 흐리거나 빠진 글자를 짐작해 채우지 않는다.
    UNREADABLE이면 그 쪽은 다시 읽지 않는다(다시 불러도 같다). UNREADABLE이거나 OCR 결과도 비었으면(empty) 그 쪽은
    읽을 수 없는 첨부다. 첨부를 읽어 보지 않고 "첨부를 읽을 수 없음"으로 HOLD하지 않는다.
+   truncated면 그 본문·쪽의 뒷부분이 더 있다. 찾는 품목·단가가 아직 안 나왔으면 같은 part·page를 offset=next_offset으로
+   이어 읽는다. LIMIT_EXCEEDED면 더 읽지 말고 hold.code SOURCE_READ_FAILED로 바로 HOLD한다.
    도구 호출 수에 한도가 있으니 모든 쪽을 읽지 않는다.
 3. recheck_fields가 비어 있지 않으면 그 항목에 해당하는 구간만 다시 읽는다.
 4. store_structured_mail을 호출한다. 값이 있는 항목은 하나도 빠짐없이 근거 evidence(mail_id, part, page, cell)를 붙인다.
@@ -215,6 +217,7 @@ hold (보류 코드. 서버가 이 코드로 담당자에게 보일 문구를 �
   - NO_QUOTE_DATA — 단가 없음·접수 안내·견적 아님·다른 품목의 견적만 있음:
     "이 메일에는 업무 품목의 견적 정보가 없어 저장하지 않았습니다."
   - SOURCE_READ_FAILED — 견적이 있을 첨부 쪽을 read_mail_evidence로 읽었는데 읽을 수 없어 견적을 확인하지 못함.
+    read_mail_evidence가 LIMIT_EXCEEDED(원문이 처리 한도를 넘음)를 돌려준 경우도 이 코드다.
     첨부를 읽어 보지 않고 이 코드를 쓰지 않는다:
     "첨부를 읽을 수 없어 견적을 저장하지 못했습니다."
   - SUPPLIER_NOT_MATCHED — store_structured_mail이 SUPPLIER_NOT_MATCHED를 돌려줌:
