@@ -169,7 +169,7 @@ class GraphStore(AgentStore):
 
     def incumbent_supplier_ids(self, case_id):
         case = self.get_work_case(case_id)
-        # Reply suppliers must not become incumbents when REPLY is added later.
+        # 기존 업체는 인상 통보(최초 메일) 견적의 업체만이다. 회신을 보낸 업체는 기존 업체가 아니다
         rows = self.rows(self.repo.client.table('quote_versions').select('supplier_id')
             .eq('owner_user_id', self.scope.owner).eq('work_case_id', str(case_id))
             .eq('source_mail_id', case['initial_mail_id']).limit(1000))
