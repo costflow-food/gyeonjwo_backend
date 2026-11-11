@@ -234,7 +234,8 @@ class GraphStore(AgentStore):
     def current_send_settings(self, case_id):
         case = self.get_work_case(case_id)
         base, override = MailManagementRepository(self.repo.client).settings(self.scope.owner, case['mailbox_ref'], case_id)
-        return {**((base or {}).get('style_jsonb') or {}), **((override or {}).get('style_jsonb') or {})}
+        from app.features.mail_management.domain.models import merged_style
+        return merged_style((base or {}).get('style_jsonb'), (override or {}).get('style_jsonb'))
 
     def insert_mail_draft(self, record, expected_input_revision):
         from app.agents.tools import MailDraftRecord
