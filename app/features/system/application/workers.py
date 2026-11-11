@@ -97,6 +97,24 @@ def start_graph_worker(state, settings):
     return state.extraction_worker
 
 
+def start_call_recording_worker(state, settings):
+    """통화 녹음 정리 워커(KAN-248)를 만들고 시작한다. DB 계약(버킷·한도)이 다르면 None으로 둔다."""
+    from app.features.call_recordings.infrastructure import CallRecordingRepository, CallRecordingStorage
+    from app.features.call_recordings.worker import CallRecordingCleanupWorker
+    try:
+        client = make_server_client(settings)
+        repo = CallRecordingRepository(client)
+        if not repo.ready():
+            raise RuntimeError('call recording contract unavailable')
+        worker = CallRecordingCleanupWorker(repo, CallRecordingStorage(client))
+        worker.start()
+        state.call_recording_worker = worker
+    except Exception:
+        state.call_recording_worker = None
+        logger.warning('call recording worker unavailable code=SCHEMA_REQUIRED; API remains available')
+    return state.call_recording_worker
+
+
 def revive_workers(state, settings):
     """부팅 때 못 뜬 RFQ·그래프 워커를 다시 띄운다. 이미 떠 있는 워커는 건드리지 않는다."""
     for worker in create_missing_rfq_workers(state, settings):
@@ -104,13 +122,16 @@ def revive_workers(state, settings):
         logger.info('worker recovered name=%s', type(worker).__name__)
     if state.extraction_worker is None and start_graph_worker(state, settings) is not None:
         logger.info('worker recovered name=GraphWorker')
+    if getattr(state, 'call_recording_worker', None) is None and start_call_recording_worker(state, settings) is not None:
+        logger.info('worker recovered name=CallRecordingCleanupWorker')
 
 
 async def retry_unavailable_workers(state, settings, interval=WORKER_RETRY_SECONDS):
     """DB 계약이 고쳐지면 재배포 없이 워커가 올라오도록, 빠진 워커가 있는 동안 주기적으로 다시 시도한다."""
     while True:
         await asyncio.sleep(interval)
-        missing = state.extraction_worker is None or (state.connected_mailbox_worker is not None and (
+        missing = state.extraction_worker is None or getattr(state, 'call_recording_worker', None) is None or (
+            state.connected_mailbox_worker is not None and (
             state.rfq_metadata_worker is None or state.rfq_workflow_worker is None))
         if not missing:
             continue
