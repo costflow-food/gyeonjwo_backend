@@ -25,6 +25,10 @@ class CaseRuntimeRepository:
                      'INVALID_PLAN_SELECTION': 422, 'DRAFT_CHANGED': 409, 'SEND_RESULT_UNKNOWN': 409,
                      'INVALID_CONDITIONS': 422}
             code = result.get('code')
+            if code == 'ACTION_NOT_ALLOWED' and name == 'submit_work_case_proceed':
+                # 진행(PROCEED)은 거절 사유(reason)를 같이 돌려준다. 사유별 안내 문구를 쓴다
+                from app.features.work_cases.domain.proceed import proceed_block
+                raise ServiceError(code, proceed_block(result.get('reason'))[1], 409, retryable=False)
             if code in codes:
                 raise ServiceError(code, '최신 업무 상태와 요청을 확인해 주세요.', codes[code],
                                    current_revision=result.get('current_revision'), retryable=False)
@@ -150,6 +154,33 @@ class CaseRuntimeRepository:
     def resume(self, owner, case_id, revision, reason, key, body_hash, request_id):
         return self.call('submit_work_case_resume', p_owner=owner, p_case=str(case_id), p_revision=revision,
                          p_reason=reason, p_key=key, p_hash=body_hash, p_request_id=request_id)
+
+    def proceed_available(self):
+        """'현재 회신으로 진행' 접수·조회 DB 함수가 공개돼 있는지(서명만 본다)."""
+        return self.rpc_signatures_available({
+            'submit_work_case_proceed': {'p_owner', 'p_case', 'p_revision', 'p_key', 'p_hash', 'p_request_id'},
+            'lookup_work_case_proceed_request': {'p_owner', 'p_case', 'p_key', 'p_hash'},
+        })
+
+    def proceed_receipt(self, owner, case_id, revision, key):
+        """같은 Idempotency-Key로 이미 접수된 진행 요청의 저장된 응답. 없으면 None."""
+        from app.features.work_cases.application.actions import revision_body_hash
+        try:
+            result = self.call('lookup_work_case_proceed_request', p_owner=str(owner), p_case=str(case_id),
+                               p_key=key, p_hash=revision_body_hash(revision))
+        except ServiceError as error:
+            if error.code == 'EXTRACTION_SCHEMA_REQUIRED':
+                raise ServiceError('PROCEED_INTEGRATION_REQUIRED', '현재 회신으로 진행하는 저장 기능이 아직 연결되지 않았습니다.',
+                                   503, retryable=False, next_action='CONTACT_SERVER_ADMIN') from None
+            raise
+        if not isinstance(result, dict) or result.get('kind') not in {'NONE', 'REPLAY'}:
+            raise ServiceError('PROCESSING_UNAVAILABLE', '진행 접수 이력을 확인할 수 없습니다.', 503)
+        return result if result['kind'] == 'REPLAY' else None
+
+    def proceed(self, owner, case_id, revision, key, body_hash, request_id):
+        """회신 대기(또는 실패한 구매안 단계) 업무를 지금까지의 회신으로 구매안 단계(PLAN)부터 다시 예약한다."""
+        return self.call('submit_work_case_proceed', p_owner=owner, p_case=str(case_id), p_revision=revision,
+                         p_key=key, p_hash=body_hash, p_request_id=request_id)
 
     def context(self, owner, case_id, revision, batch):
         try:

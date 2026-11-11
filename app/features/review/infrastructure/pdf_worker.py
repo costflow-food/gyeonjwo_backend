@@ -2,6 +2,7 @@
 
 텍스트 모드(인자 없음): 쪽마다 텍스트 레이어를 읽는다. 글자가 없는 쪽(스캔 이미지)도 빈 문자열로 남겨 쪽수를 보존한다.
 OCR 모드(`ocr <쪽 번호> <모델 폴더> <dpi>`): 그 한 쪽만 그림으로 렌더링해 RapidOCR(PaddleOCR 한국어 모델)로 읽는다.
+  입력이 PDF가 아니면 사진(jpg·png) 1쪽으로 보고 그대로 OCR한다. 픽셀 수가 MAX_IMAGE_PIXELS를 넘으면 내용 문제다.
   모델은 <모델 폴더>에 미리 받아 둔 파일만 쓴다. 실행 중에 내려받지 않는다.
 모델 준비(`setup <모델 폴더>`, stdin 없음): 모델을 내려받아 SHA256을 확인한다. 서버 빌드·개발 PC에서 한 번 실행한다.
 
@@ -14,6 +15,7 @@ OCR 모드(`ocr <쪽 번호> <모델 폴더> <dpi>`): 그 한 쪽만 그림으�
 """
 import io
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -28,6 +30,12 @@ MAX_RENDER_PIXELS = 20_000_000
 MIN_RENDER_DPI = 100
 OCR_THREADS = 1
 EXIT_TECHNICAL, EXIT_CONTENT, EXIT_OCR_UNAVAILABLE = 1, 2, 3
+# 사진(jpg·png) 픽셀 수 상한. PDF 렌더링 상한과 같다. 디코딩 전에 OpenCV가 확인해, 해상도를 부풀린 그림이
+# 워커 메모리 한도를 넘기기 전에 내용 문제(EXIT_CONTENT, 재시도 없음)로 끝낸다
+MAX_IMAGE_PIXELS = MAX_RENDER_PIXELS
+os.environ['OPENCV_IO_MAX_IMAGE_PIXELS'] = str(MAX_IMAGE_PIXELS)   # cv2를 처음 쓰기 전에 둔다
+# OCR 전 긴 변 상한 (제안값). 엔진도 줄여 읽지만, 3채널로 늘리기 전에 줄여 메모리를 아낀다
+MAX_IMAGE_SIDE = 4000
 
 # 고정한 OCR 모델 (rapidocr 3.10.0 기본 모델 목록 기준, 파일은 SHA256으로 확인된다)
 #   검출: PP-OCRv6 det small / 인식: 한국어 PP-OCRv5 rec mobile
@@ -112,12 +120,37 @@ def render_scale(width_pt: float, height_pt: float, dpi: int) -> float:
     return scale
 
 
+def _photo(raw, number: int):
+    """사진(jpg·png)을 회색조로 연다. 사진은 1쪽뿐이다. 긴 변이 MAX_IMAGE_SIDE를 넘으면 줄인다."""
+    if number != 1:
+        raise ContentError('Image has one page')
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        raise OcrUnavailable() from None
+    try:
+        gray = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_GRAYSCALE)
+    except (cv2.error, MemoryError):
+        raise ContentError('Image cannot be decoded') from None
+    if gray is None or gray.size == 0:
+        raise ContentError('Image cannot be decoded')     # 그림이 아니거나 MAX_IMAGE_PIXELS 초과
+    scale = MAX_IMAGE_SIDE / max(gray.shape)
+    if scale < 1:
+        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    return gray
+
+
 def ocr_page(raw, number: int, model_dir: str, dpi: int) -> str:
-    """number쪽(1부터)을 렌더링해 OCR한 텍스트."""
-    if not 1 <= number <= len(_reader(raw).pages):
+    """number쪽(1부터)을 렌더링해 OCR한 텍스트. PDF가 아니면 사진으로 본다."""
+    is_pdf = b'%PDF' in raw[:1024]
+    if is_pdf and not 1 <= number <= len(_reader(raw).pages):
         raise ContentError('PDF page out of range')
     if not all((Path(model_dir) / name).is_file() for name in OCR_MODEL_FILES):
         raise OcrUnavailable()
+    if not is_pdf:
+        gray = _photo(raw, number)
+        return _ocr(gray[:, :, None].repeat(3, axis=2), model_dir)
     try:
         import pypdfium2 as pdfium
     except ImportError:
@@ -134,6 +167,10 @@ def ocr_page(raw, number: int, model_dir: str, dpi: int) -> str:
     finally:
         pdf.close()
     image = gray[:, :, :1].repeat(3, axis=2) if gray.ndim == 3 else gray[:, :, None].repeat(3, axis=2)
+    return _ocr(image, model_dir)
+
+
+def _ocr(image, model_dir: str) -> str:
     result = _engine(model_dir)(image)
     if result.boxes is None or not len(result.boxes):
         return ''

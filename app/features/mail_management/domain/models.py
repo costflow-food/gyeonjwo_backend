@@ -99,6 +99,20 @@ class ApprovalUpdate(StrictModel):
 class MailStyle(StrictModel):
     tone: Literal['FORMAL', 'FRIENDLY'] = 'FORMAL'
     signature: str = Field(default='', max_length=4000)
+    # RFQ 초안 제목 [회사명]과 본문 첫 소개 문장. 길이는 DB submit_mail_send_settings와 같다
+    company_name: str = Field(default='', max_length=100)
+    introduction: str = Field(default='', max_length=500)
+
+
+def merged_style(base: dict | None, override: dict | None) -> dict:
+    """메일함 기본 스타일 위에 업무별 스타일을 얹는다. 업무별 값이 빈 문자열이면 기본값을 따른다
+    (업무별 설정을 저장하며 빈 서명·회사명이 기본값을 지우지 않게)."""
+    style = dict(base or {})
+    for key, value in (override or {}).items():
+        if isinstance(value, str) and not value.strip():
+            continue
+        style[key] = value
+    return style
 
 
 class SettingsUpdate(StrictModel):

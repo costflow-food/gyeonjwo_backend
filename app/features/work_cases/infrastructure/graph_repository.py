@@ -64,6 +64,12 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
         return (self.health_ready(health) and 'GRAPH_RESUME' in health['capabilities']
                 and super().resume_available())
 
+    def proceed_available(self):
+        """그래프가 구매안 단계(PLAN)부터 실행할 수 있고 진행 접수 DB 함수가 있는지."""
+        health = self.read_health()
+        return (self.health_ready(health) and 'PLAN' in health['capabilities']
+                and super().proceed_available())
+
     def context(self, owner, case_id, revision, batch):
         try:
             rows = (self.client.table('work_cases').select(

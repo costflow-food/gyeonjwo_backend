@@ -8,7 +8,7 @@ from app.features.work_cases.application.cursor import iso_z, utc_time
 from app.features.work_cases.domain.rfq import mailbox_address
 from app.features.mail_management.domain.models import (
     PURPOSES, MAX_VERSION, IntakePage, IntakeItem, IntakeCandidate, ResolvedMail, SendSettings,
-    snapshot_version, mail_snapshot)
+    merged_style, snapshot_version, mail_snapshot)
 
 
 def pending(row):
@@ -118,13 +118,14 @@ class MailManagementService:
         # Every registered supplier with a contact address can receive mail; there is no allow list.
         allowed = [{'supplier_id': row['id'], 'name': row['name'], 'email': row.get('contact_email'),
                     'allowed': bool(row.get('contact_email'))} for row in suppliers]
-        style = {**((base or {}).get('style_jsonb') or {}), **((override or {}).get('style_jsonb') or {})}
+        style = merged_style((base or {}).get('style_jsonb'), (override or {}).get('style_jsonb'))
         names = {row['id']: row['name'] for row in suppliers}
         try:
             return SendSettings(mailbox_ref=mailbox_ref, case_id=case_id, configured=not missing,
                 settings_version=settings_version(base, override), missing_items=missing,
                 effective_settings=effective, allowed_suppliers=allowed,
-                style={'tone': style.get('tone', 'FORMAL'), 'signature': style.get('signature', '')},
+                style={'tone': style.get('tone', 'FORMAL'), 'signature': style.get('signature', ''),
+                       'company_name': style.get('company_name', ''), 'introduction': style.get('introduction', '')},
                 pending_drafts=[{'draft_id': row['id'], 'purpose': row['purpose'],
                     'supplier_name': names.get(row['supplier_id'], ''), 'recipient': row['recipient'],
                     'status': row['status']} for row in drafts])
