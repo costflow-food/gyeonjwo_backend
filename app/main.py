@@ -35,11 +35,12 @@ from app.features.work_cases.api.review_card import router as review_card_router
 from app.features.mail_management.api.router import router as mail_management_router
 from app.features.system.application.diagnostics import require_startup_configuration
 from app.features.system.application.workers import (
-    create_missing_rfq_workers, retry_unavailable_workers, start_graph_worker)
+    create_missing_rfq_workers, retry_unavailable_workers, start_call_recording_worker, start_graph_worker)
+from app.features.call_recordings.router import router as call_recordings_router
 
 logger = logging.getLogger('gyeonjwo')
 RATE_WINDOW_SECONDS = 60
-# 로그인한 요청은 토큰(사용자)마다, 토큰 없는 요청은 IP마다 이만큼. 같은 사무실(같은 IP)의 여러 사용자가 화면 폴링
+# 로그인한 요청은 토큰(사용자)e마다, 토큰 없는 요청은 IP마다 이만큼. 같은 사무실(같은 IP)의 여러 사용자가 화면 포링
 # (목록 15초, 진행 상황·초안 3초)을 합산당해 429가 나지 않게 사용자 단위로 센다
 RATE_LIMIT_PER_WINDOW = 120
 # 토큰을 바꿔 가며 사용자 단위 제한을 피하지 못하게 IP 전체에도 넉넉한 상한을 둔다
@@ -109,6 +110,7 @@ def create_app(settings=None, push_verifier=verify_push, mailbox_service=None):
         try:
             rfq_workers = create_missing_rfq_workers(app.state, settings)
             start_graph_worker(app.state, settings)
+            start_call_recording_worker(app.state, settings)
             await prime_work_case_reads(app.state)
             for prepared_worker in (connected_worker, *rfq_workers):
                 if prepared_worker is not None:
@@ -124,7 +126,8 @@ def create_app(settings=None, push_verifier=verify_push, mailbox_service=None):
                 except asyncio.CancelledError:
                     pass
             # 재시도로 나중에 뜬 워커도 닫히도록 state에서 읽는다.
-            for name in ('rfq_workflow_worker', 'rfq_metadata_worker', 'connected_mailbox_worker', 'extraction_worker'):
+            for name in ('rfq_workflow_worker', 'rfq_metadata_worker', 'connected_mailbox_worker', 'extraction_worker',
+                         'call_recording_worker'):
                 worker = getattr(app.state, name, None)
                 if worker:
                     worker.close()
@@ -144,6 +147,8 @@ def create_app(settings=None, push_verifier=verify_push, mailbox_service=None):
     app.state.graph_startup_code = 'GRAPH_RUNTIME_UNAVAILABLE'
     app.state.rfq_metadata_worker = None
     app.state.rfq_workflow_worker = None
+    app.state.call_recording_worker = None
+    app.state.call_recording_service = None
     app.state.service_lock = threading.Lock()
     if getattr(settings, 'google_token_encryption_key', None):
         # Build the list clients before accepting requests. Connections remain lazy.
@@ -179,7 +184,7 @@ def create_app(settings=None, push_verifier=verify_push, mailbox_service=None):
                         blocked = started
             if blocked is not None:
                 retry_after = max(1, math.ceil(RATE_WINDOW_SECONDS - (now - blocked)))
-                response = api_error('RATE_LIMITED', '요청이 너무 많습니다.', 429, headers={'Retry-After': str(retry_after)})
+                response = api_error('RATE_LIMITED', '요청이 너무 많슥니다.', 429, headers={'Retry-After': str(retry_after)})
         if response is None:
             try:
                 response = await call_next(request)
@@ -241,6 +246,7 @@ def create_app(settings=None, push_verifier=verify_push, mailbox_service=None):
     app.include_router(quotes_router)
     app.include_router(review_card_router)
     app.include_router(mail_management_router)
+    app.include_router(call_recordings_router)
     return app
 
 
