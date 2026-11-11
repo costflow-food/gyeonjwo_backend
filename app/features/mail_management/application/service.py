@@ -1,4 +1,3 @@
-"""Read-only presentation plus durable mutation boundaries; never calls an LLM/Gmail."""
 from datetime import datetime, timezone
 from uuid import UUID
 from app.api.responses import Envelope

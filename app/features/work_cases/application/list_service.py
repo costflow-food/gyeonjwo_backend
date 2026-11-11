@@ -84,8 +84,6 @@ class WorkCaseListService:
             pending_read = _PAGE_READS.submit(self.repo.intake_pending, owner)
             rows = self.repo.rows(owner, snapshot, archived)
             for case, mail in rows:
-                # Defensive checks also support alternative repositories without
-                # accidentally applying status to tab counts.
                 if (case['archived_at'] is not None) != archived:
                     continue
                 if utc_time(case['created_at']) > utc_time(snapshot):

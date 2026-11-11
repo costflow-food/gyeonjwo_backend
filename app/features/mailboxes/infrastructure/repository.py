@@ -1,7 +1,7 @@
 """Supabase RPC boundary. SQL is owned/deployed by the DB teammate.
 
-See docs/GOOGLE_MAILBOX_DB_CONTRACT.md; never substitute process memory for these
-transactions. Raw provider tokens and request bodies are never RPC parameters.
+Never substitute process memory for these transactions. Raw provider tokens and
+request bodies are never RPC parameters.
 """
 import logging
 from app.core.errors import ServiceError

@@ -1,4 +1,4 @@
-"""Latest cards 4/5: accept deletes; start queues extraction, no LLM in HTTP."""
+"""Accept deletes the case; start queues extraction. No LLM call in the HTTP request."""
 import hashlib
 import json
 from app.core.errors import ServiceError

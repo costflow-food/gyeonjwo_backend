@@ -69,8 +69,6 @@ class AgentStore:
                     and suppliers[0]['contact_email'].strip().casefold() == sender.casefold()):
                 # Verify the returned address too: filter protocols can interpret
                 # wildcard aliases. A fuzzy candidate must never become a link.
-                # Read-time enrichment only. The quote RPC rechecks the sender
-                # and persists the link atomically, without creating suppliers.
                 mail['supplier_id'] = suppliers[0]['id']
         return mails
 

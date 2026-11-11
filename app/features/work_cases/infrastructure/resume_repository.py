@@ -56,7 +56,7 @@ class ResumeEligibilityRepository:
                 if run.get('agent_role') == 'INFO_EXTRACTOR' and is_hold_output(run.get('output_jsonb')):
                     blocked.pop(key, None)
             # Any unresolved send blocks extraction restart, including a draft
-            # created before the user held the case. Do not work around MW01.
+            # created before the user held the case.
             for key, state in self.unresolved_drafts(owner, list(held)).items():
                 blocked[key] = (('SEND_RESULT_UNKNOWN', '발송 결과를 먼저 확인한 뒤 검토를 재개해 주세요.') if state == 'UNKNOWN'
                                 else ('ACTION_NOT_ALLOWED', '미해결 승인 또는 발송 요청을 먼저 확인해 주세요.'))

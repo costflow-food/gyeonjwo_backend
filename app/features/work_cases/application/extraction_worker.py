@@ -1,4 +1,4 @@
-"""Durable, extraction-only background execution; never logs mail/model payloads."""
+"""Durable background execution; never logs mail/model payloads."""
 import logging
 import threading
 import time
@@ -70,7 +70,6 @@ class ExtractionWorker:
             logger.info('extraction finished role=INFO_EXTRACTOR')
         except Exception as error:
             code = 'INPUT_REVISION_CHANGED' if isinstance(error, ServiceError) and error.code == 'REVISION_CONFLICT' else 'EXTRACTION_FAILED'
-            # The DB token/revision guard prevents this from changing newer work.
             self.repo.fail(job, code)
             logger.warning('extraction failed code=%s job_id=%s case_id=%s %s', code, job.get('job_id'), job.get('case_id'),
                            error_origin(error))
@@ -81,7 +80,7 @@ class ExtractionWorker:
             self.adapter = self.load_adapter()
         if not self.repo.available():
             raise ServiceError('EXTRACTION_SCHEMA_REQUIRED', '실행 DB 계약이 준비되지 않았습니다.', 503)
-        self.repo.recover()  # Only expired durable leases -> FAILED, never Complete.
+        self.repo.recover()
 
         def loop():
             last_recovery = 0

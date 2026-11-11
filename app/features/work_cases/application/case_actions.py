@@ -1,4 +1,4 @@
-"""One action policy for the list and detail views; SQL rechecks mutations."""
+"""One action policy for the list and detail views."""
 from app.features.work_cases.application.start_readiness import StartReadiness
 from app.features.work_cases.domain.proceed import PROCEED_BLOCK_MESSAGES
 
@@ -29,7 +29,6 @@ def case_actions(case, readiness: StartReadiness, resume_readiness: StartReadine
     if case.get('status') == 'Waiting' and case.get('decision') == 'ACCEPT_INCREASE':
         disabled.append({'action': 'RESUME', 'reason_code': 'ACTION_NOT_ALLOWED',
                          'message': '현재 재개 API는 추출 보류 업무의 재개만 지원합니다.'})
-    # Approval/UNKNOWN and archive cannot be bypassed by resuming.
     if case.get('processing_step') in {'ON_HOLD', 'FAILED'} or review_ready:
         blocked = None
         if case.get('archived_at') is not None:

@@ -1,4 +1,4 @@
-"""API-21..24 DTOs matched to frontend dev ae66460 (SCR-008/009)."""
+"""API-21..24 DTOs (SCR-008/009)."""
 import hashlib
 import json
 from typing import Literal

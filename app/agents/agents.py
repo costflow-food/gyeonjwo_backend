@@ -1,4 +1,4 @@
-"""다섯 에이전트 (07 3절). 담당 팀원은 자기 역할의 PROMPTS 지시문과 tools.py 도구를 채운다.
+"""다섯 에이전트 (07 3절).
 
 각 에이전트는 LangChain create_agent로 만든 도구 호출 루프다. 허용 도구만 받고(tools.ROLE_TOOLS),
 호출당 도구 한도(역할별 TOOL_CALL_LIMITS, 없으면 MAX_TOOL_CALLS_PER_AGENT_CALL)를 넘으면 실패하며, 최종 답은 schemas의 역할별 *Out 모델로 검증된다.
@@ -601,7 +601,7 @@ def check_extraction(role: AgentRole, data: AgentInput, context: RunContext, out
     results = [result for result in _tool_results(messages, 'store_structured_mail') if result.get('status') == 'STORED']
     stored = list(dict.fromkeys(result['quote_version_id'] for result in results))     # 저장 순서, 중복 제거
     # 이번 실행에서 견적을 저장한 뒤 HOLD를 고르면 서버가 완료를 거부해(HOLD_AFTER_QUOTE_STORED) 실행이 실패로 끝난다.
-    # 저장된 견적은 검증을 통과한 값이므로 ID 검사 전에 STORED로 바꾸고, 남은 미확인은 검토 화면에서 확인한다 (X-42)
+    # 저장된 견적은 검증을 통과한 값이므로 ID 검사 전에 STORED로 바꾸고, 남은 미확인은 검토 화면에서 확인한다
     if output.next_action == 'HOLD' and stored:
         output = type(output).model_validate(output.model_dump() | {
             'next_action': 'STORED', 'quote_version_ids': stored, 'hold': None, 'reason': _STORED_AFTER_HOLD})

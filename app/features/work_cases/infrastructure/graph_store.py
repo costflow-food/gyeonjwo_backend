@@ -1,4 +1,4 @@
-"""Backend START stores for the team's unchanged graph/runner/tool protocols."""
+"""Backend START stores for the agent graph/runner/tool protocols."""
 from copy import deepcopy
 from decimal import Decimal
 from uuid import UUID
@@ -73,7 +73,6 @@ class GraphStore(AgentStore):
             result = self.rpc('record_case_graph_extraction_issue', p_run=run_id, p_issue=payload)
         except ServiceError as error:
             if error.code == 'EXTRACTION_SCHEMA_REQUIRED':
-                # Optional evidence storage may deploy after the HOLD path.
                 return
             raise
         if not isinstance(result, dict) or result.get('kind') != 'RECORDED':
