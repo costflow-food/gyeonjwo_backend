@@ -21,6 +21,9 @@ from app.core.errors import ServiceError
 from app.features.mailboxes.domain.schemas import READ_SCOPE, SEND_SCOPE
 
 logger = logging.getLogger('uvicorn.error.gmail_receive')
+CONTROL_RESPONSE_LIMIT = 4 * 1024 * 1024
+# 메일 원문·첨부 응답 상한. 저장 한도(storage.MAX_BYTES, 50MB)를 base64로 담은 크기(약 4/3배)에 JSON 여유를 더했다
+CONTENT_RESPONSE_LIMIT = 72 * 1024 * 1024
 
 
 def operation_name(host, path):
@@ -59,10 +62,11 @@ def https_json(method, host, path, headers, body):
         conn.request(method, path, body=body, headers=headers)
         response = conn.getresponse()
         # Full messages can embed attachment data; attachment JSON is base64 encoded.
-        # Do not apply the small control-response cap to either content endpoint.
+        # Content endpoints get a larger cap than control responses, but are still bounded.
         content = host == 'gmail.googleapis.com' and '/messages/' in path
-        raw = response.read() if content else response.read(4 * 1024 * 1024 + 1)
-        if not content and len(raw) > 4 * 1024 * 1024:
+        limit = CONTENT_RESPONSE_LIMIT if content else CONTROL_RESPONSE_LIMIT
+        raw = response.read(limit + 1)
+        if len(raw) > limit:
             raise ValueError('Response limit exceeded')
         return response.status, json.loads(raw)
     finally:

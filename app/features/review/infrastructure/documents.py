@@ -83,12 +83,16 @@ PDF_TEXT_TIMEOUT_SECONDS = 20    # 텍스트 레이어 읽기 한 번의 시간 
 #   RapidOCR 한국어 v5 31/31, Tesseract 5.4 kor+eng 17/31 ('원'→'21', '10kg'→'1069' 등 오인식)
 OCR_DPI = 300                    # 제안값. 위 비교에 쓴 해상도
 OCR_TIMEOUT_SECONDS = 45         # 제안값. 한 쪽 OCR 한 번(모델 로딩 포함, 쪽당 약 3~5초)의 시간 제한
+# PDF 워커 자식 프로세스의 주소 공간 상한(MB, 리눅스만). 컨테이너 하나에 API·메일 수신이 같이 돌아 PDF 하나가 메모리를
+# 다 쓰면 서버가 같이 죽는다. 환경변수 PDF_WORKER_MEMORY_MB로 바꿀 수 있다
+PDF_WORKER_MEMORY_MB = 2048
 # 모델 파일 폴더. 서버·개발 PC에서 `python -m app.features.review.infrastructure.pdf_worker setup <폴더>`로 한 번 받는다
 OCR_MODEL_DIR_DEFAULT = Path(__file__).resolve().parents[4] / 'models' / 'ocr'
 
 
 class PdfReadError(ValueError):
-    """PDF를 읽지 못했다. kind: TECHNICAL(다시 시도) / CONTENT(PDF 자체 문제) / OCR_UNAVAILABLE(OCR 설치·설정 문제)"""
+    """PDF를 읽지 못했다. kind: TECHNICAL(다시 시도) / CONTENT(PDF 자체 문제) / OCR_UNAVAILABLE(OCR 설치·설정 문제)
+    / TIMEOUT(시간 제한 초과. 같은 PDF는 다시 읽어도 오래 걸리므로 다시 시도하지 않는다)"""
     kind = 'TECHNICAL'
 
 
@@ -102,6 +106,10 @@ class PdfContentError(PdfReadError):
 
 class OcrUnavailableError(PdfReadError):
     kind = 'OCR_UNAVAILABLE'
+
+
+class PdfTimeoutError(PdfReadError):
+    kind = 'TIMEOUT'
 
 
 def read_pdf(content: bytes) -> str:
@@ -124,10 +132,13 @@ def _pdf_worker(content: bytes, args: tuple = (), timeout: float = PDF_TEXT_TIME
     import os
     env = {key: value for key, value in os.environ.items()
            if key.upper() in ('SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'PATH')}
+    env['PDF_WORKER_MEMORY_MB'] = os.environ.get('PDF_WORKER_MEMORY_MB') or str(PDF_WORKER_MEMORY_MB)
     try:
         result = subprocess.run([sys.executable, '-m', 'app.features.review.infrastructure.pdf_worker', *args],
                                 input=content, capture_output=True, timeout=timeout, env=env,
                                 cwd=Path(__file__).resolve().parents[4], creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except subprocess.TimeoutExpired:
+        raise PdfTimeoutError('PDF text extraction timed out') from None
     except (OSError, subprocess.SubprocessError):
         raise PdfTechnicalError('PDF text extraction failed') from None
     if result.returncode == 2:
@@ -144,7 +155,7 @@ def _pdf_worker(content: bytes, args: tuple = (), timeout: float = PDF_TEXT_TIME
 
 def _with_retry(read) -> tuple[object, dict]:
     """기술 오류만 PDF_MAX_ATTEMPTS번까지 시도한다. 반환: (결과 또는 None, 시도 기록)
-    시도 기록: {attempts, error_kind: None·TECHNICAL·CONTENT·OCR_UNAVAILABLE, retry_exhausted}"""
+    시도 기록: {attempts, error_kind: None·TECHNICAL·CONTENT·OCR_UNAVAILABLE·TIMEOUT, retry_exhausted}"""
     for attempt in range(1, PDF_MAX_ATTEMPTS + 1):
         try:
             return read(), {'attempts': attempt, 'error_kind': None, 'retry_exhausted': False}
@@ -200,8 +211,9 @@ def document_text(work_id, source, storage, max_chars, with_sections=False):
                 try:
                     extracted = read_pdf(content)
                     break
-                except ValueError:
-                    if attempt == 3:
+                except ValueError as error:
+                    # 기술 오류만 다시 시도한다(내용 문제·시간 초과는 다시 읽어도 같다)
+                    if attempt == 3 or not isinstance(error, PdfTechnicalError):
                         raise ReviewRequired('PDF_READ_FAILED', 'PDF를 읽지 못했습니다. 읽을 수 있는 원문이 필요합니다.', name)
             if not extracted.strip():
                 raise ReviewRequired('OCR_REQUIRED', '텍스트가 없는 PDF는 OCR 처리가 필요합니다.', name)
