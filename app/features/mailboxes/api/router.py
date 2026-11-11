@@ -11,6 +11,7 @@ from app.api.responses import Envelope, api_json
 from app.core.errors import ServiceError
 from app.core.request_context import current_request_id
 from app.features.mailboxes.application.auth import google_principal
+from app.features.mailboxes.application.membership import MembershipChecker
 from app.features.mailboxes.application.service import GoogleConnectionService
 from app.features.mailboxes.domain.schemas import GoogleConnection, GoogleConnectRequest
 from app.features.mailboxes.infrastructure.crypto import TokenCipher
@@ -39,12 +40,27 @@ def require_secure_transport(request: Request):
         raise ServiceError('HTTPS_REQUIRED', '계정 연결에는 HTTPS 주소가 필요합니다.', 400, retryable=False)
 
 
+def get_membership_checker(request: Request) -> MembershipChecker:
+    """허용 목록 확인기. Gmail 설정과 무관하게 서버 키 클라이언트 하나를 만들어 재사용한다."""
+    with request.app.state.service_lock:
+        if getattr(request.app.state, 'membership_checker', None) is None:
+            try:
+                client = make_server_client(request.app.state.settings)
+            except RuntimeError:
+                raise ServiceError('CONFIGURATION_REQUIRED', '사용자 인증 설정이 필요합니다.', 503) from None
+            request.app.state.membership_checker = MembershipChecker(client)
+        return request.app.state.membership_checker
+
+
 def require_google_user(request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
     secure=Depends(require_secure_transport)):
     if not credentials:
         raise ServiceError('AUTH_REQUIRED', '로그인이 필요합니다.', 401)
-    return google_principal(credentials.credentials, request.app.state.settings)
+    principal = google_principal(credentials.credentials, request.app.state.settings)
+    # KAN-203: 허용 목록에 있는 활성 사용자만 통과(오류는 거부)
+    get_membership_checker(request).require(principal)
+    return principal
 
 
 def get_mailbox_service(request: Request):
