@@ -9,12 +9,11 @@ OCR 모드(`ocr <쪽 번호> <모델 폴더> <dpi>`): 그 한 쪽만 그림으�
   0 성공 / 1 기술 오류(예상하지 못한 예외, 재시도 대상) / 2 내용 문제(암호화·한도 초과·손상, 재시도하지 않음)
   3 OCR 준비 안 됨(라이브러리·모델 파일 없음, 설정 문제라 재시도하지 않음)
 
-메모리: 환경변수 PDF_WORKER_MEMORY_MB가 있으면 이 프로세스의 주소 공간을 그만큼으로 묶는다(리눅스만, 서버 컨테이너).
-  한도를 넘는 PDF는 MemoryError가 나고 내용 문제(2)로 끝난다. 같은 PDF는 다시 읽어도 같은 결과라 재시도하지 않는다.
+메모리 한도는 부모(documents._pdf_worker)가 이 프로세스의 실제 메모리를 지켜보다 넘으면 끝낸다. 주소 공간 상한(RLIMIT_AS)은
+쓰지 않는다: OCR 엔진(onnxruntime)이 실제보다 훨씬 큰 가상 메모리(A4 한 쪽에 약 5GB)를 잡아 정상 OCR까지 죽는다.
 """
 import io
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -24,8 +23,10 @@ from pypdf.errors import PyPdfError
 MAX_PAGES = 100
 # OCR 렌더링 한 쪽의 픽셀 수 상한. A4 300dpi가 약 870만, A3 300dpi가 약 1,740만 픽셀이다.
 # 더 큰 쪽은 상한에 맞게 해상도를 낮춰 렌더링하고, MIN_RENDER_DPI보다 낮춰야 하면 읽지 않는다(내용 문제).
-MAX_RENDER_PIXELS = 40_000_000
+# OCR 엔진은 어차피 긴 변 2,000픽셀로 줄여 읽으므로(rapidocr Global.max_side_len) 더 크게 그려도 얻는 것이 없다
+MAX_RENDER_PIXELS = 20_000_000
 MIN_RENDER_DPI = 100
+OCR_THREADS = 1
 EXIT_TECHNICAL, EXIT_CONTENT, EXIT_OCR_UNAVAILABLE = 1, 2, 3
 
 # 고정한 OCR 모델 (rapidocr 3.10.0 기본 모델 목록 기준, 파일은 SHA256으로 확인된다)
@@ -77,7 +78,11 @@ def _engine(model_dir: str):
     return RapidOCR(params={
         'Global.model_root_dir': model_dir, 'Global.use_cls': False, 'Global.log_level': 'error',
         'Det.ocr_version': OCRVersion.PPOCRV6, 'Det.model_type': ModelType.SMALL,
-        'Rec.lang_type': LangRec.KOREAN, 'Rec.ocr_version': OCRVersion.PPOCRV5, 'Rec.model_type': ModelType.MOBILE})
+        'Rec.lang_type': LangRec.KOREAN, 'Rec.ocr_version': OCRVersion.PPOCRV5, 'Rec.model_type': ModelType.MOBILE,
+        # 스레드는 하나. 기본값(-1)은 호스트 코어 수만큼 띄워, CPU 0.5개 컨테이너에서 A4 한 쪽이 82초 걸렸다(1개면 13초,
+        # 결과 같음. 2026-11-11 서버 이미지·--cpus=0.5 측정)
+        'EngineConfig.onnxruntime.intra_op_num_threads': OCR_THREADS,
+        'EngineConfig.onnxruntime.inter_op_num_threads': OCR_THREADS})
 
 
 def _lines(boxes, texts) -> str:
@@ -105,19 +110,6 @@ def render_scale(width_pt: float, height_pt: float, dpi: int) -> float:
     if scale * 72 < MIN_RENDER_DPI:
         raise ContentError('PDF page too large to render')
     return scale
-
-
-def limit_memory(environ) -> None:
-    """PDF_WORKER_MEMORY_MB가 있으면 이 프로세스의 주소 공간 상한을 건다. resource 모듈이 없는 OS(Windows)는 건너뛴다."""
-    megabytes = environ.get('PDF_WORKER_MEMORY_MB')
-    if not megabytes:
-        return
-    try:
-        import resource
-    except ImportError:
-        return
-    limit = int(megabytes) * 1024 * 1024
-    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
 
 
 def ocr_page(raw, number: int, model_dir: str, dpi: int) -> str:
@@ -158,7 +150,6 @@ def main(argv) -> int:
         missing = [name for name in OCR_MODEL_FILES if not (Path(argv[1]) / name).is_file()]
         print('OCR models ready' if not missing else f'OCR models missing: {missing}')
         return 1 if missing else 0
-    limit_memory(os.environ)
     raw = sys.stdin.buffer.read(52_428_801)
     try:
         if argv[:1] == ['ocr']:
