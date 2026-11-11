@@ -140,7 +140,7 @@ def selected_for_dispatch(draft, case):
     if selection_staged(draft):
         return False
     if style.get('candidate_selection_required') is not True:
-        return True  # Existing legacy flow is unchanged.
+        return True
     if case.get('archived_at') is not None or case.get('decision') in {'ACCEPT_INCREASE', 'CONFIRM_REVIEW'}:
         return False
     selection = style.get('candidate_selection') or {}

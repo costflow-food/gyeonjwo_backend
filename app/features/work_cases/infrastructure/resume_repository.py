@@ -1,6 +1,7 @@
 """Read-only hints for extraction HOLD. Mutation RPC remains authoritative."""
 from app.features.work_cases.application.cursor import utc_time
 from app.features.work_cases.domain.hold import is_hold_output
+from app.features.work_cases.domain.proceed import proceed_block
 
 
 class ResumeEligibilityRepository:
@@ -55,25 +56,61 @@ class ResumeEligibilityRepository:
                 if run.get('agent_role') == 'INFO_EXTRACTOR' and is_hold_output(run.get('output_jsonb')):
                     blocked.pop(key, None)
             # Any unresolved send blocks extraction restart, including a draft
-            # created before the user held the case. Do not work around MW01.
-            drafts = (self.client.table('mail_drafts').select('id,replaces_id,work_case_id,owner_user_id,status')
-                      .eq('owner_user_id', str(owner)).in_('work_case_id', list(held))
-                      .limit(1000).execute().data)
-            if not isinstance(drafts, list) or len(drafts) >= 1000:
-                raise ValueError('Incomplete send state')
-            owned_drafts = [draft for draft in drafts if str(draft.get('owner_user_id')) == str(owner)
-                            and str(draft.get('work_case_id')) in held]
-            replaced = {str(draft.get('replaces_id')) for draft in owned_drafts if draft.get('replaces_id')}
-            for draft in owned_drafts:
-                key = str(draft.get('work_case_id'))
-                if str(draft.get('id')) in replaced and draft.get('status') == 'DRAFT':
-                    continue
-                if key in held and str(draft.get('owner_user_id')) == str(owner):
-                    if draft.get('status') == 'UNKNOWN':
-                        blocked[key] = ('SEND_RESULT_UNKNOWN', '발송 결과를 먼저 확인한 뒤 검토를 재개해 주세요.')
-                    elif draft.get('status') in {'DRAFT', 'SENDING'} and blocked.get(key, (None,))[0] != 'SEND_RESULT_UNKNOWN':
-                        blocked[key] = ('ACTION_NOT_ALLOWED', '미해결 승인 또는 발송 요청을 먼저 확인해 주세요.')
+            # created before the user held the case.
+            for key, state in self.unresolved_drafts(owner, list(held)).items():
+                blocked[key] = (('SEND_RESULT_UNKNOWN', '발송 결과를 먼저 확인한 뒤 검토를 재개해 주세요.') if state == 'UNKNOWN'
+                                else ('ACTION_NOT_ALLOWED', '미해결 승인 또는 발송 요청을 먼저 확인해 주세요.'))
             return blocked
         except Exception:
             # A read failure must hide the action, not guess that resuming is safe.
             return {key: ('PROCESSING_UNAVAILABLE', '재개 가능 여부를 확인할 수 없습니다. 잠시 후 다시 조회해 주세요.') for key in held}
+
+    def unresolved_drafts(self, owner, case_ids):
+        """업무별 끝나지 않은 발송: 'UNKNOWN'(발송 결과 모름) 또는 'PENDING'(승인·발송 전, 발송 중).
+
+        새 초안으로 대체된 DRAFT는 빼고, 한 업무에 둘 다 있으면 UNKNOWN을 돌려준다. 읽기 실패는 예외로 올린다.
+        """
+        drafts = (self.client.table('mail_drafts').select('id,replaces_id,work_case_id,owner_user_id,status')
+                  .eq('owner_user_id', str(owner)).in_('work_case_id', list(case_ids))
+                  .limit(1000).execute().data)
+        if not isinstance(drafts, list) or len(drafts) >= 1000:
+            raise ValueError('Incomplete send state')
+        cases = {str(case_id) for case_id in case_ids}
+        owned = [draft for draft in drafts if str(draft.get('owner_user_id')) == str(owner)
+                 and str(draft.get('work_case_id')) in cases]
+        replaced = {str(draft.get('replaces_id')) for draft in owned if draft.get('replaces_id')}
+        result = {}
+        for draft in owned:
+            key, status = str(draft.get('work_case_id')), draft.get('status')
+            if str(draft.get('id')) in replaced and status == 'DRAFT':
+                continue
+            if status == 'UNKNOWN':
+                result[key] = 'UNKNOWN'
+            elif status in {'DRAFT', 'SENDING'}:
+                result.setdefault(key, 'PENDING')
+        return result
+
+    def proceed_blocks(self, owner, cases, summaries):
+        """'현재 회신으로 진행'을 미리 끌 업무와 (reason_code, message). summaries는 업무별 회신 집계(ReplySummary).
+
+        끝나지 않은 초안이 회신 없음보다 앞선다. 읽기에 실패하면 진행해도 되는지 모르므로 모두 끈다.
+        도착한 회신의 검토 대기(REPLY_REVIEW_PENDING)는 내부 테이블이라 여기서 보지 않고 DB가 접수 때 거절한다.
+        """
+        keys = [str(row['id']) for row in cases]
+        unavailable = ('PROCESSING_UNAVAILABLE', '진행 가능 여부를 확인할 수 없습니다. 잠시 후 다시 조회해 주세요.')
+        try:
+            drafts = {}
+            for index in range(0, len(keys), 40):
+                drafts.update(self.unresolved_drafts(owner, keys[index:index + 40]))
+        except Exception:
+            return {key: unavailable for key in keys}
+        blocked = {}
+        for key in keys:
+            summary = summaries.get(key)
+            if key in drafts:
+                blocked[key] = proceed_block('UNRESOLVED_DRAFT')
+            elif summary is None:
+                blocked[key] = unavailable
+            elif summary.responded_supplier_count < 1:
+                blocked[key] = proceed_block('NO_REPLY')
+        return blocked

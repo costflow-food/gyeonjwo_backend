@@ -238,6 +238,15 @@ def load_action_case(repo, owner, case_id):
                                  'item_name', 'specification', 'quantity', 'unit', 'decision', 'archived_at', 'current_batch_id'))
 
 
+def proceed_detail_block(repo, owner, row):
+    """상세 화면에서 '현재 회신으로 진행'을 미리 끌 사유. 목록과 같은 회신 집계·초안 기준을 쓴다."""
+    try:
+        summaries = WorkCaseListRepository(repo.client).reply_summaries(owner, [str(row['id'])])
+    except ServiceError:
+        summaries = {}
+    return ResumeEligibilityRepository(repo.client).proceed_blocks(owner, [row], summaries).get(str(row['id']))
+
+
 def action_response(request, principal, repo, case_id, payload, key, action):
     replay = None
     conditions = None
@@ -303,6 +312,34 @@ def resume_case(case_id: UUID, payload: ResumeRequest, request: Request,
     status, response = WorkCaseActions(repo, extraction_enabled=True).submit(
         principal.user_id, case_id, payload.expected_revision, 'RESUME', idempotency_key,
         replay_result=replay, reason=payload.reason)
+    worker = getattr(request.app.state, 'extraction_worker', None)
+    if worker is not None:
+        worker.wake.set()
+    return JSONResponse(response, status_code=status, headers={
+        'X-Request-ID': response['meta']['request_id'], 'Cache-Control': 'private, no-store'})
+
+
+@router.post('/{case_id}/proceed', status_code=202, response_model=Envelope[StartedCase],
+             summary='현재 회신으로 진행: 남은 회신을 기다리지 않고 구매안 단계부터 백그라운드 실행')
+def proceed_case(case_id: UUID, payload: CaseActionRequest, request: Request,
+                 principal=Depends(require_google_user), repo=Depends(get_runtime_repository),
+                 idempotency_key: Annotated[str | None, Header(alias='Idempotency-Key')] = None):
+    """회신 대기(WAITING_REPLY) 업무를 지금까지 온 견적으로 구매안 단계(PLAN)부터 다시 실행한다.
+
+    구매안 단계에서 실패한 진행 요청도 같은 API로 다시 접수한다. DB가 같은 키의 재요청을 먼저 돌려주고,
+    상태·revision·미해결 초안·검토 대기 회신·회신 없음을 확인한다. 거절 사유는 error.message로 안내한다.
+    이 요청 안에서는 모델을 부르거나 메일을 보내지 않는다.
+    """
+    validate_action_key(idempotency_key)
+    load_action_case(repo, principal.user_id, case_id)
+    replay = repo.proceed_receipt(principal.user_id, case_id, payload.expected_revision, idempotency_key)
+    if replay is None:
+        resume_readiness(request, repo, fresh=True).require()
+        if not repo.proceed_available():
+            raise ServiceError('PROCEED_INTEGRATION_REQUIRED', '현재 회신으로 진행하는 저장 기능이 아직 연결되지 않았습니다.',
+                               503, retryable=False, next_action='CONTACT_SERVER_ADMIN')
+    status, response = WorkCaseActions(repo, extraction_enabled=True).submit(
+        principal.user_id, case_id, payload.expected_revision, 'PROCEED', idempotency_key, replay_result=replay)
     worker = getattr(request.app.state, 'extraction_worker', None)
     if worker is not None:
         worker.wake.set()
@@ -432,6 +469,11 @@ def get_case(case_id: UUID, request: Request, principal=Depends(require_google_u
         if block:
             actions.remove('RESUME')
             disabled.append({'action': 'RESUME', 'reason_code': block[0], 'message': block[1]})
+    if 'PROCEED' in actions:
+        block = proceed_detail_block(repo, principal.user_id, row)
+        if block:
+            actions.remove('PROCEED')
+            disabled.append({'action': 'PROCEED', 'reason_code': block[0], 'message': block[1]})
     if row.get('processing_step') in {'CANDIDATES', 'SELECTING_CANDIDATES'}:
         from app.features.work_cases.infrastructure.candidate_repository import CandidateRepository
         from app.features.work_cases.application.candidates import apply_candidate_action

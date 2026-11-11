@@ -1,4 +1,4 @@
-"""Latest cards 4/5: accept deletes; start queues extraction, no LLM in HTTP."""
+"""Accept deletes the case; start queues extraction. No LLM call in the HTTP request."""
 import hashlib
 import json
 from app.core.errors import ServiceError
@@ -24,26 +24,33 @@ def resume_body_hash(revision, reason):
     return hashlib.sha256(body.encode()).hexdigest()
 
 
+# 그래프 작업을 예약하고 202로 접수만 알리는 동작
+QUEUED = frozenset({'START', 'RESUME', 'PROCEED'})
+
+
 class WorkCaseActions:
     def __init__(self, repo, *, extraction_enabled=False):
         self.repo, self.extraction_enabled = repo, extraction_enabled
 
     def submit(self, owner, case_id, revision, action, key, *, replay_result=None, reason=None, conditions=None):
-        if action not in {'START', 'RESUME', 'ACCEPT_INCREASE'}:
+        if action not in {'START', 'RESUME', 'PROCEED', 'ACCEPT_INCREASE'}:
             raise ServiceError('ACTION_NOT_ALLOWED', '허용하지 않은 업무 동작입니다.', 409, retryable=False)
         validate_action_key(key)
         if action == 'RESUME' and reason not in {'RESUME_HOLD', 'RETRY_FAILED', 'REOPEN_REVIEW'}:
             raise ServiceError('ACTION_NOT_ALLOWED', '지원하지 않는 재개 사유입니다.', 409, retryable=False)
         if replay_result is not None:
-            if action not in {'START', 'RESUME'} or not isinstance(replay_result, dict) or replay_result.get('kind') != 'REPLAY':
+            if action not in QUEUED or not isinstance(replay_result, dict) or replay_result.get('kind') != 'REPLAY':
                 raise ServiceError('PROCESSING_UNAVAILABLE', '저장된 요청 결과를 확인할 수 없습니다.', 503)
             result = replay_result
         else:
-            if action in {'START', 'RESUME'} and not self.extraction_enabled:
+            if action in QUEUED and not self.extraction_enabled:
                 raise ServiceError('PROCESSING_UNAVAILABLE', '검토 실행 연결을 준비 중입니다.', 503, retryable=False)
             if action == 'RESUME':
                 result = self.repo.resume(str(owner), str(case_id), revision, reason, key,
                                           resume_body_hash(revision, reason), current_request_id())
+            elif action == 'PROCEED':
+                result = self.repo.proceed(str(owner), str(case_id), revision, key,
+                                           revision_body_hash(revision), current_request_id())
             else:
                 options = {'conditions': conditions} if conditions else {}
                 result = self.repo.action(str(owner), str(case_id), revision, action, key,
@@ -51,7 +58,7 @@ class WorkCaseActions:
         # The DB must replay before lookup, even if the case was already deleted.
         if not isinstance(result, dict) or result.get('kind') not in {'ACCEPTED', 'REPLAY'}:
             raise ServiceError('PROCESSING_UNAVAILABLE', '업무 접수를 확인할 수 없습니다.', 503)
-        expected_status = 202 if action in {'START', 'RESUME'} else 200
+        expected_status = 202 if action in QUEUED else 200
         if result.get('http_status') != expected_status or not isinstance(result.get('response'), dict):
             raise ServiceError('PROCESSING_UNAVAILABLE', '저장된 응답을 확인할 수 없습니다.', 503)
         response = result['response']
@@ -62,12 +69,12 @@ class WorkCaseActions:
             raise ServiceError('PROCESSING_UNAVAILABLE', '저장된 응답 범위를 확인할 수 없습니다.', 503)
         if action == 'ACCEPT_INCREASE' and data.get('deleted') is not True:
             raise ServiceError('PROCESSING_UNAVAILABLE', '수용 삭제 결과를 확인할 수 없습니다.', 503)
-        if action in {'START', 'RESUME'} and (data.get('input_revision') != revision or not data.get('batch_id')):
+        if action in QUEUED and (data.get('input_revision') != revision or not data.get('batch_id')):
             raise ServiceError('PROCESSING_UNAVAILABLE', '검토 실행 접수를 확인할 수 없습니다.', 503)
         try:
-            model = StartedCase if action in {'START', 'RESUME'} else DeletedCase
+            model = StartedCase if action in QUEUED else DeletedCase
             response = Envelope[model].model_validate(response).model_dump(mode='json')
-            if action in {'START', 'RESUME'} and response['data']['progress_url'] != f'/api/v1/work-cases/{case_id}/progress':
+            if action in QUEUED and response['data']['progress_url'] != f'/api/v1/work-cases/{case_id}/progress':
                 raise ValueError('Invalid progress route')
         except ValueError:
             raise ServiceError('PROCESSING_UNAVAILABLE', '저장된 응답 계약을 확인할 수 없습니다.', 503) from None

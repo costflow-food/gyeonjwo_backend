@@ -1,10 +1,9 @@
-"""Read-only MVP adapter, without new SQL/RPC installation.
+"""Read-only adapter.
 
 Read owner-filtered keyset batches, then join only owner-filtered initial-mail
 metadata. Searching/sorting derived mail fields is done in the service. This costs
 O(owner's cases) per page for exact cross-table search/counts; fail explicitly above
-10,000 cases rather than return incomplete counts. A future single SQL read RPC can
-replace this adapter after review with the DB owner. Never select body_text/tokens.
+10,000 cases rather than return incomplete counts. Never select body_text/tokens.
 """
 from app.core.errors import ServiceError
 from uuid import UUID
@@ -35,6 +34,11 @@ class WorkCaseListRepository:
     def resume_blocks(self, owner, cases):
         from app.features.work_cases.infrastructure.resume_repository import ResumeEligibilityRepository
         return ResumeEligibilityRepository(self.client).blocks(owner, cases)
+
+    def proceed_blocks(self, owner, cases, summaries):
+        """'현재 회신으로 진행'을 미리 끌 업무와 사유(초안 미해결·회신 없음)."""
+        from app.features.work_cases.infrastructure.resume_repository import ResumeEligibilityRepository
+        return ResumeEligibilityRepository(self.client).proceed_blocks(owner, cases, summaries)
 
     def candidate_blocks(self, owner, cases):
         return self.candidates.blocks(owner, cases)

@@ -1,6 +1,6 @@
 """Backend-owned adapter to the team's public AgentRunner and store protocols.
 
-Only INFO_EXTRACTOR is invoked here. No app/agents files or prompts are replaced.
+Only INFO_EXTRACTOR is invoked here.
 QuoteStore writes full validated quotes atomically; completion uses their real IDs.
 """
 import inspect
@@ -65,7 +65,7 @@ def run_extraction(*, settings, scope, runner_factory=None):
             model.client=model.root_client.chat.completions
             model.max_retries=0
             runner=agents.AgentRunner(model,runs=store)
-        output=runner(role,data)  # Never invokes build_graph or roles 2-5.
+        output=runner(role,data)
     scope.check(scope.case_id,scope.revision)
     if not isinstance(output,schemas.ExtractionOut):
         raise ValueError('Invalid extractor output')

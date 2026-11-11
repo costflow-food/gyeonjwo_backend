@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from app.core.errors import ServiceError
 from app.features.work_cases.domain.rfq import AuthorizedMail
 from app.features.work_cases.infrastructure.rfq_repository import RfqRepository
+from app.features.mail_management.domain.models import merged_style
 
 
 class RfqDeliveryRepository(RfqRepository):
@@ -79,7 +80,9 @@ class RfqDeliveryRepository(RfqRepository):
                 'source': 'CASE' if chosen is override else 'MAILBOX',
                 'source_settings_id': chosen['id'], 'source_version': chosen['version_no'],
                 'auto_eligible': configured and approval is False,
-                'style': chosen.get('style_jsonb') or {},
+                # 승인 여부는 정한 행(chosen)을 따르지만 문체·서명·회사명은 기본값 위에 업무별 값을 얹는다
+                'style': merged_style((base_rows[0] if base_rows else {}).get('style_jsonb'),
+                                      (override or {}).get('style_jsonb')),
                 'settings_version': (base_rows[0]['id'] if base_rows else 'none') + ':'
                                     + (override['id'] if override else 'none')}
 

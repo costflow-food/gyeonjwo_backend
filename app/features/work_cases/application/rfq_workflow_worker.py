@@ -35,8 +35,6 @@ class RfqWorkflowWorker:
             if self.stop.is_set():
                 return
             try:
-                # All send hosts check the durable batch marker, independently
-                # of their local graph flag. This worker still dispatches drafts.
                 if self.repo.graph_owns_case(owner, row['id'], row.get('current_batch_id')):
                     continue
                 self.preparation.prepare(owner, row['id'], row['input_revision'])

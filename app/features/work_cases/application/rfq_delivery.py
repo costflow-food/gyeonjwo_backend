@@ -2,7 +2,7 @@
 import logging
 from app.core.errors import ServiceError
 from app.features.mailboxes.application.ingestion import message_metadata
-from app.features.work_cases.domain.rfq import AuthorizedMail
+from app.features.work_cases.domain.rfq import AuthorizedMail, normalized_recipient
 from app.features.work_cases.domain.candidates import selected_for_dispatch
 
 logger = logging.getLogger('uvicorn.error.rfq_send')
@@ -64,7 +64,8 @@ class RfqDelivery:
         if not approved and claimed.settings_version != style['auto_settings_version']:
             self.repo.finish_send(owner, draft_id, 'FAILED', code='SETTINGS_CHANGED')
             return {'status': 'FAILED', 'sent_now': False}
-        if (claimed.recipient != draft['recipient'] or claimed.subject != draft['subject']
+        # 받는 주소는 양쪽 모두 정규화해 비교한다(claim은 소문자로 바뀌어 온다. 등록 주소에 대문자가 있어도 같은 주소다)
+        if (claimed.recipient != normalized_recipient(draft['recipient']) or claimed.subject != draft['subject']
                 or claimed.body_text != draft['body_text']):
             # Provider has not been called: this is a proven pre-send mismatch,
             # never an uncertain send. Do not send newly changed content against

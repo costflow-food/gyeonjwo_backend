@@ -36,7 +36,7 @@ class ReviewGraphStore(GraphStore):
 
     def insert_quote_version(self, record, expected_input_revision):
         # RECHECK_SOURCE may cite an earlier mail in this owned case, not only
-        # the reply that triggered this execution. The RPC rechecks membership.
+        # the reply that triggered this execution.
         self.check(record.work_case_id)
         self.document_row(record.source_mail_id)
         source = next((mail for mail in self.mails(record.work_case_id) if mail['id'] == record.source_mail_id), None)

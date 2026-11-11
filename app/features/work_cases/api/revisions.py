@@ -9,13 +9,14 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from app.core.errors import ServiceError
 from app.core.request_context import current_request_id
 from app.features.mailboxes.api.router import require_google_user
 from app.features.work_cases.api.decisions import RevisionRequest
 from app.features.work_cases.application.actions import validate_action_key
+from app.features.work_cases.domain.rfq import check_mail_content, normalized_recipient
 from app.features.work_cases.infrastructure.runtime_repository import CaseRuntimeRepository
 from app.shared.infrastructure.db.client import make_server_client
 
@@ -75,6 +76,20 @@ class DraftRevision(RevisionRequest):
     subject: str = Field(min_length=1)
     body_text: str
     edit_reason: str = Field(min_length=1)
+
+    @field_validator('recipient')
+    @classmethod
+    def validate_recipient(cls, recipient):
+        """받는 주소는 표시 이름 없는 주소 하나여야 한다. 발송 단계에서야 거절되지 않게 저장 전에 확인한다."""
+        if normalized_recipient(recipient) is None:
+            raise ValueError('recipient must be a single mail address')
+        return recipient
+
+    @model_validator(mode='after')
+    def validate_content(self):
+        """제목은 한 줄, 제목·본문은 비어 있지 않아야 한다(발송 단계와 같은 규칙)."""
+        check_mail_content(self.subject, self.body_text)
+        return self
 
 
 class WithdrawDraft(RevisionRequest):

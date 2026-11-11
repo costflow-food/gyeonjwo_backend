@@ -1,4 +1,3 @@
-"""Stored plain text and metadata only. No Gmail probe, analysis, OCR or writes."""
 from app.core.errors import ServiceError
 from app.features.mail.domain.attachment_ids import attachment_id, part_reference
 from app.features.mail.domain.original import OriginalAttachment, OriginalMail

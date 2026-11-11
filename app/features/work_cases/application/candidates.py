@@ -81,8 +81,6 @@ class CandidateService:
                 if item is None or not item.selectable:
                     raise ServiceError('INVALID_CANDIDATE_SELECTION', '현재 후보 중 필수 조건과 연락처를 확인한 업체를 선택해 주세요.',
                                        422, fields=['body.selected_supplier_ids'], retryable=False)
-                # Mailbox allow scope is an ADDITIONAL limit, never a source of
-                # RFQ target selection. The DB rechecks this under its lock.
                 policy = self.policy_repo.send_policy(owner, case, item.contact_email, 'RFQ', item.supplier_id)
                 policies[str(supplier_id)] = policy
                 if not item.caution and policy.get('auto_eligible') is True and not dispatch_ready:

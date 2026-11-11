@@ -1,4 +1,4 @@
-"""Backend START stores for the team's unchanged graph/runner/tool protocols."""
+"""Backend START stores for the agent graph/runner/tool protocols."""
 from copy import deepcopy
 from decimal import Decimal
 from uuid import UUID
@@ -73,7 +73,6 @@ class GraphStore(AgentStore):
             result = self.rpc('record_case_graph_extraction_issue', p_run=run_id, p_issue=payload)
         except ServiceError as error:
             if error.code == 'EXTRACTION_SCHEMA_REQUIRED':
-                # Optional evidence storage may deploy after the HOLD path.
                 return
             raise
         if not isinstance(result, dict) or result.get('kind') != 'RECORDED':
@@ -234,7 +233,8 @@ class GraphStore(AgentStore):
     def current_send_settings(self, case_id):
         case = self.get_work_case(case_id)
         base, override = MailManagementRepository(self.repo.client).settings(self.scope.owner, case['mailbox_ref'], case_id)
-        return {**((base or {}).get('style_jsonb') or {}), **((override or {}).get('style_jsonb') or {})}
+        from app.features.mail_management.domain.models import merged_style
+        return merged_style((base or {}).get('style_jsonb'), (override or {}).get('style_jsonb'))
 
     def insert_mail_draft(self, record, expected_input_revision):
         from app.agents.tools import MailDraftRecord

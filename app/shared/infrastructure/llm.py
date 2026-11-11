@@ -1,4 +1,4 @@
-"""Stateless OpenAI-compatible Chat Completions adapter. No default model/vendor."""
+"""Stateless OpenAI-compatible Chat Completions adapter."""
 import json
 import logging
 import time
@@ -54,7 +54,6 @@ class JsonAgent:
         if role == 'classification' and self.settings.llm_classification_reasoning_effort:
             body['reasoning_effort'] = self.settings.llm_classification_reasoning_effort
         try:
-            # A new request has no conversation ID and never receives another round's answer.
             with httpx.Client(timeout=min(remaining, self.settings.llm_timeout_seconds), transport=self.transport) as client:
                 response = client.post(str(self.settings.llm_base_url).rstrip('/') + '/chat/completions',
                                        headers={'Authorization': 'Bearer ' + self.settings.llm_api_key.get_secret_value()}, json=body)
