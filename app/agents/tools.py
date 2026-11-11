@@ -2739,6 +2739,20 @@ def create_counter_offer_draft(target_unit_price: str, alternative: list[Alterna
                                     conditions or [], alternative)
 
 
+def _is_validated_alternative(alternative: list[AlternativeAllocation], plans: list[dict]) -> bool:
+    """역제안 대안이 구매안 검증을 통과한 비유지 안(VALID인 SWITCH·SPLIT)의 배정과 같은지. 업체·견적·수량으로 비교한다."""
+    def key(allocations):
+        try:
+            return sorted((str(a['supplier_id']), str(a['quote_version_id']), Decimal(str(a['quantity'])).normalize())
+                          for a in allocations)
+        except (KeyError, TypeError, ArithmeticError, ValueError):
+            return None
+    chosen = key([a.model_dump() for a in alternative])
+    return chosen is not None and bool(chosen) and any(
+        key(p.get('allocations') or []) == chosen for p in plans
+        if p.get('plan_type') != 'KEEP' and p.get('validation_status') == 'VALID')
+
+
 def revalidate_counter_offer(store: CounterOfferStore, case_id: str, input_revision: int, target: dict | None,
                              skipped: bool, plans: list[dict]) -> dict:
     """가격 검증 노드: 역제안 목표(또는 생략)를 최신 견적·정책으로 다시 확인한다.
@@ -2758,6 +2772,10 @@ def revalidate_counter_offer(store: CounterOfferStore, case_id: str, input_revis
     if skipped:
         return {'check': 'PASS' if numbers['skip_allowed'] else 'FIX',
                 'reason': None if numbers['skip_allowed'] else f"생략이 허용되지 않는다({numbers['counter_status']})"}
+    # 견적이 최신인지(NEED_INFO) 먼저 본 뒤, 대안이 검증된 구매안인지 본다
+    if not _is_validated_alternative(alternative, plans):
+        return {'check': 'FIX', 'reason': '비교한 대안이 검증된 구매안(VALID인 전환·분산안)의 배정과 다르다. '
+                                         'validated_plans 중 하나의 allocations를 그대로 쓴다.'}
     checked = check_counter_target(store, context, target['target_unit_price'], alternative)
     return {'check': 'PASS' if checked['status'] == 'VALID' else 'FIX',
             'reason': None if checked['status'] == 'VALID' else json.dumps(checked['violations'], ensure_ascii=False)}

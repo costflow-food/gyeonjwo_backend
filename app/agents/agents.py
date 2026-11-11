@@ -21,6 +21,7 @@ PROMPTS에는 역할 목표, 어떤 도구를 언제 쓰는지, 어떤 경우 �
 """
 import hashlib
 import json
+import logging
 import unicodedata
 from decimal import Decimal
 from collections.abc import Callable
@@ -41,6 +42,8 @@ from app.agents.schemas import (AGENT_IO, EXTRACTION_TOOL_CALL_CAP, EXTRACTION_T
                                 AgentOutput, AgentRole, RunContext, VerifyIssue, VerifyOut)
 from app.core.errors import ServiceError
 from app.agents.tools import EXTRACTION_FIELD_NAMES, candidate_summary, tools_for
+
+logger = logging.getLogger('gyeonjwo')
 
 # 07 7절. 역할 지시문은 담당 팀원이 작성한다. 주석은 넣어야 할 내용과 고를 수 있는 next_action이다.
 PROMPTS = {
@@ -812,7 +815,9 @@ def check_priority(role: AgentRole, data: AgentInput, context: RunContext, outpu
         next_action, ids = 'REQUEST_CLARIFICATION', list(dict.fromkeys(ids + list(drafted)))
     elif next_action == 'REQUEST_CLARIFICATION':
         raise UngroundedOutputError('REQUEST_CLARIFICATION needs drafts created in this run')
-    asked = {(q['supplier_id'], q['field']) for q in questions}     # 묻지 않고 남은 필수 누락은 미확인으로 기록한다
+    # 묻지 않고 남은 필수 누락은 미확인으로 기록한다. 초안에 실제로 넣은 항목(코드가 보충한 항목 포함)도 물은 것으로 본다
+    asked = {(q['supplier_id'], q['field']) for q in questions}
+    asked |= {(d.get('supplier_id'), name) for d in drafted.values() for name in d.get('fields') or []}
     unknown = list(dict.fromkeys(unknown + [f"{sid}.{name}" for sid, s in suppliers.items()
                                            for name in s['missing_required'] if (sid, name) not in asked]))
     return type(output).model_validate(output.model_dump() | {
@@ -1218,6 +1223,8 @@ _VERIFY_FEEDBACK = ('자동 검증에서 아래 문제가 나왔다. 근거 원�
                     'reason은 처음처럼 이번 결과의 내용으로 쓰고, 검증 지적이나 다시 확인한 과정은 쓰지 않는다.')
 # 검증 횟수를 다 써도 남은 지적이 있을 때 reason에 덧붙이는 문장 (구매담당자에게 보인다)
 _VERIFY_UNRESOLVED = '자동 검증에서 확인이 필요한 항목이 남았습니다'
+# 검증자 호출이 실패해 검증하지 못한 결과에 덧붙이는 문장 (구매담당자에게 보인다)
+_VERIFY_SKIPPED = '자동 검증을 하지 못해 결과를 다시 확인해야 합니다.'
 
 
 def _strings(value) -> list[str]:
@@ -1246,7 +1253,7 @@ def verify_packet(role: AgentRole, messages: list, answer: dict | None = None, p
     초안 검증에서 되돌린 호출(실행되지 않은 호출)도 뺀다."""
     output_tool = AGENT_IO[role][1].__name__
     results = {m.tool_call_id: _json_or_text(m.content) for m in messages if isinstance(m, ToolMessage)}
-    not_run = {m.tool_call_id for m in messages if isinstance(m, ToolMessage) and _gate_state(m) == 'REVISE'}
+    not_run = {m.tool_call_id for m in messages if isinstance(m, ToolMessage) and _gate_state(m) in GATE_NOT_RUN}
     calls = [{'tool': call['name'], 'args': call.get('args'), 'result': results.get(call['id'])}
              for m in messages if isinstance(m, AIMessage) for call in m.tool_calls
              if call['name'] != output_tool and call['id'] not in not_run and (pending is None or call['id'] != pending['id'])]
@@ -1302,12 +1309,18 @@ _GATE_FEEDBACK = ('자동 검증에서 아래 문제가 나와 이 도구를 실
                   '지적이 맞으면 고친다. 필요한 도구를 다시 부르고, 초안이 여전히 필요하면 고친 인자로 이 도구를 다시 부른다. '
                   '원문과 대조해 지적이 틀렸으면 같은 인자로 다시 부른다. '
                   '최종 응답의 reason에는 검증 지적이나 다시 확인한 과정을 쓰지 않는다.')
+# 코드 규칙(DRAFT_RULES)에 걸려 되돌릴 때의 안내. 코드 규칙은 도구 결과로 판정하므로 반박해 같은 인자로 다시 부를 수 없다
+_RULE_FEEDBACK = ('코드 확인에서 아래 문제가 나와 이 도구를 실행하지 않았다(초안을 만들지 않았다). 지적대로 고친 인자로 다시 부른다. '
+                  '같은 인자로는 실행되지 않는다. 고칠 수 없으면 초안 없이 HOLD로 끝내고 reason에 확인이 필요한 이유를 쓴다.')
+# 실행하지 않은 초안 도구 호출의 상태 (검증자 입력에서 빼고, 검증을 거친 실행으로 세지 않는다)
+GATE_NOT_RUN = {'REVISE', 'RULE'}
 
 
 def _gate_state(message) -> str | None:
     """초안 전 검증이 도구 결과(ToolMessage.artifact, LLM에게 보이지 않는다)에 남긴 상태.
-    REVISE(되돌림, 실행 안 함)·PASS·UNRESOLVED(검증 횟수를 다 써서 지적이 남은 채 실행)·ERROR(검증자 실패, 실행)·
-    OVER(검증 횟수를 다 쓴 뒤의 호출, 검증 없이 실행). 초안 전 검증을 거치지 않은 결과면 None."""
+    REVISE(LLM 검증자 지적으로 되돌림, 실행 안 함)·RULE(코드 규칙 위반으로 되돌림, 실행 안 함)·PASS·
+    FIXED(마지막 확인에서 코드가 인자를 고쳐 실행)·UNRESOLVED(검증 횟수를 다 써서 검증자 지적이 남은 채 실행)·
+    ERROR(검증자 실패, 실행)·OVER(검증 횟수를 다 쓴 뒤의 호출, 코드 규칙만 보고 실행). 초안 전 검증을 거치지 않은 결과면 None."""
     artifact = getattr(message, 'artifact', None)
     return artifact.get('verify_gate') if isinstance(artifact, dict) else None
 
@@ -1315,10 +1328,13 @@ def _gate_state(message) -> str | None:
 class DraftGateMiddleware(AgentMiddleware):
     """②③⑤ 초안 도구를 실행하기 전 확인. 먼저 코드 규칙(DRAFT_RULES)을 보고, 어긴 것이 없으면 LLM 검증자가
     그때까지의 입력·도구 호출과 실행하려는 호출(pending_call)을 검증한다(verifier가 없으면 코드 규칙만).
-    - 지적이 있으면 도구를 실행하지 않고 지적을 도구 결과로 돌려준다. LLM이 고쳐서(또는 반박하고 같은 인자로) 다시 부른다.
-    - 확인은 한 실행에 MAX_VERIFY_ATTEMPTS번까지다. 마지막 확인에도 지적이 있으면 실행하고 남은 지적을 기록한다
-      (AgentRunner가 reason에 덧붙인다). 그 뒤의 초안 도구 호출은 확인 없이 실행한다.
-    - 검증자 호출이 실패하면 검증 없이 실행한다. 업무가 바뀌어 멈춘 실행이면 확인하지 않는다.
+    - 코드 규칙 위반은 몇 번째 호출이든 실행하지 않는다. 마지막 확인부터는 코드가 고칠 수 있는 위반(DRAFT_FIXES, ③)이면
+      고친 인자로 실행한다. 고칠 수 없으면 LLM이 고쳐 다시 부르거나 초안 없이 HOLD로 끝낸다.
+    - LLM 검증자 지적이 있으면 도구를 실행하지 않고 지적을 도구 결과로 돌려준다. LLM이 고쳐서(또는 반박하고 같은 인자로)
+      다시 부른다. 검증자 확인은 한 실행에 MAX_VERIFY_ATTEMPTS번까지다. 마지막 확인에도 지적이 있으면 실행하고 남은 지적을
+      기록한다(AgentRunner가 reason에 덧붙인다). 그 뒤의 초안 도구 호출은 코드 규칙만 보고 실행한다.
+    - 검증자 호출이 실패하면 로그를 남기고 검증 없이 실행한다(AgentRunner가 reason에 검증하지 못했다고 덧붙인다).
+      업무가 바뀌어 멈춘 실행이면 확인하지 않는다.
     이름표 대응(HandleMiddleware)보다 바깥에 두어 LLM이 본 값(이름표) 그대로 확인한다."""
 
     def __init__(self, role: AgentRole, verifier: BaseChatModel | None = None):
@@ -1332,24 +1348,42 @@ class DraftGateMiddleware(AgentMiddleware):
             return handler(request)
         messages = request.state['messages']
         attempt = 1 + sum(1 for m in messages if isinstance(m, ToolMessage) and _gate_state(m))
-        if attempt > MAX_VERIFY_ATTEMPTS or _case_changed(messages):
+        if _case_changed(messages):
             return self._mark(handler(request), 'OVER', [])
         rule = DRAFT_RULES.get(self.role)
-        issues = rule(_shown(request.runtime, call.get('args') or {}), messages, attempt) if rule else []
-        if not issues and self.verifier is not None:
+        shown = _shown(request.runtime, call.get('args') or {})
+        issues = rule(shown, messages, attempt) if rule else []
+        if issues and attempt >= MAX_VERIFY_ATTEMPTS and self.role in DRAFT_FIXES:
+            fixed = DRAFT_FIXES[self.role](shown, messages)
+            if fixed is not None and not rule(fixed, messages, attempt):
+                logger.info('draft args fixed by code rules role=%s codes=%s', self.role,
+                            sorted({issue['code'] for issue in issues}))
+                return self._mark(handler(request.override(tool_call={**call, 'args': fixed})), 'FIXED', [])
+        if issues:
+            return self._not_run(call, 'RULE', 'DRAFT_RULE', issues, _RULE_FEEDBACK)
+        if attempt > MAX_VERIFY_ATTEMPTS:
+            return self._mark(handler(request), 'OVER', [])
+        if self.verifier is not None:
             try:
                 issues = verify_output(self.verifier, self.role, attempt,
                                        verify_packet(self.role, messages, pending=call))['issues']
-            except Exception:
+            except Exception as error:
+                logger.warning('draft verifier failed role=%s attempt=%s error=%s', self.role, attempt,
+                               type(error).__name__)
                 return self._mark(handler(request), 'ERROR', [])
         if not issues:
             return self._mark(handler(request), 'PASS', [])
         if attempt == MAX_VERIFY_ATTEMPTS:
             return self._mark(handler(request), 'UNRESOLVED', issues)
-        content = json.dumps({'status': 'NOT_RUN', 'code': 'VERIFY_REVISE',
-                              'message': verify_feedback(issues, _GATE_FEEDBACK)}, ensure_ascii=False)
+        return self._not_run(call, 'REVISE', 'VERIFY_REVISE', issues, _GATE_FEEDBACK)
+
+    @staticmethod
+    def _not_run(call: dict, state: str, code: str, issues: list[dict], lead: str) -> ToolMessage:
+        """초안 도구를 실행하지 않고 지적을 도구 결과로 돌려준다. state는 artifact에, code는 LLM이 보는 결과에 남는다."""
+        content = json.dumps({'status': 'NOT_RUN', 'code': code, 'message': verify_feedback(issues, lead)},
+                             ensure_ascii=False)
         return ToolMessage(content=content, name=call['name'], tool_call_id=call['id'],
-                           artifact={'verify_gate': 'REVISE', 'issues': issues})
+                           artifact={'verify_gate': state, 'issues': issues})
 
     @staticmethod
     def _mark(result, state: str, issues: list[dict]):
@@ -1455,6 +1489,33 @@ def _counter_offer_rules(args: dict, messages: list, attempt: int) -> list[dict]
 DRAFT_RULES = {AgentRole.INFO_PRIORITY: _clarification_rules, AgentRole.COUNTER_OFFER: _counter_offer_rules}
 
 
+def _clarification_fix(args: dict, messages: list) -> dict | None:
+    """③ 보완 요청 초안 인자를 코드 규칙에 맞게 고친다(마지막 확인에서만 쓴다). 필수 누락과 선택이 바뀔 수 있는
+    미확인 비용은 넣고, 선택이 바뀌지 않는 비용은 뺀다. 그 밖에 LLM이 넣은 항목은 둔다.
+    미확인 비용에 역전 계산(calculate_break_even)이 없으면 무엇을 물을지 정할 수 없어 None이다."""
+    compared, break_evens = _priority_open_items(messages)
+    asked = {}
+    for request in args.get('requests') or []:
+        asked.setdefault(request.get('supplier_id'), []).extend(request.get('fields') or [])
+    requests = []
+    for sid in dict.fromkeys([*asked, *compared]):
+        supplier = compared.get(sid, {})
+        costs = {c['field'] for c in supplier.get('unknown_costs', [])}
+        if costs and sid not in break_evens:
+            return None
+        changing = bool(break_evens.get(sid, {}).get('can_change_choice'))
+        fields = [f for f in asked.get(sid, []) if f not in costs or changing]
+        fields += [f for f in supplier.get('missing_required', []) + (sorted(costs) if changing else [])
+                   if f not in fields]
+        if fields:
+            requests.append({'supplier_id': sid, 'fields': list(dict.fromkeys(fields))})
+    return {**args, 'requests': requests} if requests else None
+
+
+# 마지막 확인에서 코드가 고칠 수 있는 초안 규칙 위반 (고칠 수 없으면 None)
+DRAFT_FIXES = {AgentRole.INFO_PRIORITY: _clarification_fix}
+
+
 def _candidate_final_rules(answer, messages: list) -> list[str]:
     """② 후보가 있는데 초안을 만들려 하지도 않고 HOLD하면 안 된다."""
     if answer.next_action != 'HOLD' or _tool_results(messages, 'create_rfq_draft'):
@@ -1517,10 +1578,11 @@ _COUNTER_ACTIONS = {'PROPOSABLE': {'COUNTER_OFFER_PROPOSED'}, 'NOT_NEEDED': {'CO
 
 def _counter_final_rules(answer, messages: list) -> list[str]:
     """⑤ next_action은 마지막 calculate_counter_offer의 counter_status에 맞아야 한다.
-    PROPOSABLE이어도 초안 도구가 거절했으면(연락처 없음 등) HOLD를 받는다."""
+    PROPOSABLE이어도 초안 도구가 거절했거나(연락처 없음 등) 코드 규칙 위반으로 실행되지 않았으면 HOLD를 받는다."""
     status = _last_ok(messages, 'calculate_counter_offer').get('counter_status')
     allowed = set(_COUNTER_ACTIONS.get(status, ()))
-    if status == 'PROPOSABLE' and any(r.get('status') == 'REJECTED' for r in _tool_results(messages, 'create_counter_offer_draft')):
+    if status == 'PROPOSABLE' and any(r.get('status') == 'REJECTED' or r.get('code') == 'DRAFT_RULE'
+                                      for r in _tool_results(messages, 'create_counter_offer_draft')):
         allowed.add('HOLD')
     if not allowed or answer.next_action in allowed:
         return []
@@ -1566,8 +1628,14 @@ class RuleCheckMiddleware(AgentMiddleware):
 def with_unresolved(output: AgentOutput, issues: list[dict]) -> AgentOutput:
     """검증 횟수를 다 썼는데 남은 지적을 reason 끝에 우리말 항목명으로 덧붙인다(LLM 설명은 넣지 않는다). 500자를 넘지 않게 앞을 줄인다."""
     labels = list(dict.fromkeys(FIELD_LABELS[i['target']] for i in issues if i['target'] in FIELD_LABELS))
-    note = _VERIFY_UNRESOLVED + (f"({', '.join(labels)})." if labels else '.')
+    return with_note(output, _VERIFY_UNRESOLVED + (f"({', '.join(labels)})." if labels else '.'))
+
+
+def with_note(output: AgentOutput, note: str) -> AgentOutput:
+    """reason 끝에 담당자에게 보일 문장을 덧붙인다. 같은 문장이 이미 있으면 그대로 둔다. 500자를 넘지 않게 앞을 줄인다."""
     reason = output.reason.rstrip()
+    if note in reason:
+        return output
     limit = 500 - len(note) - 1
     reason = (reason if len(reason) <= limit else reason[:limit - 1] + '…') + ' ' + note
     return type(output).model_validate(output.model_dump() | {'reason': reason})
@@ -1670,17 +1738,19 @@ class AgentRunner:
     def _verified(self, role: AgentRole, handles: IdHandles, output: AgentOutput, messages: list,
                   run: Callable[[list], tuple[AgentOutput, list]]) -> AgentOutput:
         """LLM 검증. PASS면 그대로, REVISE면 지적을 넣어 이어서 실행한 결과를 다시 검증한다(MAX_VERIFY_ATTEMPTS번까지).
-        업무가 바뀌어 멈춘 실행은 검증하지 않는다. 검증자 호출이 실패하면 검증 없이 그 결과로 진행한다.
-        다시 실행하다 실패하면 저장소·업무 오류(ServiceError)는 올리고, 그 밖에는 직전 결과로 진행한다.
+        업무가 바뀌어 멈춘 실행은 검증하지 않는다. 검증자 호출이 실패하면 로그를 남기고, 검증하지 못했다는 문장을
+        reason에 덧붙여 그 결과로 진행한다. 다시 실행하다 실패하면 저장소·업무 오류(ServiceError)는 올리고, 그 밖에는
+        로그를 남기고 직전 결과에 그 결과의 지적을 덧붙여 진행한다.
         초안 도구를 실행한 실행(②③⑤)은 초안 전 검증(DraftGateMiddleware)을 거쳤으므로 다시 검증하지 않고,
-        거기서 남은 지적만 reason에 덧붙인다(초안은 다시 실행해도 고쳐지지 않는다)."""
+        거기서 남은 지적과 검증하지 못한 사실만 reason에 덧붙인다(초안은 다시 실행해도 고쳐지지 않는다)."""
         model = self.verifiers.get(role)
         if model is None:
             return output
-        gated = [m for m in messages if isinstance(m, ToolMessage) and _gate_state(m) not in (None, 'REVISE')]
+        gated = [m for m in messages if isinstance(m, ToolMessage) and _gate_state(m) not in (None, *GATE_NOT_RUN)]
         if gated:
             issues = gated[-1].artifact['issues']
-            return with_unresolved(output, issues) if issues else output
+            output = with_unresolved(output, issues) if issues else output
+            return with_note(output, _VERIFY_SKIPPED) if any(_gate_state(m) == 'ERROR' for m in gated) else output
         issues = []
         for attempt in range(1, MAX_VERIFY_ATTEMPTS + 1):
             if _case_changed(messages):
@@ -1688,8 +1758,9 @@ class AgentRunner:
             try:
                 verdict = verify_output(model, role, attempt,
                                         verify_packet(role, messages, handles.hide(output.model_dump(mode='json'))))
-            except Exception:
-                return output
+            except Exception as error:
+                logger.warning('verifier failed role=%s attempt=%s error=%s', role, attempt, type(error).__name__)
+                return with_note(output, _VERIFY_SKIPPED)
             issues = verdict['issues']
             if not issues:
                 return output
@@ -1699,6 +1770,8 @@ class AgentRunner:
                 output, messages = run([*messages, HumanMessage(verify_feedback(issues))])
             except ServiceError:
                 raise
-            except Exception:
-                return output
+            except Exception as error:
+                logger.warning('rerun after verifier issues failed role=%s attempt=%s error=%s', role, attempt,
+                               type(error).__name__)
+                return with_unresolved(output, issues)
         return with_unresolved(output, issues)
