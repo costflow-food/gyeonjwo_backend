@@ -1,3 +1,4 @@
+import time
 from typing import Annotated, Literal
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
@@ -30,6 +31,15 @@ from app.features.work_cases.application.case_actions import case_actions
 
 router = APIRouter(prefix='/api/v1/work-cases', tags=['Work cases'])
 _LIST_READINESS = ThreadPoolExecutor(max_workers=2, thread_name_prefix='case-list-readiness')
+# 직전 준비 상태 확인 결과를 이만큼 오래된 것까지 쓴다(초). 그보다 오래되면 '확인 중'으로 버튼을 끈다
+READINESS_REUSE_SECONDS = 60
+
+
+def _remember_readiness(state, done) -> None:
+    """끝난 준비 상태 확인의 결과를 시각과 함께 남긴다. 실패한 확인은 남기지 않는다."""
+    if done.cancelled() or done.exception() is not None:
+        return
+    state.work_case_list_readiness_done = (time.monotonic(), done.result())
 
 
 def resume_readiness(request, repo=None, *, fresh=False):
@@ -143,13 +153,18 @@ def list_work_cases(
         probe = getattr(request.app.state, 'work_case_list_readiness', None)
         if probe is None or probe.done():
             probe = _LIST_READINESS.submit(probe_actions)
+            probe.add_done_callback(lambda done: _remember_readiness(request.app.state, done))
             request.app.state.work_case_list_readiness = probe
 
     def ready_for_actions():
         try:
             start, resume, changes_ready = probe.result(timeout=0.025)
         except TimeoutError:
-            return fallback, fallback, False
+            # 확인이 늦으면 직전에 끝난 확인 결과를 쓴다(있으면). 그래야 버튼이 주기적으로 꺼졌다 켜지지 않는다
+            last = getattr(request.app.state, 'work_case_list_readiness_done', None)
+            if last is None or time.monotonic() - last[0] > READINESS_REUSE_SECONDS:
+                return fallback, fallback, False
+            start, resume, changes_ready = last[1]
         if start.available:
             live = worker_readiness(settings, getattr(request.app.state, 'extraction_worker', None))
             if not live.available:
