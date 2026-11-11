@@ -1,4 +1,4 @@
-"""Separate durable GRAPH_START queue consumer. Never consumes legacy jobs."""
+"""그래프 작업 큐 소비자. GRAPH_START_V1(인상 통보로 시작)과 GRAPH_REVIEW_V1(회신·구매안 다시 검토)을 처리한다."""
 import logging
 import time
 from uuid import UUID
