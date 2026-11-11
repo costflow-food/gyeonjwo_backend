@@ -2,9 +2,9 @@
 
 각 노드는 CaseState를 받아 바꿀 필드만 dict로 돌려준다. graph.build_graph(nodes=Nodes(...))로 교체·주입한다.
 구매안·가격 검증은 app.agents.tools의 공통 계산(plan_total 등)을 에이전트 도구와 함께 쓴다(같은 숫자가 나온다).
-문서 읽기는 app.features.review.infrastructure.documents를 재사용한다(텍스트 PDF·텍스트·HTML·xlsx).
+문서 읽기는 app.features.review.infrastructure.documents를 재사용한다(텍스트 PDF·텍스트·HTML·xlsx·사진).
 전처리에서는 OCR하지 않는다. 스캔 PDF의 빈 쪽은 에이전트가 그 쪽을 읽을 때 저장소(read_mail_part)가
-documents.ocr_pdf_page로 읽는다(저장소 연결은 서버 저장소 작업에서 한다).
+documents.ocr_pdf_page로 읽는다(저장소 연결은 서버 저장소 작업에서 한다). 사진(jpg·png)도 1쪽 스캔본처럼 같은 길로 읽는다.
 """
 import io
 import json
@@ -46,6 +46,10 @@ class DocumentStore(Protocol):
         """첨부를 읽은 결과 {status, pages}를 normalized_jsonb.documents[attachment_ref]에 저장한다.
         read_mail_part가 이 pages를 쪽 단위로 돌려준다."""
 
+    def list_case_mails(self, case_id: str) -> list[dict]:
+        """업무 메일과 첨부별 저장 상태 [{mail_id, attachments: [{attachment_ref, filename, status}]}].
+        이미 저장된 첨부의 읽지 못한 사유를 재실행에서도 다시 알리는 데 쓴다."""
+
 
 _document_store: DocumentStore | None = None
 
@@ -59,9 +63,12 @@ MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MAX_SHEET_ROWS, MAX_SHEET_COLUMNS = 2000, 50
 XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 _EXTENSION_TYPES = {'.pdf': 'application/pdf', '.txt': 'text/plain', '.csv': 'text/csv', '.html': 'text/html',
-                    '.htm': 'text/html', '.xlsx': XLSX}
+                    '.htm': 'text/html', '.xlsx': XLSX, '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                    '.png': 'image/png'}
+IMAGE_TYPES = ('image/jpeg', 'image/png')
 # 읽지 못한 첨부를 담당자에게 알리는 문장 (status → 사유)
-DOCUMENT_ISSUES = {'NO_TEXT': '글자가 없는 PDF(스캔본)라 읽지 못했습니다', 'UNSUPPORTED': '지원하지 않는 첨부 형식입니다',
+DOCUMENT_ISSUES = {'NO_TEXT': '글자가 없는 PDF(스캔본)라 읽지 못했습니다',
+                   'UNSUPPORTED': '지원하지 않는 첨부 형식({kind})입니다. PDF·xlsx·jpg·png로 받아야 읽을 수 있습니다',
                    'TOO_LARGE': '첨부가 너무 커서 읽지 않았습니다', 'FAILED': '첨부를 읽는 중 오류가 났습니다',
                    'DOWNLOAD_FAILED': '첨부를 받아오지 못했습니다',
                    'PDF_CONTENT': 'PDF가 손상됐거나 암호·쪽수·크기 한도 때문에 읽을 수 없습니다',
@@ -98,23 +105,31 @@ def _sheet_pages(content: bytes) -> list[str]:
 def read_document(filename: str, content_type: str | None, content: bytes) -> dict:
     """첨부 하나를 쪽 단위 텍스트로 읽는다. 반환: {status: READ·NO_TEXT·UNSUPPORTED·TOO_LARGE·FAILED, pages}.
     PDF는 쪽마다, xlsx는 시트마다 한 쪽이다. 여기서는 OCR하지 않는다. 글자가 없는 PDF(스캔본)는 NO_TEXT이고
-    pages는 쪽수만큼의 ''다(빈 쪽의 OCR은 저장소 read_mail_part 몫이다).
+    pages는 쪽수만큼의 ''다(빈 쪽의 OCR은 저장소 read_mail_part 몫이다). 사진(jpg·png)은 1쪽짜리 NO_TEXT다.
     PDF 기술 오류는 documents.PDF_MAX_ATTEMPTS번까지 시도한다. 저장 형식이라 시도 기록은 넣지 않는다(_read_document)."""
     return _read_document(filename, content_type, content)[0]
 
 
 def _read_document(filename: str, content_type: str | None, content: bytes) -> tuple[dict, dict | None]:
     """(read_document 결과, PDF 시도 기록 {attempts, error_kind, retry_exhausted} 또는 None)"""
-    kind = (content_type or '').split(';')[0].strip().lower()
-    if kind not in _EXTENSION_TYPES.values():
-        kind = _EXTENSION_TYPES.get(Path(filename or '').suffix.lower(), kind)
+    kind = _kind(filename, content_type)
     if len(content) > MAX_ATTACHMENT_BYTES:
         return {'status': 'TOO_LARGE', 'pages': []}, None
+    if kind in IMAGE_TYPES:
+        return {'status': 'NO_TEXT', 'pages': ['']}, None
     if kind == 'application/pdf':
         result = documents.read_pdf_document(content)
         log = {key: result[key] for key in ('attempts', 'error_kind', 'retry_exhausted')}
         return {'status': result['status'], 'pages': result['pages']}, log
     return _read_other(kind, content), None
+
+
+def _kind(filename: str, content_type: str | None) -> str:
+    """첨부 형식. Gmail이 application/octet-stream 등으로 준 첨부는 확장자로 다시 판별한다."""
+    kind = (content_type or '').split(';')[0].strip().lower()
+    if kind not in _EXTENSION_TYPES.values():
+        kind = _EXTENSION_TYPES.get(Path(filename or '').suffix.lower(), kind)
+    return kind
 
 
 def _read_other(kind: str, content: bytes) -> dict:
@@ -136,11 +151,13 @@ def preprocess(state) -> dict:
     """이번 실행의 메일(state['mail_ids']) 첨부 중 아직 읽지 않은 것을 쪽 단위 텍스트로 읽어 저장한다.
     ①은 read_mail_evidence로 그 쪽을 읽는다. 첨부 하나를 읽지 못해도 실행은 계속하고 사유를 unresolved에 남긴다.
     받아오지 못한 첨부는 저장하지 않아 다음 실행에서 다시 시도한다.
+    사진은 여기서 사유를 남기지 않는다(읽을 때 OCR한다). 이전 실행에서 읽지 못해 저장된 첨부의 사유도 다시 남긴다.
     반환: {'unresolved': ['<mail_id> <파일명>: 사유', ...]} (모두 읽었으면 {})"""
     if _document_store is None:
         raise RuntimeError('document store is not configured')
-    issues = []
+    issues, done = [], set()
     for item in _document_store.list_unread_attachments(state['case_id'], state.get('mail_ids', [])):
+        done.add((str(item['mail_id']), item['attachment_ref']))
         if type(item.get('size_bytes')) is int and item['size_bytes'] > MAX_ATTACHMENT_BYTES:
             # 메일 수신 때 기록한 크기로 먼저 거른다. 너무 큰 첨부는 받지 않는다
             document = {'status': 'TOO_LARGE', 'pages': []}
@@ -153,13 +170,24 @@ def preprocess(state) -> dict:
             continue
         document, log = _read_document(item['filename'], item.get('content_type'), content)
         _document_store.save_document(state['case_id'], item['mail_id'], item['attachment_ref'], document)
-        if document['status'] != 'READ':
-            issues.append(f"{item['mail_id']} {item['filename']}: {_document_issue(document['status'], log)}")
+        if document['status'] != 'READ' and _kind(item['filename'], item.get('content_type')) not in IMAGE_TYPES:
+            issues.append(f"{item['mail_id']} {item['filename']}: "
+                          f"{_document_issue(document['status'], log, item['filename'])}")
+    # 저장된 결과는 다시 읽지 않으므로, 사유를 남기지 않으면 재실행 때 원인이 사라진다
+    mail_ids = {str(mail_id) for mail_id in state.get('mail_ids', [])}
+    for mail in _document_store.list_case_mails(state['case_id']):
+        if str(mail['mail_id']) not in mail_ids:
+            continue
+        for attachment in mail.get('attachments', []):
+            if ((str(mail['mail_id']), attachment['attachment_ref']) not in done
+                    and attachment['status'] in ('UNSUPPORTED', 'TOO_LARGE', 'FAILED')):
+                issues.append(f"{mail['mail_id']} {attachment['filename']}: "
+                              f"{_document_issue(attachment['status'], None, attachment['filename'])}")
     return {'unresolved': issues} if issues else {}
 
 
-def _document_issue(status: str, log: dict | None) -> str:
-    """읽지 못한 사유. PDF는 내용 문제와 기술 오류(재시도 소진)를 나눠 적는다."""
+def _document_issue(status: str, log: dict | None, filename: str = '') -> str:
+    """읽지 못한 사유. PDF는 내용 문제와 기술 오류(재시도 소진)를 나눠 적고, 지원하지 않는 형식은 확장자를 적는다."""
     if status == 'FAILED' and log:
         if log['retry_exhausted']:
             return PDF_RETRY_EXHAUSTED.format(attempts=log['attempts'])
@@ -167,6 +195,8 @@ def _document_issue(status: str, log: dict | None) -> str:
             return DOCUMENT_ISSUES['PDF_CONTENT']
         if log['error_kind'] == 'TIMEOUT':
             return DOCUMENT_ISSUES['PDF_TIMEOUT']
+    if status == 'UNSUPPORTED':
+        return DOCUMENT_ISSUES[status].format(kind=Path(filename or '').suffix.lower() or '확장자 없음')
     return DOCUMENT_ISSUES[status]
 
 
