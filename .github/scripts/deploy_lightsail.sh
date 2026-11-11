@@ -13,6 +13,8 @@
 #   VERIFY_INTERVAL 확인 간격(초, 기본 10)
 #   VERIFY_PASSES   연속 통과 횟수(기본 3)
 #   POLL_SECONDS    Lightsail 상태 확인 간격(초, 기본 10)
+#   PRUNE_UNREAD_ENV 1이면 코드가 읽지 않는 환경변수 이름을 이번 배포에서 뺀다(KAN-204).
+#                   기본은 이름만 경고하고 그대로 둔다. 확인에 실패하면 롤백이 직전 환경변수까지 되돌린다.
 # 필요: aws CLI v2, lightsailctl, python3, curl
 #
 # 성공 판정(모두 VERIFY_PASSES회 연속):
@@ -162,6 +164,42 @@ else
   fi
 fi
 
+# 2-1) 코드가 읽지 않는 이름 점검(KAN-204). 이름만 다루고 값은 찍지 않는다. 점검이 실패해도 배포는 막지 않는다.
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+env_names() {
+  python3 - "$work/env_check.json" "$1" <<'PY'
+import json, sys
+print(", ".join(json.load(open(sys.argv[1])).get(sys.argv[2]) or []))
+PY
+}
+env_note=""
+env_rc=0
+python3 "$repo_root/scripts/check_env_names.py" --env-file "$work/env.json" --json \
+  --write-pruned "$work/env.pruned.json" > "$work/env_check.json" 2>/dev/null || env_rc=$?
+if [ "$env_rc" = 0 ] || [ "$env_rc" = 1 ]; then
+  unread_names="$(env_names unread)"
+  kept_names="$(env_names library)"
+  image_env_names="$(env_names image)"
+  if [ -n "$kept_names" ]; then echo "::notice::라이브러리가 읽을 수 있는 환경변수(유지): $kept_names"; fi
+  if [ -n "$image_env_names" ]; then echo "::notice::이미지 기본값을 덮어쓰는 환경변수(유지): $image_env_names"; fi
+  missing_names="$(env_names missing)"
+  if [ -n "$missing_names" ]; then echo "::notice::.env.example에는 있고 운영에는 없는 환경변수(코드 기본값 사용): $missing_names"; fi
+  if [ -z "$unread_names" ]; then
+    echo "env names: 코드가 읽지 않는 이름 없음"
+    env_note="- 환경변수: 코드가 읽지 않는 이름 없음"
+  elif [ "${PRUNE_UNREAD_ENV:-}" = 1 ]; then
+    mv "$work/env.pruned.json" "$work/env.json"
+    echo "::warning::코드가 읽지 않는 환경변수를 이번 배포에서 뺐습니다: $unread_names"
+    env_note="- 환경변수: 코드가 읽지 않는 이름 제거 — $unread_names"
+  else
+    echo "::warning::코드가 읽지 않는 환경변수가 운영에 있습니다(이번 배포는 그대로 둠). 저장소 변수 PRUNE_UNREAD_ENV=1 로 배포하면 뺍니다: $unread_names"
+    env_note="- 환경변수: 코드가 읽지 않는 이름이 남아 있음 — $unread_names"
+  fi
+else
+  echo "::warning::환경변수 이름 점검을 실행하지 못했습니다(rc=$env_rc). 환경변수는 그대로 배포합니다"
+  env_note="- 환경변수: 이름 점검 실패(rc=$env_rc), 변경 없음"
+fi
+
 python3 - "$work/env.json" "$ref" > "$work/containers.json" <<'PY'
 import json, sys
 env = json.load(open(sys.argv[1]))
@@ -213,7 +251,8 @@ rollback_and_fail() {
     echo "::warning::직전 배포가 없어 롤백할 수 없습니다"
   fi
   echo "rollback: $rb_status"
-  summary "### 서버 배포 실패: $revision" "- 원인: $reason" "- 롤백: $rb_status"
+  summary "### 서버 배포 실패: $revision" "- 원인: $reason" "- 롤백: $rb_status" \
+          "${env_note:-- 환경변수: 점검 전} (롤백하면 직전 환경변수로 돌아감)"
   exit 1
 }
 
@@ -272,4 +311,5 @@ fi
 
 echo "deployed v$version ($revision) → $url"
 summary "### 서버 배포 완료: v$version ($revision) → $url" \
-        "- /ready: ready, degraded_features=[${degraded}] (배포 전 [${baseline/\*/확인 불가}])"
+        "- /ready: ready, degraded_features=[${degraded}] (배포 전 [${baseline/\*/확인 불가}])" \
+        "${env_note:-- 환경변수: 점검 전}"
