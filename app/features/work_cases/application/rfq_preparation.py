@@ -7,6 +7,7 @@ from pydantic import Field
 from app.shared.domain.schemas import StrictModel
 from app.core.errors import ServiceError
 from app.features.work_cases.domain.rfq import mailbox_address
+from app.agents.tools import MAIL_VALUE_LIMITS, mail_value
 
 CANDIDATE_PROMPT = '''Select RFQ candidates only from the supplied registered supplier item IDs.
 An RFQ asks for a quote; it does not certify availability, current price or purchasing eligibility.
@@ -34,10 +35,12 @@ def rfq_text(case, style=None):
         raise ServiceError('INVALID_CONDITIONS', '요청 수량을 확인해 주세요.', 422) from None
     if not amount.is_finite() or amount <= 0:
         raise ServiceError('INVALID_CONDITIONS', '요청 수량을 확인해 주세요.', 422)
+    # 품목·규격은 메일에서 읽은 값일 수 있어 한 줄·길이 제한·주소 제거로 정제한다(다른 업체로 나가는 메일)
+    item = mail_value(item, MAIL_VALUE_LIMITS['품목']) or '요청 품목'
     lines = ['안녕하세요. 아래 조건의 공급 가능 여부와 견적을 요청드립니다.', '',
              '품목: ' + item, '요청 수량: ' + format(amount.normalize(), 'f') + ' ' + str(unit)]
     if case.get('specification'):
-        lines.append('요청 규격: ' + str(case['specification']))
+        lines.append('요청 규격: ' + mail_value(case['specification'], MAIL_VALUE_LIMITS['규격']))
     if case.get('due_date'):
         lines.append('요청 납기: ' + str(case['due_date']))
     # Mandatory conditions are quoted as requests, never asserted as satisfied.

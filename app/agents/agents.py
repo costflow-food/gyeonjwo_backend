@@ -21,6 +21,7 @@ PROMPTS에는 역할 목표, 어떤 도구를 언제 쓰는지, 어떤 경우 �
 """
 import hashlib
 import json
+import logging
 import unicodedata
 from decimal import Decimal
 from collections.abc import Callable
@@ -41,6 +42,8 @@ from app.agents.schemas import (AGENT_IO, EXTRACTION_TOOL_CALL_CAP, EXTRACTION_T
                                 AgentOutput, AgentRole, RunContext, VerifyIssue, VerifyOut)
 from app.core.errors import ServiceError
 from app.agents.tools import EXTRACTION_FIELD_NAMES, candidate_summary, tools_for
+
+logger = logging.getLogger('gyeonjwo')
 
 # 07 7절. 역할 지시문은 담당 팀원이 작성한다. 주석은 넣어야 할 내용과 고를 수 있는 next_action이다.
 PROMPTS = {
@@ -65,6 +68,15 @@ PROMPTS = {
 4. REJECTED는 전체 실패가 아니다. rejected에 나온 항목만 고치거나 빼고, 나머지 fields·cost_terms·price_tiers·item_notes는
    처음 보낸 그대로 함께 다시 보낸다(거절되지 않은 값을 빠뜨리지 않는다). 그래도 안 되면 그 항목을 빼고 한 번 더 보낸다.
 5. 형식: unit_price에는 금액만 넣고 단위는 unit에 따로 넣는다("9,700원/kg" → unit_price "9,700원", unit "kg").
+   단가의 배수·통화·단위는 원문의 그 단가 줄 기준이다. 숫자만 옮기면 뜻이 바뀐다.
+   - 배수: 숫자 뒤의 천원·만원은 그대로 옮긴다("9,700천원" → unit_price "9,700천원"). 표 머리글에만 있으면
+     ("(단위: 천원)") 단가는 숫자 그대로 두고 price_scale_text에 그 구절을 넣는다(price_tiers 구간도 같다).
+   - 통화: 외화는 통화까지 옮긴다("USD 3.10" → unit_price "USD 3.10"). 표 머리글에만 있으면 currency로 보낸다.
+   - 단위: 단가 바로 뒤나 같은 줄의 단위다. "54,500원/박스 (박스당 10kg)" → unit "박스",
+     quantity_per_order_unit "박스당 10kg" (kg이 아니다).
+   거절 결과의 found는 문제를 찾은 원문 줄이다. 그 줄을 보고 hints대로 고친다.
+   PRICE_NOTATION_UNKNOWN(도구가 못 읽는 단가 표기)·PRICE_IMPLAUSIBLE(배수를 적용한 단가가 기준 단가와 5배 넘게
+   차이)은 found 줄을 다시 보고 배수·통화·단위를 고친다. 고칠 표기가 없으면 그 단가만 null로 보낸다. 값을 짐작해 바꾸지 않는다.
    운송비·하차비 같은 비용은 fields가 아니라 cost_terms 인자로 보낸다. fields에 cost_terms라는 항목을 만들지 않는다.
 
 순서:
@@ -77,6 +89,8 @@ PROMPTS = {
    읽은 것이다. 보이는 글자를 그대로 옮기고, 흐리거나 빠진 글자를 짐작해 채우지 않는다.
    UNREADABLE이면 그 쪽은 다시 읽지 않는다(다시 불러도 같다). UNREADABLE이거나 OCR 결과도 비었으면(empty) 그 쪽은
    읽을 수 없는 첨부다. 첨부를 읽어 보지 않고 "첨부를 읽을 수 없음"으로 HOLD하지 않는다.
+   truncated면 그 본문·쪽의 뒷부분이 더 있다. 찾는 품목·단가가 아직 안 나왔으면 같은 part·page를 offset=next_offset으로
+   이어 읽는다. LIMIT_EXCEEDED면 더 읽지 말고 hold.code SOURCE_READ_FAILED로 바로 HOLD한다.
    도구 호출 수에 한도가 있으니 모든 쪽을 읽지 않는다.
 3. recheck_fields가 비어 있지 않으면 그 항목에 해당하는 구간만 다시 읽는다.
 4. store_structured_mail을 호출한다. 값이 있는 항목은 하나도 빠짐없이 근거 evidence(mail_id, part, page, cell)를 붙인다.
@@ -105,6 +119,10 @@ PROMPTS = {
    - SUPPLY_QUANTITY_MISSING: 기존 업체의 인상 통보인데 공급 물량이 없다. 원문에 공급 계획·공급 물량·공급 가능량이라고
      적힌 수량만 단위와 함께 available_quantity로 한 번 다시 보낸다. 규격·포장·주문 단위의 수량(예: 10kg/박스,
      박스당 10kg, 주문 단위 10kg 박스)은 공급 물량이 아니다. 그런 수량만 있으면 다시 보내지 말고 바로 HOLD한다.
+   - VALID_UNTIL_BEFORE_EFFECTIVE: 유효기간이 적용일보다 이르다. 그 날짜는 회신 기한이다. valid_until을 빼고
+     "견적 유효기간 …까지" 문장을 원문 그대로 item_notes에 비고(PRICE_NOTICE)로 넣어 한 번 다시 보낸다.
+   - item_notes[n]이 거절됨: 비고는 원문 문장을 한 글자도 바꾸지 않고 복사한다. 앞 줄의 제목(예: "배송비")을 붙이거나
+     낱말을 더하지 않는다. 고쳐서 한 번 다시 보내고, 또 거절되면 그 비고만 빼고 보낸다. 비고 때문에 HOLD하지 않는다.
    - REVISION_CHANGED·CASE_NOT_FOUND: 멈추고 HOLD를 반환한다.
    HOLD는 위에서 HOLD로 정한 코드이거나, 두 번 다시 보내도 저장되지 않았을 때만 고른다.
 6. 바로 최종 응답을 낸다(최종 응답이 실행 기록으로 저장된다).
@@ -125,6 +143,14 @@ PROMPTS = {
   붙은 "…까지"는 valid_until이 아니다. 그런 날짜는 어느 필드에도 넣지 않고 그 조건 문장을 품목 비고로 남긴다.
   예) "2027년 2월 28일까지 월 60박스 이상 발주 시 100,000원/박스" → valid_until 보내지 않음,
       price_tiers {min_quantity "월 60박스 이상", unit_price "100,000원"} + 그 문장 전체를 비고(PRICE_NOTICE)로
+  견적 전체에 붙은 "유효기간·견적 유효기간 …까지"는 적용일이 있든 없든 항상 valid_until로 보낸다.
+  적용일과 비교하는 것은 도구가 한다. 유효기간이 적용일보다 이르면 도구가 VALID_UNTIL_BEFORE_EFFECTIVE로 알려준다.
+  적용일은 원문에 적용일·"…부터"로 적힌 날짜만 쓴다(작성일·발행일·견적일은 적용일이 아니다).
+  "…까지 회신 부탁드립니다"처럼 날짜가 붙은 회신 요청은 valid_until이 아니다. 그 문장을 비고(PRICE_NOTICE)로 넣는다
+  (날짜 없는 회신 요청은 비고가 아니다).
+  예) "견적 유효기간 2026-11-30까지"만 있고 적용일 없음 → valid_until "2026-11-30"
+      "적용일 2026-12-01 출고분부터 / 견적 유효기간 2026-11-30 18:00까지" → effective_from "2026-12-01 출고분부터",
+      valid_until "2026-11-30 18:00까지" (도구가 회신 기한으로 알려주면 그대로 고쳐 보낸다)
 - raw_value는 원문에서 그 값 부분만 그대로 옮긴다. 앞뒤 문장·조사는 넣지 않는다.
   예) "변경 단가: 54,500원/박스" → unit_price "54,500원", unit "박스"
       "유효기간 2026년 12월 31일까지입니다" → valid_until "2026년 12월 31일"
@@ -135,8 +161,8 @@ PROMPTS = {
       "1kg 당 단가 : 9,850 원" → unit_price "9,850 원", unit "kg"
       "단가 54,500원/박스로 조정됩니다" → unit_price "54,500원", unit "박스" (unit에는 단위 낱말 하나만 넣는다)
       "kg당 3.20 USD" → unit_price "3.20 USD", unit "kg", currency "USD"
-      "Unit price: USD 3.10 per kg" → unit_price "3.10", unit "kg", currency "USD"
-        (통화 기호가 숫자 앞에 있으면 숫자와 통화를 나눠 보낸다. "per kg"·"Unit price"는 raw_value에 넣지 않는다)
+      "Unit price: USD 3.10 per kg" → unit_price "USD 3.10", unit "kg"
+        ("per kg"·"Unit price"는 raw_value에 넣지 않는다)
       "Valid until: December 31, 2026"처럼 영어로 쓴 날짜는 도구가 읽지 못한다. 그 항목만 null로 보내고 reason에 적는다
       "단가는 kg당 9,500원입니다" → unit_price "9,500원", unit "kg"
       "하차비는 박스당 500원" → cost_terms {amount "500원", basis "박스당", basis_type PER_UNIT, basis_unit box}
@@ -212,6 +238,7 @@ hold (보류 코드. 서버가 이 코드로 담당자에게 보일 문구를 �
   - NO_QUOTE_DATA — 단가 없음·접수 안내·견적 아님·다른 품목의 견적만 있음:
     "이 메일에는 업무 품목의 견적 정보가 없어 저장하지 않았습니다."
   - SOURCE_READ_FAILED — 견적이 있을 첨부 쪽을 read_mail_evidence로 읽었는데 읽을 수 없어 견적을 확인하지 못함.
+    read_mail_evidence가 LIMIT_EXCEEDED(원문이 처리 한도를 넘음)를 돌려준 경우도 이 코드다.
     첨부를 읽어 보지 않고 이 코드를 쓰지 않는다:
     "첨부를 읽을 수 없어 견적을 저장하지 못했습니다."
   - SUPPLIER_NOT_MATCHED — store_structured_mail이 SUPPLIER_NOT_MATCHED를 돌려줌:
@@ -225,7 +252,8 @@ hold (보류 코드. 서버가 이 코드로 담당자에게 보일 문구를 �
     (○○는 단가·단위·품목명 중 거절된 항목 하나, 조사는 그 낱말에 맞춘다. field는 그 항목의 이름)
   - MISSING_FIELD, field quantity — store_structured_mail이 SUPPLY_QUANTITY_MISSING을 돌려줬고 원문에 공급 물량이 없음:
     "인상 통보에서 공급 물량을 확인할 수 없어 견적을 저장하지 않았습니다."
-  - MISSING_EVIDENCE — 두 번 다시 보내도 근거(MISSING_EVIDENCE·SOURCE_MISMATCH·EVIDENCE_NOT_IN_CASE)로 거절됨:
+  - MISSING_EVIDENCE — 두 번 다시 보내도 fields 값이 근거(MISSING_EVIDENCE·SOURCE_MISMATCH·EVIDENCE_NOT_IN_CASE)로
+    거절됨(item_notes 거절은 그 비고만 빼고 저장하므로 해당하지 않는다):
     "견적 값의 원문 근거를 확인할 수 없어 저장하지 못했습니다."
   - REVISION_CHANGED·CASE_NOT_FOUND로 멈춤: hold는 비우고(null) "업무 정보가 바뀌어 이번 추출을 멈췄습니다."라고 쓴다.
   예) {"next_action": "HOLD", "quote_version_ids": [], "hold": {"code": "SUPPLIER_NOT_MATCHED", "field": null},
@@ -812,7 +840,9 @@ def check_priority(role: AgentRole, data: AgentInput, context: RunContext, outpu
         next_action, ids = 'REQUEST_CLARIFICATION', list(dict.fromkeys(ids + list(drafted)))
     elif next_action == 'REQUEST_CLARIFICATION':
         raise UngroundedOutputError('REQUEST_CLARIFICATION needs drafts created in this run')
-    asked = {(q['supplier_id'], q['field']) for q in questions}     # 묻지 않고 남은 필수 누락은 미확인으로 기록한다
+    # 묻지 않고 남은 필수 누락은 미확인으로 기록한다. 초안에 실제로 넣은 항목(코드가 보충한 항목 포함)도 물은 것으로 본다
+    asked = {(q['supplier_id'], q['field']) for q in questions}
+    asked |= {(d.get('supplier_id'), name) for d in drafted.values() for name in d.get('fields') or []}
     unknown = list(dict.fromkeys(unknown + [f"{sid}.{name}" for sid, s in suppliers.items()
                                            for name in s['missing_required'] if (sid, name) not in asked]))
     return type(output).model_validate(output.model_dump() | {
@@ -1218,6 +1248,8 @@ _VERIFY_FEEDBACK = ('자동 검증에서 아래 문제가 나왔다. 근거 원�
                     'reason은 처음처럼 이번 결과의 내용으로 쓰고, 검증 지적이나 다시 확인한 과정은 쓰지 않는다.')
 # 검증 횟수를 다 써도 남은 지적이 있을 때 reason에 덧붙이는 문장 (구매담당자에게 보인다)
 _VERIFY_UNRESOLVED = '자동 검증에서 확인이 필요한 항목이 남았습니다'
+# 검증자 호출이 실패해 검증하지 못한 결과에 덧붙이는 문장 (구매담당자에게 보인다)
+_VERIFY_SKIPPED = '자동 검증을 하지 못해 결과를 다시 확인해야 합니다.'
 
 
 def _strings(value) -> list[str]:
@@ -1246,7 +1278,7 @@ def verify_packet(role: AgentRole, messages: list, answer: dict | None = None, p
     초안 검증에서 되돌린 호출(실행되지 않은 호출)도 뺀다."""
     output_tool = AGENT_IO[role][1].__name__
     results = {m.tool_call_id: _json_or_text(m.content) for m in messages if isinstance(m, ToolMessage)}
-    not_run = {m.tool_call_id for m in messages if isinstance(m, ToolMessage) and _gate_state(m) == 'REVISE'}
+    not_run = {m.tool_call_id for m in messages if isinstance(m, ToolMessage) and _gate_state(m) in GATE_NOT_RUN}
     calls = [{'tool': call['name'], 'args': call.get('args'), 'result': results.get(call['id'])}
              for m in messages if isinstance(m, AIMessage) for call in m.tool_calls
              if call['name'] != output_tool and call['id'] not in not_run and (pending is None or call['id'] != pending['id'])]
@@ -1285,10 +1317,37 @@ def verify_output(model: BaseChatModel, role: AgentRole, attempt: int, packet: d
     return {'verdict': answer.verdict, 'issues': [i.model_dump() for i in kept], 'dropped': [i.model_dump() for i in dropped]}
 
 
-def verify_feedback(issues: list[dict], lead: str = _VERIFY_FEEDBACK) -> str:
-    """에이전트에 돌려줄 지적 안내. lead는 맨 앞 안내 문장(최종 답 검증·초안 전 검증에 따라 다르다)."""
-    lines = [f"- {i['target']} ({i['code']}): {i['explanation']}"
-             + (f" 원문: \"{i['evidence_quote']}\"" if i.get('evidence_quote') else '') for i in issues]
+# LLM 검증자 지적을 에이전트에 돌려줄 때 쓰는 고칠 방법 (역할, 확인 항목 코드별). 검증자가 쓴 설명·인용한 메일 문장은
+# 에이전트에 넘기지 않는다(메일 속 문장이 지시처럼 에이전트에 들어가지 않게). 표에 없는 코드는 _VERIFY_HINT_DEFAULT
+_VERIFY_HINTS = {
+    (AgentRole.INFO_EXTRACTOR, 'VALUE_MISMATCH'): '원문에서 그 항목의 뜻에 맞는 값을 다시 골라 저장한다(인상 전 단가·다른 품목·예시 물량이 아닌 값).',
+    (AgentRole.INFO_EXTRACTOR, 'WRONG_FIELD'): '그 값의 뜻에 맞는 필드로 옮겨 다시 저장한다(적용일은 effective_from, 유효기간은 valid_until, 포장 단위 수량은 공급 물량이 아님).',
+    (AgentRole.INFO_EXTRACTOR, 'COST_MISREAD'): '비용 원문을 다시 읽고 included_in_price·payer·basis_type을 원문 뜻대로 고쳐 다시 저장한다.',
+    (AgentRole.INFO_EXTRACTOR, 'MISSING_VALUE'): '읽은 원문에 있는 그 항목(단가·단위·공급 물량·부대비용)을 근거와 함께 저장한다.',
+    (AgentRole.INFO_EXTRACTOR, 'WRONG_ITEM'): '업무 품목(get_case_context의 item_name)의 견적만 저장한다.',
+    (AgentRole.INFO_EXTRACTOR, 'WRONG_HOLD'): '읽은 원문에 업무 품목 단가가 있으면 HOLD하지 말고 저장한다.',
+    (AgentRole.CANDIDATE, 'WRONG_ITEM'): '업무 품목과 원재료·상태가 같은 등록 품목만 supplier_item_ids에 넣는다.',
+    (AgentRole.CANDIDATE, 'MISSED_ITEM'): 'search_supplier_items 결과에서 업무 품목과 같은 품목을 빠짐없이 supplier_item_ids에 넣는다.',
+    (AgentRole.CANDIDATE, 'QUESTION_ALREADY_ANSWERED'): '그 업체의 등록 비고에 이미 답이 있는 선택 질문은 questions에서 뺀다.',
+    (AgentRole.INFO_PRIORITY, 'ANSWER_IN_SOURCE'): '그 업체 메일 원문에 답이 있으면 묻지 말고 recheck로 재추출한다.',
+    (AgentRole.INFO_PRIORITY, 'WRONG_REQUIREMENT'): 'requirements의 stated가 required를 충족하는지 다시 판단한다. 충족하면 묻지 않고, 충족하지 않으면 묻는다.',
+    (AgentRole.INFO_PRIORITY, 'WRONG_RECHECK'): 'recheck의 source_text를 그 항목의 답이 적힌 원문 구절로 고친다.',
+    (AgentRole.RESPONSE_PLAN, 'WRONG_REQUIREMENT'): 'met_requirements를 다시 판단한다. stated가 required를 분명히 충족할 때만 넣는다.',
+    (AgentRole.RESPONSE_PLAN, 'PLAN_REASON'): '안의 reason을 validate_purchase_plan 결과(금액 순서·성립 조건)와 맞게 고친다.',
+    (AgentRole.RESPONSE_PLAN, 'WRONG_RECHECK'): 'recheck의 source_text를 그 항목의 답이 적힌 원문 구절로 고친다.',
+    (AgentRole.COUNTER_OFFER, 'CONDITION_UNGROUNDED'): 'conditions는 업무 수량·견적·도구 결과에 있는 조건만 쓴다. 근거 없는 약속은 뺀다.',
+    (AgentRole.COUNTER_OFFER, 'WRONG_RECHECK'): 'recheck의 source_text를 인상 전 단가가 적힌 원문 구절로 고친다.',
+}
+_VERIFY_HINT_DEFAULT = '그 항목을 근거 원문·도구 결과와 다시 대조해 고친다.'
+
+
+def verify_feedback(issues: list[dict], lead: str = _VERIFY_FEEDBACK, role: AgentRole | None = None) -> str:
+    """에이전트에 돌려줄 지적 안내. lead는 맨 앞 안내 문장(최종 답 검증·초안 전 검증에 따라 다르다).
+    LLM 검증자 지적은 항목·코드와 코드가 정한 고칠 방법(_VERIFY_HINTS)만 넘긴다. 코드 규칙 지적(근거 구절 없음)은
+    설명을 코드가 썼으므로 그대로 넘긴다."""
+    lines = [f"- {i['target']} ({i['code']}): "
+             + (_VERIFY_HINTS.get((role, i['code']), _VERIFY_HINT_DEFAULT) if i.get('evidence_quote') else i['explanation'])
+             for i in issues]
     return '\n'.join([lead, *lines])
 
 
@@ -1302,12 +1361,18 @@ _GATE_FEEDBACK = ('자동 검증에서 아래 문제가 나와 이 도구를 실
                   '지적이 맞으면 고친다. 필요한 도구를 다시 부르고, 초안이 여전히 필요하면 고친 인자로 이 도구를 다시 부른다. '
                   '원문과 대조해 지적이 틀렸으면 같은 인자로 다시 부른다. '
                   '최종 응답의 reason에는 검증 지적이나 다시 확인한 과정을 쓰지 않는다.')
+# 코드 규칙(DRAFT_RULES)에 걸려 되돌릴 때의 안내. 코드 규칙은 도구 결과로 판정하므로 반박해 같은 인자로 다시 부를 수 없다
+_RULE_FEEDBACK = ('코드 확인에서 아래 문제가 나와 이 도구를 실행하지 않았다(초안을 만들지 않았다). 지적대로 고친 인자로 다시 부른다. '
+                  '같은 인자로는 실행되지 않는다. 고칠 수 없으면 초안 없이 HOLD로 끝내고 reason에 확인이 필요한 이유를 쓴다.')
+# 실행하지 않은 초안 도구 호출의 상태 (검증자 입력에서 빼고, 검증을 거친 실행으로 세지 않는다)
+GATE_NOT_RUN = {'REVISE', 'RULE'}
 
 
 def _gate_state(message) -> str | None:
     """초안 전 검증이 도구 결과(ToolMessage.artifact, LLM에게 보이지 않는다)에 남긴 상태.
-    REVISE(되돌림, 실행 안 함)·PASS·UNRESOLVED(검증 횟수를 다 써서 지적이 남은 채 실행)·ERROR(검증자 실패, 실행)·
-    OVER(검증 횟수를 다 쓴 뒤의 호출, 검증 없이 실행). 초안 전 검증을 거치지 않은 결과면 None."""
+    REVISE(LLM 검증자 지적으로 되돌림, 실행 안 함)·RULE(코드 규칙 위반으로 되돌림, 실행 안 함)·PASS·
+    FIXED(마지막 확인에서 코드가 인자를 고쳐 실행)·UNRESOLVED(검증 횟수를 다 써서 검증자 지적이 남은 채 실행)·
+    ERROR(검증자 실패, 실행)·OVER(검증 횟수를 다 쓴 뒤의 호출, 코드 규칙만 보고 실행). 초안 전 검증을 거치지 않은 결과면 None."""
     artifact = getattr(message, 'artifact', None)
     return artifact.get('verify_gate') if isinstance(artifact, dict) else None
 
@@ -1315,10 +1380,13 @@ def _gate_state(message) -> str | None:
 class DraftGateMiddleware(AgentMiddleware):
     """②③⑤ 초안 도구를 실행하기 전 확인. 먼저 코드 규칙(DRAFT_RULES)을 보고, 어긴 것이 없으면 LLM 검증자가
     그때까지의 입력·도구 호출과 실행하려는 호출(pending_call)을 검증한다(verifier가 없으면 코드 규칙만).
-    - 지적이 있으면 도구를 실행하지 않고 지적을 도구 결과로 돌려준다. LLM이 고쳐서(또는 반박하고 같은 인자로) 다시 부른다.
-    - 확인은 한 실행에 MAX_VERIFY_ATTEMPTS번까지다. 마지막 확인에도 지적이 있으면 실행하고 남은 지적을 기록한다
-      (AgentRunner가 reason에 덧붙인다). 그 뒤의 초안 도구 호출은 확인 없이 실행한다.
-    - 검증자 호출이 실패하면 검증 없이 실행한다. 업무가 바뀌어 멈춘 실행이면 확인하지 않는다.
+    - 코드 규칙 위반은 몇 번째 호출이든 실행하지 않는다. 마지막 확인부터는 코드가 고칠 수 있는 위반(DRAFT_FIXES, ③)이면
+      고친 인자로 실행한다. 고칠 수 없으면 LLM이 고쳐 다시 부르거나 초안 없이 HOLD로 끝낸다.
+    - LLM 검증자 지적이 있으면 도구를 실행하지 않고 지적을 도구 결과로 돌려준다. LLM이 고쳐서(또는 반박하고 같은 인자로)
+      다시 부른다. 검증자 확인은 한 실행에 MAX_VERIFY_ATTEMPTS번까지다. 마지막 확인에도 지적이 있으면 실행하고 남은 지적을
+      기록한다(AgentRunner가 reason에 덧붙인다). 그 뒤의 초안 도구 호출은 코드 규칙만 보고 실행한다.
+    - 검증자 호출이 실패하면 로그를 남기고 검증 없이 실행한다(AgentRunner가 reason에 검증하지 못했다고 덧붙인다).
+      업무가 바뀌어 멈춘 실행이면 확인하지 않는다.
     이름표 대응(HandleMiddleware)보다 바깥에 두어 LLM이 본 값(이름표) 그대로 확인한다."""
 
     def __init__(self, role: AgentRole, verifier: BaseChatModel | None = None):
@@ -1332,24 +1400,41 @@ class DraftGateMiddleware(AgentMiddleware):
             return handler(request)
         messages = request.state['messages']
         attempt = 1 + sum(1 for m in messages if isinstance(m, ToolMessage) and _gate_state(m))
-        if attempt > MAX_VERIFY_ATTEMPTS or _case_changed(messages):
+        if _case_changed(messages):
             return self._mark(handler(request), 'OVER', [])
         rule = DRAFT_RULES.get(self.role)
-        issues = rule(_shown(request.runtime, call.get('args') or {}), messages, attempt) if rule else []
-        if not issues and self.verifier is not None:
+        shown = _shown(request.runtime, call.get('args') or {})
+        issues = rule(shown, messages, attempt) if rule else []
+        if issues and attempt >= MAX_VERIFY_ATTEMPTS and self.role in DRAFT_FIXES:
+            fixed = DRAFT_FIXES[self.role](shown, messages)
+            if fixed is not None and not rule(fixed, messages, attempt):
+                logger.info('draft args fixed by code rules role=%s codes=%s', self.role,
+                            sorted({issue['code'] for issue in issues}))
+                return self._mark(handler(request.override(tool_call={**call, 'args': fixed})), 'FIXED', [])
+        if issues:
+            return self._not_run(call, 'RULE', 'DRAFT_RULE', issues, _RULE_FEEDBACK)
+        if attempt > MAX_VERIFY_ATTEMPTS:
+            return self._mark(handler(request), 'OVER', [])
+        if self.verifier is not None:
             try:
                 issues = verify_output(self.verifier, self.role, attempt,
                                        verify_packet(self.role, messages, pending=call))['issues']
-            except Exception:
+            except Exception as error:
+                logger.warning('draft verifier failed role=%s attempt=%s error=%s', self.role, attempt,
+                               type(error).__name__)
                 return self._mark(handler(request), 'ERROR', [])
         if not issues:
             return self._mark(handler(request), 'PASS', [])
         if attempt == MAX_VERIFY_ATTEMPTS:
             return self._mark(handler(request), 'UNRESOLVED', issues)
-        content = json.dumps({'status': 'NOT_RUN', 'code': 'VERIFY_REVISE',
-                              'message': verify_feedback(issues, _GATE_FEEDBACK)}, ensure_ascii=False)
+        return self._not_run(call, 'REVISE', 'VERIFY_REVISE', issues, _GATE_FEEDBACK)
+
+    def _not_run(self, call: dict, state: str, code: str, issues: list[dict], lead: str) -> ToolMessage:
+        """초안 도구를 실행하지 않고 지적을 도구 결과로 돌려준다. state는 artifact에, code는 LLM이 보는 결과에 남는다."""
+        content = json.dumps({'status': 'NOT_RUN', 'code': code, 'message': verify_feedback(issues, lead, self.role)},
+                             ensure_ascii=False)
         return ToolMessage(content=content, name=call['name'], tool_call_id=call['id'],
-                           artifact={'verify_gate': 'REVISE', 'issues': issues})
+                           artifact={'verify_gate': state, 'issues': issues})
 
     @staticmethod
     def _mark(result, state: str, issues: list[dict]):
@@ -1455,6 +1540,33 @@ def _counter_offer_rules(args: dict, messages: list, attempt: int) -> list[dict]
 DRAFT_RULES = {AgentRole.INFO_PRIORITY: _clarification_rules, AgentRole.COUNTER_OFFER: _counter_offer_rules}
 
 
+def _clarification_fix(args: dict, messages: list) -> dict | None:
+    """③ 보완 요청 초안 인자를 코드 규칙에 맞게 고친다(마지막 확인에서만 쓴다). 필수 누락과 선택이 바뀔 수 있는
+    미확인 비용은 넣고, 선택이 바뀌지 않는 비용은 뺀다. 그 밖에 LLM이 넣은 항목은 둔다.
+    미확인 비용에 역전 계산(calculate_break_even)이 없으면 무엇을 물을지 정할 수 없어 None이다."""
+    compared, break_evens = _priority_open_items(messages)
+    asked = {}
+    for request in args.get('requests') or []:
+        asked.setdefault(request.get('supplier_id'), []).extend(request.get('fields') or [])
+    requests = []
+    for sid in dict.fromkeys([*asked, *compared]):
+        supplier = compared.get(sid, {})
+        costs = {c['field'] for c in supplier.get('unknown_costs', [])}
+        if costs and sid not in break_evens:
+            return None
+        changing = bool(break_evens.get(sid, {}).get('can_change_choice'))
+        fields = [f for f in asked.get(sid, []) if f not in costs or changing]
+        fields += [f for f in supplier.get('missing_required', []) + (sorted(costs) if changing else [])
+                   if f not in fields]
+        if fields:
+            requests.append({'supplier_id': sid, 'fields': list(dict.fromkeys(fields))})
+    return {**args, 'requests': requests} if requests else None
+
+
+# 마지막 확인에서 코드가 고칠 수 있는 초안 규칙 위반 (고칠 수 없으면 None)
+DRAFT_FIXES = {AgentRole.INFO_PRIORITY: _clarification_fix}
+
+
 def _candidate_final_rules(answer, messages: list) -> list[str]:
     """② 후보가 있는데 초안을 만들려 하지도 않고 HOLD하면 안 된다."""
     if answer.next_action != 'HOLD' or _tool_results(messages, 'create_rfq_draft'):
@@ -1517,10 +1629,11 @@ _COUNTER_ACTIONS = {'PROPOSABLE': {'COUNTER_OFFER_PROPOSED'}, 'NOT_NEEDED': {'CO
 
 def _counter_final_rules(answer, messages: list) -> list[str]:
     """⑤ next_action은 마지막 calculate_counter_offer의 counter_status에 맞아야 한다.
-    PROPOSABLE이어도 초안 도구가 거절했으면(연락처 없음 등) HOLD를 받는다."""
+    PROPOSABLE이어도 초안 도구가 거절했거나(연락처 없음 등) 코드 규칙 위반으로 실행되지 않았으면 HOLD를 받는다."""
     status = _last_ok(messages, 'calculate_counter_offer').get('counter_status')
     allowed = set(_COUNTER_ACTIONS.get(status, ()))
-    if status == 'PROPOSABLE' and any(r.get('status') == 'REJECTED' for r in _tool_results(messages, 'create_counter_offer_draft')):
+    if status == 'PROPOSABLE' and any(r.get('status') == 'REJECTED' or r.get('code') == 'DRAFT_RULE'
+                                      for r in _tool_results(messages, 'create_counter_offer_draft')):
         allowed.add('HOLD')
     if not allowed or answer.next_action in allowed:
         return []
@@ -1566,8 +1679,14 @@ class RuleCheckMiddleware(AgentMiddleware):
 def with_unresolved(output: AgentOutput, issues: list[dict]) -> AgentOutput:
     """검증 횟수를 다 썼는데 남은 지적을 reason 끝에 우리말 항목명으로 덧붙인다(LLM 설명은 넣지 않는다). 500자를 넘지 않게 앞을 줄인다."""
     labels = list(dict.fromkeys(FIELD_LABELS[i['target']] for i in issues if i['target'] in FIELD_LABELS))
-    note = _VERIFY_UNRESOLVED + (f"({', '.join(labels)})." if labels else '.')
+    return with_note(output, _VERIFY_UNRESOLVED + (f"({', '.join(labels)})." if labels else '.'))
+
+
+def with_note(output: AgentOutput, note: str) -> AgentOutput:
+    """reason 끝에 담당자에게 보일 문장을 덧붙인다. 같은 문장이 이미 있으면 그대로 둔다. 500자를 넘지 않게 앞을 줄인다."""
     reason = output.reason.rstrip()
+    if note in reason:
+        return output
     limit = 500 - len(note) - 1
     reason = (reason if len(reason) <= limit else reason[:limit - 1] + '…') + ' ' + note
     return type(output).model_validate(output.model_dump() | {'reason': reason})
@@ -1670,17 +1789,19 @@ class AgentRunner:
     def _verified(self, role: AgentRole, handles: IdHandles, output: AgentOutput, messages: list,
                   run: Callable[[list], tuple[AgentOutput, list]]) -> AgentOutput:
         """LLM 검증. PASS면 그대로, REVISE면 지적을 넣어 이어서 실행한 결과를 다시 검증한다(MAX_VERIFY_ATTEMPTS번까지).
-        업무가 바뀌어 멈춘 실행은 검증하지 않는다. 검증자 호출이 실패하면 검증 없이 그 결과로 진행한다.
-        다시 실행하다 실패하면 저장소·업무 오류(ServiceError)는 올리고, 그 밖에는 직전 결과로 진행한다.
+        업무가 바뀌어 멈춘 실행은 검증하지 않는다. 검증자 호출이 실패하면 로그를 남기고, 검증하지 못했다는 문장을
+        reason에 덧붙여 그 결과로 진행한다. 다시 실행하다 실패하면 저장소·업무 오류(ServiceError)는 올리고, 그 밖에는
+        로그를 남기고 직전 결과에 그 결과의 지적을 덧붙여 진행한다.
         초안 도구를 실행한 실행(②③⑤)은 초안 전 검증(DraftGateMiddleware)을 거쳤으므로 다시 검증하지 않고,
-        거기서 남은 지적만 reason에 덧붙인다(초안은 다시 실행해도 고쳐지지 않는다)."""
+        거기서 남은 지적과 검증하지 못한 사실만 reason에 덧붙인다(초안은 다시 실행해도 고쳐지지 않는다)."""
         model = self.verifiers.get(role)
         if model is None:
             return output
-        gated = [m for m in messages if isinstance(m, ToolMessage) and _gate_state(m) not in (None, 'REVISE')]
+        gated = [m for m in messages if isinstance(m, ToolMessage) and _gate_state(m) not in (None, *GATE_NOT_RUN)]
         if gated:
             issues = gated[-1].artifact['issues']
-            return with_unresolved(output, issues) if issues else output
+            output = with_unresolved(output, issues) if issues else output
+            return with_note(output, _VERIFY_SKIPPED) if any(_gate_state(m) == 'ERROR' for m in gated) else output
         issues = []
         for attempt in range(1, MAX_VERIFY_ATTEMPTS + 1):
             if _case_changed(messages):
@@ -1688,17 +1809,20 @@ class AgentRunner:
             try:
                 verdict = verify_output(model, role, attempt,
                                         verify_packet(role, messages, handles.hide(output.model_dump(mode='json'))))
-            except Exception:
-                return output
+            except Exception as error:
+                logger.warning('verifier failed role=%s attempt=%s error=%s', role, attempt, type(error).__name__)
+                return with_note(output, _VERIFY_SKIPPED)
             issues = verdict['issues']
             if not issues:
                 return output
             if attempt == MAX_VERIFY_ATTEMPTS:
                 break
             try:
-                output, messages = run([*messages, HumanMessage(verify_feedback(issues))])
+                output, messages = run([*messages, HumanMessage(verify_feedback(issues, role=role))])
             except ServiceError:
                 raise
-            except Exception:
-                return output
+            except Exception as error:
+                logger.warning('rerun after verifier issues failed role=%s attempt=%s error=%s', role, attempt,
+                               type(error).__name__)
+                return with_unresolved(output, issues)
         return with_unresolved(output, issues)

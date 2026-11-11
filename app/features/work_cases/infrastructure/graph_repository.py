@@ -153,7 +153,9 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
         for step in payload['steps']:
             if step['next_action'] == 'HOLD':
                 original = step['reason']
-                step['reason'] = '검토를 보류했어요.'
+                # 회신 한 통만 비교에서 빼고 업무는 이어 간 실행(①의 회신 범위 HOLD)은 보류 문구를 쓰지 않는다
+                skipped = step['role'] == 'INFO_EXTRACTOR' and payload['status'] != 'ON_HOLD'
+                step['reason'] = '견적을 읽을 수 없는 회신이라 비교에서 뺐어요.' if skipped else '검토를 보류했어요.'
                 payload['unresolved'] = [value for value in payload['unresolved']
                                          if original not in value]
         return self.call(name, p_job=job['job_id'], p_token=job['claim_token'],

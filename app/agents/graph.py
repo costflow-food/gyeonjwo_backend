@@ -10,6 +10,9 @@
     COUNTER_OFFER_SKIPPED: 역제안 없이 인상 수용 추천(요청 인상률이 허용 인상률 이하이거나 요청 단가로도 대안보다 쌈).
     가격 검증이 수용 추천 조건을 다시 확인하고, 카드에 사유를 남긴다.
     ③④⑤ RECHECK_SOURCE → ①(근거를 인용한 메일을 다시 읽는다) · ④⑤ NEEDS_EVIDENCE → ③ · ①~④ HOLD → hold (ON_HOLD)
+    회신(REPLY) ①의 회신 범위 HOLD(REPLY_SCOPED_HOLDS: 단가 없음·다른 품목뿐·첨부를 못 읽음)는 업무를 보류하지 않는다.
+    그 회신만 비교에서 빼고, 다른 대안 견적이 있으면 ③으로 간다. 대안 견적이 아직 없으면 초안 없이 WAITING_REPLY로
+    끝내 다음 회신을 기다린다(skip_wait. DB 완료 함수 complete_case_graph_review가 internal.review_reply_skipped로 다시 확인한다)
     ⑤ HOLD(정책 없음 등) → review_card: 구매안은 검증을 통과했으므로 카드에 구매안·역제안 보류 사유·참고 계산을 보인다
 
 회신·승인 대기에서는 그래프를 끝낸다(WAITING_REPLY). 백엔드가 발송하고, 회신이 오면 start_from=REPLY로 다시 실행한다.
@@ -54,6 +57,7 @@ class CaseState(TypedDict, total=False):
     pending_questions: list[str]                      # ④⑤가 ③에 넘긴 미확인
     recheck_fields: list[str]                         # ③④⑤가 ①에 넘긴 재확인 항목
     recheck_mail_ids: list[str]                       # 재확인 근거가 적힌 메일 (①이 이 메일을 다시 읽는다)
+    reply_skipped: bool                               # ①이 회신 한 통만의 문제로 HOLD해 그 회신을 비교에서 뺐다
     plans: list[Plan]                                 # ④
     counter_offer: CounterOfferTarget | None          # ⑤
     counter_offer_skip_reason: str | None             # ⑤ COUNTER_OFFER_SKIPPED 사유
@@ -114,6 +118,30 @@ OUTPUTS = {
 }
 
 
+# 회신 한 통의 문제라 업무 전체를 멈추지 않는 ①의 HOLD 코드. 업체 불일치(SUPPLIER_*)는 다른 업무의 메일이 섞인
+# 신호일 수 있어 넣지 않는다. MISSING_FIELD는 단가·단위·품목이 빠진 경우만 (quantity는 인상 통보에만 생긴다)
+REPLY_SCOPED_HOLDS = {'NO_QUOTE_DATA', 'SOURCE_READ_FAILED'}
+REPLY_SCOPED_FIELDS = {'unit_price', 'unit', 'item_name'}
+# 비교에서 뺀 회신을 담당자에게 알리는 문장 (LLM 사유는 넣지 않는다. 완료 기록에서 지워지는 원문이다)
+REPLY_SKIPPED_NOTE = '견적 단가를 읽을 수 없는 회신이 있어 그 회신은 비교에서 뺐습니다.'
+
+
+def reply_scoped_hold(state, output) -> bool:
+    """회신 처리에서 ①이 회신 한 통 때문에 HOLD했는지. 재추출(recheck)로 부른 ①은 업무의 기존 메일을 읽은 것이라 제외한다."""
+    hold = getattr(output, 'hold', None)
+    if (state.get('start_from') != StartFrom.REPLY or state.get('recheck_fields') or hold is None
+            or output.next_action != N.HOLD):
+        return False
+    return hold.code in REPLY_SCOPED_HOLDS or (hold.code == 'MISSING_FIELD' and hold.field in REPLY_SCOPED_FIELDS)
+
+
+def waits_after_skipped_reply(output: RunCaseOutput) -> bool:
+    """회신 한 통을 비교에서 빼고 초안 없이 회신을 계속 기다리는 결과인지 (skip_wait로 끝난 실행)."""
+    return (output.status == RunStatus.WAITING_REPLY and not output.draft_ids and bool(output.steps)
+            and output.steps[-1].role == AgentRole.INFO_EXTRACTOR and output.steps[-1].next_action == N.HOLD
+            and REPLY_SKIPPED_NOTE in output.unresolved)
+
+
 def _failed(reason, step=ProcessingStep.FAILED):
     return {'status': RunStatus.FAILED, 'processing_step': step, 'unresolved': [reason]}
 
@@ -163,7 +191,9 @@ def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: N
                              unknown_fields=output.unknown_fields)
             update |= OUTPUTS[role](output) | {'last_action': output.next_action, 'steps': [step],
                                                'unresolved': output.unknown_fields}
-            if output.next_action == N.HOLD:
+            if role == AgentRole.INFO_EXTRACTOR and reply_scoped_hold(state, output):
+                update |= {'reply_skipped': True, 'unresolved': output.unknown_fields + [REPLY_SKIPPED_NOTE]}
+            elif output.next_action == N.HOLD:
                 update['unresolved'] = output.unknown_fields + [f'{role} HOLD: {output.reason}']
             elif output.next_action == N.NEEDS_EVIDENCE:
                 update['pending_questions'] = output.unknown_fields
@@ -201,6 +231,8 @@ def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: N
 
     graph.add_node('review_card', code_node('review_card', review_card))
     graph.add_node('wait_reply', lambda s: {'status': RunStatus.WAITING_REPLY})
+    graph.add_node('skip_wait', lambda s: {'status': RunStatus.WAITING_REPLY,
+                                           'processing_step': ProcessingStep.WAITING_REPLY})
     graph.add_node('hold', lambda s: {'status': RunStatus.ON_HOLD, 'processing_step': ProcessingStep.ON_HOLD})
 
     def stopped(route):
@@ -210,8 +242,18 @@ def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: N
 
     graph.add_conditional_edges(START, lambda s: 'plan' if s['start_from'] == StartFrom.PLAN else 'preprocess')
     graph.add_conditional_edges('preprocess', stopped(lambda s: 'extraction'))
+    def skipped_reply(state):
+        """회신 범위 HOLD 뒤의 다음 노드. 기존 업체 견적 말고 대안 견적이 하나라도 있으면 ③, 없으면 skip_wait."""
+        try:
+            ids = latest_quotes(state['case_id']) if latest_quotes is not None else state.get('quote_version_ids', [])
+        except Exception:
+            logger.warning('latest quote lookup failed after skipped reply')
+            return 'hold'
+        return 'priority' if len(list(ids)) > 1 else 'skip_wait'
+
     routes = {
-        'extraction': {N.STORED: lambda s: 'candidate' if s['start_from'] == StartFrom.START else 'priority'},
+        'extraction': {N.STORED: lambda s: 'candidate' if s['start_from'] == StartFrom.START else 'priority',
+                       N.HOLD: lambda s: skipped_reply(s) if s.get('reply_skipped') else 'hold'},
         'candidate': {N.SEND_RFQ: 'wait_reply'},
         'priority': {N.REQUEST_CLARIFICATION: 'wait_reply', N.BUILD_PLANS: 'plan', N.RECHECK_SOURCE: 'extraction'},
         'plan': {N.PLANS_PROPOSED: 'plan_validation', N.NEEDS_EVIDENCE: 'priority', N.RECHECK_SOURCE: 'extraction'},
@@ -229,7 +271,7 @@ def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: N
     graph.add_conditional_edges('price_validation', stopped(lambda s: {
         PriceCheck.PASS: 'review_card', PriceCheck.FIX: 'counter_offer',
         PriceCheck.NEED_INFO: 'priority'}[s['price_check']]))
-    for name in ('review_card', 'wait_reply', 'hold'):
+    for name in ('review_card', 'wait_reply', 'skip_wait', 'hold'):
         graph.add_edge(name, END)
     return graph.compile()
 
