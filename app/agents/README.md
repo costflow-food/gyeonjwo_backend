@@ -111,6 +111,7 @@ PLAN ─────────────────────────
 | `save_agent_result` | 중간 결과를 `output_jsonb.interim`(`next_action`·`reason`·`unknown_fields`)에, 참조 ID를 `source_quote_ids`·`source_run_ids`에 쓴다. 최종 결과를 대신하지 않는다. |
 | `CaseStore.save_agent_output` 반환 | `SAVED` / `REVISION_CHANGED` / `RUN_MISMATCH`(실행 기록이 없거나 업무·역할이 다름). 도구는 각각 `SAVED` / `REVISION_CHANGED` / `REJECTED(RUN_MISMATCH)`로 돌려준다. |
 | ①의 `unknown_fields` | `tools.EXTRACTION_FIELD_NAMES`의 필드 이름만 남는다(Runner가 걸러 냄). ③④⑤가 `RECHECK_SOURCE`로 넘기는 `unknown_fields`도 이 이름을 쓴다. |
+| `read_mail_evidence` 이어 읽기 | 한 번에 12,000자(`tools.MAX_EVIDENCE_CHARS`)를 준다. 뒤에 더 있으면 `truncated`·`next_offset`을 주고, 같은 part·page를 `offset=next_offset`으로 다시 읽는다. 한 실행에서 읽을 수 있는 총량은 12만 자이며, 실제로 읽은 본문·쪽만 센다(KAN-212). |
 | ①의 최종 응답 검증 | `STORED`의 `quote_version_ids`는 이번 실행에서 실제 저장된 ID여야 하고 `HOLD`는 ID가 없어야 한다. 아니면 `FAILED`. |
 
 ### 4. 테스트
@@ -133,6 +134,7 @@ PLAN ─────────────────────────
 | 모델·도구 예외 | FAILED `{역할}: AGENT_FAILED` |
 | 최종 응답이 `…Out` 형식이 아님 | FAILED `{역할}: INVALID_OUTPUT` |
 | 코드 노드 예외 | FAILED `{노드}: NODE_FAILED` |
+| 한 실행에서 읽은 원문이 12만 자를 넘음 | 그 읽기만 거절하고 `LIMIT_EXCEEDED`를 돌려줌. 에이전트가 `SOURCE_READ_FAILED`로 HOLD |
 | 실행 중 `input_revision`이 바뀜 (에이전트 호출 뒤, 검토 카드 저장 직전에 확인) | STALE: 결과와 초안을 쓰지 않고, 백엔드가 최신 revision으로 다시 실행 |
 
 ## 계약 변경

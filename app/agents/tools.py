@@ -99,7 +99,8 @@ def tools_for(role: AgentRole) -> list[BaseTool]:
 #   06 work_cases·mail_messages·agent_runs 기준. 업무·revision·실행 ID는 runtime.context(RunContext),
 #   역할은 build_agent가 정한 에이전트 이름에서 읽는다 (LLM 인자 아님).
 
-MAX_EVIDENCE_CHARS = 4000            # read_mail_evidence가 한 번에 돌려주는 원문 길이 (제안값)
+# read_mail_evidence가 한 번에 돌려주는 원문 길이 (제안값). 단가표 한 쪽을 대개 한 번에 읽어 도구 호출 한도를 아낀다 (KAN-212)
+MAX_EVIDENCE_CHARS = 12000
 _CASE_KEYS = ('input_revision', 'item_name', 'specification', 'mandatory_conditions', 'quantity', 'unit', 'due_date',
               'policy', 'latest_quote_version_ids')
 _MAIL_KEYS = ('mail_id', 'message_role', 'direction', 'supplier_id', 'received_at', 'subject', 'attachments')
@@ -252,7 +253,7 @@ def crawl_supplier_candidates(query: str, runtime: ToolRuntime[RunContext], limi
 @tool
 def read_mail_evidence(mail_id: str, runtime: ToolRuntime[RunContext], part: str = 'body',
                        page: int | None = None, offset: int = 0) -> dict:
-    '''이 업무에 속한 메일의 본문 또는 첨부 한 쪽(page)의 원문과 위치를 읽는다. 한 번에 4,000자까지 준다.
+    '''이 업무에 속한 메일의 본문 또는 첨부 한 쪽(page)의 원문과 위치를 읽는다. 한 번에 12,000자까지 준다.
     part: 본문은 'body', 첨부는 get_case_context 메일 목록의 attachment_ref 값(예: 'att-1'). 'attachment_ref'라는 글자가 아니다.
     page: 첨부의 쪽 번호(1부터). 본문은 비운다.
     offset: 그 본문·쪽에서 읽기 시작할 글자 위치(0부터). 처음에는 비운다. truncated면 next_offset을 넣어 이어 읽는다.
