@@ -40,7 +40,7 @@ from app.features.call_recordings.router import router as call_recordings_router
 
 logger = logging.getLogger('gyeonjwo')
 RATE_WINDOW_SECONDS = 60
-# 로그인한 요청은 토큰(사용자)e마다, 토큰 없는 요청은 IP마다 이만큼. 같은 사무실(같은 IP)의 여러 사용자가 화면 포링
+# 로그인한 요청은 토큰(사용자)마다, 토큰 없는 요청은 IP마다 이만큼. 같은 사무실(같은 IP)의 여러 사용자가 화면 폴링
 # (목록 15초, 진행 상황·초안 3초)을 합산당해 429가 나지 않게 사용자 단위로 센다
 RATE_LIMIT_PER_WINDOW = 120
 # 토큰을 바꿔 가며 사용자 단위 제한을 피하지 못하게 IP 전체에도 넉넉한 상한을 둔다
@@ -184,7 +184,7 @@ def create_app(settings=None, push_verifier=verify_push, mailbox_service=None):
                         blocked = started
             if blocked is not None:
                 retry_after = max(1, math.ceil(RATE_WINDOW_SECONDS - (now - blocked)))
-                response = api_error('RATE_LIMITED', '요청이 너무 많슥니다.', 429, headers={'Retry-After': str(retry_after)})
+                response = api_error('RATE_LIMITED', '요청이 너무 많습니다.', 429, headers={'Retry-After': str(retry_after)})
         if response is None:
             try:
                 response = await call_next(request)
