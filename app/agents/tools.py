@@ -307,7 +307,8 @@ _QUANTITY_WORDS = re.compile(r'^\s*(?:(?:최소\s*주문\s*량|최소\s*발주\s
 # 단가 구간 경계의 뜻. 최솟값에는 아래 경계 표현만, 최댓값에는 위 경계 표현만 올 수 있다
 _LOWER_BOUND_WORDS = ('이상', '초과', '부터')
 _UPPER_BOUND_WORDS = ('미만', '이하', '까지')
-_DATE_SUFFIX = re.compile(r'\s*(?:까지|부터|자)\s*$')
+# 날짜 뒤의 시각·'출고분·주문 확정분' 같은 대상 표기와 '까지·부터·자' (예: '2026-12-01 출고분부터', '2026-11-30 18:00까지')
+_DATE_SUFFIX = re.compile(r'(?:\s*\d{1,2}:\d{2})?\s*(?:(?:출고|입고|납품|주문|발주)\s*(?:확정\s*)?분\s*)?(?:까지|부터|자)?\s*$')
 _DOTTED_DATE = re.compile(r'(\d{4})\s*[./]\s*(\d{1,2})\s*[./]\s*(\d{1,2})\s*\.?')   # 2026. 12. 1. / 2026/12/01
 # AI·시스템에게 하는 문장으로 보이는 줄. 값을 거절하지 않고, 이런 줄이 있는 메일의 견적만 NEEDS_REVIEW로 둔다
 _INSTRUCTION = re.compile(r'(?i)(?<![a-z])(?:AI|LLM|GPT|assistant|chatbot)(?![a-z])|인공지능|챗봇|어시스턴트'
@@ -333,6 +334,8 @@ _HINTS = {
     'INVALID_NUMBER': '숫자와 단위·통화만 옮긴다 (예: "54,500원", "300kg", "3.20 USD"). 앞뒤의 설명 낱말은 빼고 '
                       '다시 보낸다 (예: "박스당 중량은 10kg" → "10kg"). 그래도 안 되면 그 항목만 null로 보낸다.',
     'INVALID_DATE': '연도가 있는 날짜만 옮긴다. 연도가 없으면 그 항목만 null로 보낸다.',
+    'VALID_UNTIL_BEFORE_EFFECTIVE': '유효기간이 적용일보다 이르면 단가 종료일이 아니라 회신 기한이다. valid_until은 빼고 '
+                                    '그 문장을 item_notes(PRICE_NOTICE)로 다시 보낸다.',
     'INVALID_UNIT': 'kg·g·톤·박스·개·팩·봉·포대 중 원문 단위를 옮긴다. 원문 표기가 이 이름과 다르면(예: "킬로", "봉지") '
                     'raw_value는 원문 그대로 두고 unit_code에 정해진 단위를 적는다. 원문에 단위가 없으면 null로 보낸다.',
     'UNIT_CODE_MISMATCH': 'unit_code가 원문 단위와 다르다. 원문 단위를 다시 확인한다.',
@@ -972,6 +975,10 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         rejected.append({'field': 'currency', 'code': 'CURRENCY_MISMATCH'})
     elif price_currency and 'currency' not in values:
         values['currency'] = {**values['unit_price'], 'value': price_currency}
+    # 적용일보다 이른 유효기간은 회신 기한이다. DB 제약(valid_until >= effective_from)에 닿기 전에 거절한다 (KAN-207)
+    if 'valid_until' in values and 'effective_from' in values and \
+            values['valid_until']['value'] < values['effective_from']['value']:     # ISO 날짜 문자열
+        rejected.append({'field': 'valid_until', 'code': 'VALID_UNTIL_BEFORE_EFFECTIVE'})
     # 이번 호출의 모든 근거는 한 업체의 메일이어야 한다
     case_mails = {mail['mail_id']: mail for mail in _read(lambda: store.list_case_mails(case_id))}
     evidence_mails = {entry['mail_id'] for entry in [*values.values(), *tiers, *costs, *notes]}

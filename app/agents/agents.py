@@ -108,6 +108,10 @@ PROMPTS = {
    - SUPPLY_QUANTITY_MISSING: 기존 업체의 인상 통보인데 공급 물량이 없다. 원문에 공급 계획·공급 물량·공급 가능량이라고
      적힌 수량만 단위와 함께 available_quantity로 한 번 다시 보낸다. 규격·포장·주문 단위의 수량(예: 10kg/박스,
      박스당 10kg, 주문 단위 10kg 박스)은 공급 물량이 아니다. 그런 수량만 있으면 다시 보내지 말고 바로 HOLD한다.
+   - VALID_UNTIL_BEFORE_EFFECTIVE: 유효기간이 적용일보다 이르다. 그 날짜는 회신 기한이다. valid_until을 빼고
+     "견적 유효기간 …까지" 문장을 원문 그대로 item_notes에 비고(PRICE_NOTICE)로 넣어 한 번 다시 보낸다.
+   - item_notes[n]이 거절됨: 비고는 원문 문장을 한 글자도 바꾸지 않고 복사한다. 앞 줄의 제목(예: "배송비")을 붙이거나
+     낱말을 더하지 않는다. 고쳐서 한 번 다시 보내고, 또 거절되면 그 비고만 빼고 보낸다. 비고 때문에 HOLD하지 않는다.
    - REVISION_CHANGED·CASE_NOT_FOUND: 멈추고 HOLD를 반환한다.
    HOLD는 위에서 HOLD로 정한 코드이거나, 두 번 다시 보내도 저장되지 않았을 때만 고른다.
 6. 바로 최종 응답을 낸다(최종 응답이 실행 기록으로 저장된다).
@@ -128,6 +132,14 @@ PROMPTS = {
   붙은 "…까지"는 valid_until이 아니다. 그런 날짜는 어느 필드에도 넣지 않고 그 조건 문장을 품목 비고로 남긴다.
   예) "2027년 2월 28일까지 월 60박스 이상 발주 시 100,000원/박스" → valid_until 보내지 않음,
       price_tiers {min_quantity "월 60박스 이상", unit_price "100,000원"} + 그 문장 전체를 비고(PRICE_NOTICE)로
+  견적 전체에 붙은 "유효기간·견적 유효기간 …까지"는 적용일이 있든 없든 항상 valid_until로 보낸다.
+  적용일과 비교하는 것은 도구가 한다. 유효기간이 적용일보다 이르면 도구가 VALID_UNTIL_BEFORE_EFFECTIVE로 알려준다.
+  적용일은 원문에 적용일·"…부터"로 적힌 날짜만 쓴다(작성일·발행일·견적일은 적용일이 아니다).
+  "…까지 회신 부탁드립니다"처럼 날짜가 붙은 회신 요청은 valid_until이 아니다. 그 문장을 비고(PRICE_NOTICE)로 넣는다
+  (날짜 없는 회신 요청은 비고가 아니다).
+  예) "견적 유효기간 2026-11-30까지"만 있고 적용일 없음 → valid_until "2026-11-30"
+      "적용일 2026-12-01 출고분부터 / 견적 유효기간 2026-11-30 18:00까지" → effective_from "2026-12-01 출고분부터",
+      valid_until "2026-11-30 18:00까지" (도구가 회신 기한으로 알려주면 그대로 고쳐 보낸다)
 - raw_value는 원문에서 그 값 부분만 그대로 옮긴다. 앞뒤 문장·조사는 넣지 않는다.
   예) "변경 단가: 54,500원/박스" → unit_price "54,500원", unit "박스"
       "유효기간 2026년 12월 31일까지입니다" → valid_until "2026년 12월 31일"
@@ -228,7 +240,8 @@ hold (보류 코드. 서버가 이 코드로 담당자에게 보일 문구를 �
     (○○는 단가·단위·품목명 중 거절된 항목 하나, 조사는 그 낱말에 맞춘다. field는 그 항목의 이름)
   - MISSING_FIELD, field quantity — store_structured_mail이 SUPPLY_QUANTITY_MISSING을 돌려줬고 원문에 공급 물량이 없음:
     "인상 통보에서 공급 물량을 확인할 수 없어 견적을 저장하지 않았습니다."
-  - MISSING_EVIDENCE — 두 번 다시 보내도 근거(MISSING_EVIDENCE·SOURCE_MISMATCH·EVIDENCE_NOT_IN_CASE)로 거절됨:
+  - MISSING_EVIDENCE — 두 번 다시 보내도 fields 값이 근거(MISSING_EVIDENCE·SOURCE_MISMATCH·EVIDENCE_NOT_IN_CASE)로
+    거절됨(item_notes 거절은 그 비고만 빼고 저장하므로 해당하지 않는다):
     "견적 값의 원문 근거를 확인할 수 없어 저장하지 못했습니다."
   - REVISION_CHANGED·CASE_NOT_FOUND로 멈춤: hold는 비우고(null) "업무 정보가 바뀌어 이번 추출을 멈췄습니다."라고 쓴다.
   예) {"next_action": "HOLD", "quote_version_ids": [], "hold": {"code": "SUPPLIER_NOT_MATCHED", "field": null},
