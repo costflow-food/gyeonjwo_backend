@@ -68,6 +68,15 @@ PROMPTS = {
 4. REJECTED는 전체 실패가 아니다. rejected에 나온 항목만 고치거나 빼고, 나머지 fields·cost_terms·price_tiers·item_notes는
    처음 보낸 그대로 함께 다시 보낸다(거절되지 않은 값을 빠뜨리지 않는다). 그래도 안 되면 그 항목을 빼고 한 번 더 보낸다.
 5. 형식: unit_price에는 금액만 넣고 단위는 unit에 따로 넣는다("9,700원/kg" → unit_price "9,700원", unit "kg").
+   단가의 배수·통화·단위는 원문의 그 단가 줄 기준이다. 숫자만 옮기면 뜻이 바뀐다.
+   - 배수: 숫자 뒤의 천원·만원은 그대로 옮긴다("9,700천원" → unit_price "9,700천원"). 표 머리글에만 있으면
+     ("(단위: 천원)") 단가는 숫자 그대로 두고 price_scale_text에 그 구절을 넣는다(price_tiers 구간도 같다).
+   - 통화: 외화는 통화까지 옮긴다("USD 3.10" → unit_price "USD 3.10"). 표 머리글에만 있으면 currency로 보낸다.
+   - 단위: 단가 바로 뒤나 같은 줄의 단위다. "54,500원/박스 (박스당 10kg)" → unit "박스",
+     quantity_per_order_unit "박스당 10kg" (kg이 아니다).
+   거절 결과의 found는 문제를 찾은 원문 줄이다. 그 줄을 보고 hints대로 고친다.
+   PRICE_NOTATION_UNKNOWN(도구가 못 읽는 단가 표기)·PRICE_IMPLAUSIBLE(배수를 적용한 단가가 기준 단가와 5배 넘게
+   차이)은 found 줄을 다시 보고 배수·통화·단위를 고친다. 고칠 표기가 없으면 그 단가만 null로 보낸다. 값을 짐작해 바꾸지 않는다.
    운송비·하차비 같은 비용은 fields가 아니라 cost_terms 인자로 보낸다. fields에 cost_terms라는 항목을 만들지 않는다.
 
 순서:
@@ -150,8 +159,8 @@ PROMPTS = {
       "1kg 당 단가 : 9,850 원" → unit_price "9,850 원", unit "kg"
       "단가 54,500원/박스로 조정됩니다" → unit_price "54,500원", unit "박스" (unit에는 단위 낱말 하나만 넣는다)
       "kg당 3.20 USD" → unit_price "3.20 USD", unit "kg", currency "USD"
-      "Unit price: USD 3.10 per kg" → unit_price "3.10", unit "kg", currency "USD"
-        (통화 기호가 숫자 앞에 있으면 숫자와 통화를 나눠 보낸다. "per kg"·"Unit price"는 raw_value에 넣지 않는다)
+      "Unit price: USD 3.10 per kg" → unit_price "USD 3.10", unit "kg"
+        ("per kg"·"Unit price"는 raw_value에 넣지 않는다)
       "Valid until: December 31, 2026"처럼 영어로 쓴 날짜는 도구가 읽지 못한다. 그 항목만 null로 보내고 reason에 적는다
       "단가는 kg당 9,500원입니다" → unit_price "9,500원", unit "kg"
       "하차비는 박스당 500원" → cost_terms {amount "500원", basis "박스당", basis_type PER_UNIT, basis_unit box}
