@@ -1023,6 +1023,9 @@ ID_KEYS = {
     'basis_quote_version_ids': 'Q', 'source_quote_ids': 'Q',
     'draft_id': 'D', 'draft_ids': 'D',
 }
+# "<업체 ID>.<항목>" 문자열 목록(예: "sup-a.cost:SHIPPING"). 앞부분만 업체 이름표로 바꾼다. 항목 이름·문장은 그대로 둔다
+FIELD_REF_KEYS = {'unknown_fields', 'pending_questions', 'recheck_fields'}
+_FIELD_REF = re.compile(r'^([^\s.]+)\.([a-z_]+(?::[A-Z_]+)?)$')
 
 
 class IdHandles:
@@ -1048,7 +1051,8 @@ class IdHandles:
     def hide(self, data: Any, prefix: str | None = None) -> Any:
         """dict·list 안의 ID 키 값을 이름표로 바꾼 사본. 이미 이름표인 값은 그대로 둔다."""
         if isinstance(data, dict):
-            return {key: self.hide(value, ID_KEYS.get(key)) for key, value in data.items()}
+            return {key: self._field_refs(value, self._hide_ref) if key in FIELD_REF_KEYS
+                    else self.hide(value, ID_KEYS.get(key)) for key, value in data.items()}
         if isinstance(data, list):
             return [self.hide(value, prefix) for value in data]
         if prefix and isinstance(data, str) and data and data not in self.by_handle:
@@ -1058,12 +1062,32 @@ class IdHandles:
     def reveal(self, data: Any, inside_id: bool = False) -> Any:
         """dict·list 안의 ID 키 값이 이름표면 원래 ID로 바꾼 사본."""
         if isinstance(data, dict):
-            return {key: self.reveal(value, key in ID_KEYS) for key, value in data.items()}
+            return {key: self._field_refs(value, self._reveal_ref) if key in FIELD_REF_KEYS
+                    else self.reveal(value, key in ID_KEYS) for key, value in data.items()}
         if isinstance(data, list):
             return [self.reveal(value, inside_id) for value in data]
         if inside_id and isinstance(data, str):
             return self.resolve(data)
         return data
+
+    @staticmethod
+    def _field_refs(value: Any, convert: Callable[[str], str]) -> Any:
+        """"<업체>.<항목>" 목록의 문자열마다 convert를 적용한 사본. 목록이 아니면 그대로."""
+        return [convert(item) if isinstance(item, str) else item for item in value] if isinstance(value, list) else value
+
+    def _hide_ref(self, text: str) -> str:
+        """"<업체 ID>.<항목>"의 업체 ID를 이름표로. 그 꼴이 아니면(항목 이름만·문장) 그대로."""
+        match = _FIELD_REF.match(text)
+        if not match or match.group(1) in self.by_handle:
+            return text
+        return f"{self.handle('S', match.group(1))}.{match.group(2)}"
+
+    def _reveal_ref(self, text: str) -> str:
+        """"<업체 이름표>.<항목>"의 이름표를 업체 ID로. 모르는 이름표·다른 꼴이면 그대로."""
+        match = _FIELD_REF.match(text.strip())
+        if not match or match.group(1) not in self.by_handle:
+            return text
+        return f'{self.by_handle[match.group(1)]}.{match.group(2)}'
 
     def hide_json(self, text: str) -> str:
         """JSON 문자열(도구 결과·에이전트 입력)의 ID를 이름표로. JSON이 아니면 그대로."""
