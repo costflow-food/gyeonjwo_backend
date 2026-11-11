@@ -1535,14 +1535,24 @@ def _cert_key(name) -> str:
     return _cert_alias(_key(name))
 
 
+# 인증이 없거나 아직 아니라는 표현. 이 말이 든 항목('HACCP 미보유', 'HACCP 인증 심사 중')은 보유 인증으로 세지 않는다
+_CERT_NEGATION = re.compile(r'미\s*보유|미\s*취득|미\s*인증|미\s*해당|없음|없습니다|없다|불가|만료|취소|정지|예정|'
+                            r'(?:진행|심사|신청|준비)\s*중|\b(?:no|not|none|pending|expired|applying)\b', re.IGNORECASE)
+
+
 def _cert_keys(names) -> set[str]:
     """보유 인증 표기들의 대조 키. 쉼표·괄호 등으로 나눈 덩어리 전체와 그 안의 띄어 쓴 낱말을 모두 키로 둔다
-    ('식품안전관리인증(HACCP), ISO 22000' → {'haccp', 'iso22000', 'iso', '22000'})."""
+    ('식품안전관리인증(HACCP), ISO 22000' → {'haccp', 'iso22000', 'iso', '22000'}).
+    쉼표·빗금으로 나눈 항목에 부정·미완료 표현이 있으면 그 항목은 통째로 세지 않는다
+    ('ISO 22000, HACCP 미보유' → {'iso22000', 'iso', '22000'}, 'HACCP(인증 심사 중)' → 없음)."""
     keys = set()
     for name in names:
-        for chunk in re.split(r'[,/·()（）\[\]]+', str(name)):
-            if chunk.strip():
-                keys |= {_key(chunk), *(_key(word) for word in chunk.split())}
+        for item in re.split(r'[,/·]+', str(name)):
+            if _CERT_NEGATION.search(item):
+                continue
+            for chunk in re.split(r'[()（）\[\]]+', item):
+                if chunk.strip():
+                    keys |= {_key(chunk), *(_key(word) for word in chunk.split())}
     return {_cert_alias(key) for key in keys}
 
 
