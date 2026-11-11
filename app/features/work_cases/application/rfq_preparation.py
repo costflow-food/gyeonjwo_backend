@@ -146,6 +146,5 @@ class RfqPreparation:
             return {'status': 'DRAFTS_READY', 'draft_ids': drafts}
         except Exception:
             self.repo.end_candidates(owner, run_id, 'FAILED', {'error_code': 'RFQ_PREPARATION_FAILED'})
-            # Revision guards prevent a failure from overwriting newer input.
             self.repo.step(owner, case, 'FAILED', {'code': 'RFQ_PREPARATION_FAILED'})
             raise ServiceError('PROCESSING_UNAVAILABLE', '견적 요청 준비에 실패했습니다.', 503) from None

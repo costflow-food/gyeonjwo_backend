@@ -120,7 +120,7 @@ class MailDraftService:
                 'source_version': policy.get('source_version')},
             'provider_message_id': draft.get('sent_provider_message_id') if draft['status'] == 'SENT' else None,
             'sent_at': iso_z(utc_time(draft['sent_at'])) if draft.get('sent_at') else None,
-            # with approval OFF, drafts the worker will not auto-send
+            # With approval OFF, drafts the worker will not auto-send
             # (selected before settings were saved, caution suppliers) still need a
             # manual approval path instead of a dead end.
             'auto_policy_eligible': auto_eligible,

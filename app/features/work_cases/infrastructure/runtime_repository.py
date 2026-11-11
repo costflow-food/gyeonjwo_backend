@@ -1,8 +1,4 @@
-"""One mutation RPC per transaction. No multi-request REST pseudo-transactions.
-
-RPCs in integration_contracts/extraction_runtime.json must be implemented by the
-DB owner before enabling this feature. This adapter never installs SQL.
-"""
+"""One mutation RPC per transaction. No multi-request REST pseudo-transactions."""
 from threading import Lock
 from time import monotonic
 

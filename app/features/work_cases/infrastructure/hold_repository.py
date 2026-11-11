@@ -1,4 +1,4 @@
-"""Page-batched, owner/revision/batch-scoped hold reads; no writes or new RPCs."""
+"""Page-batched, owner/revision/batch-scoped hold reads."""
 from uuid import UUID
 from app.core.errors import ServiceError
 from app.features.work_cases.domain.hold import from_agent_output, hold_info, is_hold_output

@@ -1,4 +1,4 @@
-"""Owner-scoped reads and single-transaction mutation adapters. No SQL install."""
+"""Owner-scoped reads and single-transaction mutation adapters."""
 import re
 from datetime import datetime, timezone
 from app.core.errors import ServiceError

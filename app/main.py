@@ -112,7 +112,6 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
             rfq_workers = create_missing_rfq_workers(app.state, settings)
             start_graph_worker(app.state, settings)
             await prime_work_case_reads(app.state)
-            # Independent mail/metadata lifecycles; sender remains separately gated.
             for prepared_worker in (connected_worker, *rfq_workers):
                 if prepared_worker is not None:
                     prepared_worker.start()

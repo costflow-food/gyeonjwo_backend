@@ -1,4 +1,4 @@
-"""Collect only sent-mail headers, under DB leases; never send or read bodies."""
+"""Collect only sent-mail headers; never send or read bodies."""
 import logging
 import threading
 import time

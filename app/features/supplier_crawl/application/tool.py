@@ -1,4 +1,4 @@
-"""Keyword-in, homepage contacts-out. Not registered with any agent."""
+"""Keyword-in, homepage contacts-out."""
 from langchain_core.tools import tool
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 

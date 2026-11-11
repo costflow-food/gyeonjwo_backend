@@ -55,7 +55,7 @@ class ResumeEligibilityRepository:
                 if run.get('agent_role') == 'INFO_EXTRACTOR' and is_hold_output(run.get('output_jsonb')):
                     blocked.pop(key, None)
             # Any unresolved send blocks extraction restart, including a draft
-            # created before the user held the case. Do not work around MW01.
+            # created before the user held the case.
             drafts = (self.client.table('mail_drafts').select('id,replaces_id,work_case_id,owner_user_id,status')
                       .eq('owner_user_id', str(owner)).in_('work_case_id', list(held))
                       .limit(1000).execute().data)

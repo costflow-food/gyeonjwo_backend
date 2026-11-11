@@ -1,4 +1,4 @@
-"""에이전트 도구 (07 4절). 도구 구현은 담당 팀원이 @register로 등록하고, 역할별 허용 목록은 ROLE_TOOLS가 정한다.
+"""에이전트 도구 (07 4절). 도구는 @register로 등록하고, 역할별 허용 목록은 ROLE_TOOLS가 정한다.
 
 에이전트는 허용 목록에 있는 등록된 도구만 받는다. Gmail 자격증명·임의 SQL·무제한 웹 탐색은 도구로 주지 않는다.
 분류(classify_mail_input)·전처리(preprocess_mail_documents)·발송(dispatch_mail)은 노드·백엔드 몫이라 여기 없다.
@@ -11,7 +11,7 @@
 - DB는 직접 호출하지 않고 06 데이터 스키마 기준의 저장소 인터페이스(Protocol)를 거친다.
 - 결과는 근거 ID·값·미확인 목록처럼 작게 돌려준다. 원문 전체를 돌려주지 않는다.
 - 금액·수량 계산은 LLM에게 맡기지 않고 도구가 Decimal로 계산한다.
-  계산은 app.features.review.domain.calculations, 숫자·단위 검증은 app.features.review.domain.validation을 재사용한다.
+  숫자·단위 검증은 app.features.review.domain.validation을 재사용한다.
 - 예외를 올리면 그 에이전트 호출이 실패하고 그래프가 FAILED로 끝난다. 예상 가능한 결과(없음·미확인)는 값으로 돌려준다.
 
 예시 — 이 파일 맨 아래 역할별 구역에 추가한다.
@@ -60,7 +60,7 @@ from app.core.errors import ReviewRequired, ServiceError
 from app.features.review.domain.validation import decimal_value, explicit_date, unit_name
 from app.shared.domain.schemas import StrictModel
 
-# 역할 결과는 AgentRunner가 최종 응답으로 agent_runs에 저장한다(실패하면 그때까지의 도구 호출도). 저장 도구는 없다
+# 역할 결과는 AgentRunner가 최종 응답으로 agent_runs에 저장한다. 저장 도구는 없다
 _READ = ('get_case_context', 'read_mail_evidence')
 
 ROLE_TOOLS = {
@@ -92,14 +92,14 @@ def tools_for(role: AgentRole) -> list[BaseTool]:
 
 
 # ─────────────────────────────────────────────
-# 도구 구현 — 역할별 구역에만 추가한다 (구역을 나눠 병합 충돌을 줄인다)
+# 도구 구현
 # ─────────────────────────────────────────────
 
 # 공통: get_case_context, read_mail_evidence
 #   06 work_cases·mail_messages·agent_runs 기준. 업무·revision·실행 ID는 runtime.context(RunContext),
 #   역할은 build_agent가 정한 에이전트 이름에서 읽는다 (LLM 인자 아님).
 
-# read_mail_evidence가 한 번에 돌려주는 원문 길이 (제안값). 단가표 한 쪽을 대개 한 번에 읽어 도구 호출 한도를 아낀다
+# read_mail_evidence가 한 번에 돌려주는 원문 길이. 단가표 한 쪽을 대개 한 번에 읽어 도구 호출 한도를 아낀다
 MAX_EVIDENCE_CHARS = 12000
 _CASE_KEYS = ('input_revision', 'item_name', 'specification', 'mandatory_conditions', 'quantity', 'unit', 'due_date',
               'policy', 'latest_quote_version_ids')
@@ -1605,7 +1605,6 @@ def _preferences(rows: dict[str, dict], purchases: dict[str, dict],
     """업체별 (선호 체크, 점수). 선호 원산지와 같으면 원산지 가중치, 거래 이력이 있으면 이력 가중치를 더한다.
     값은 회사 정책(policy_jsonb)에서 읽고, 없거나 숫자가 아니면 PREFERRED_ORIGIN·ORIGIN_WEIGHT·HISTORY_WEIGHT다."""
     policy = policy or {}
-    # 키 이름 확정 대기: preferred_origin·origin_weight·history_weight는 제안값이다
     preferred = str(policy.get('preferred_origin') or '').strip() or PREFERRED_ORIGIN
     def weight(key, default):   # NaN·음수는 정렬을 깨거나 선호를 벌점으로 뒤집으므로 기본값을 쓴다
         value = _amount(policy.get(key))

@@ -1,4 +1,4 @@
-"""견줘 에이전트 계약 (07 에이전트 구성도 기준). 오케스트레이션 담당이 정하고 팀원은 이 형식에 맞춰 구현한다.
+"""견줘 에이전트 계약 (07 에이전트 구성도 기준).
 
 1. 실행 한도
 2. 백엔드 ↔ 그래프 계약 (run_case 입출력·재개 지점·진행 단계)
@@ -22,7 +22,7 @@ from pydantic import Field, StrictBool, model_validator
 from app.shared.domain.schemas import StrictModel
 
 # ─────────────────────────────────────────────
-# 1. 실행 한도 (07 7절 초기 제안값, 인수 실험 후 조정)
+# 1. 실행 한도 (07 7절)
 # ─────────────────────────────────────────────
 MAX_ROLE_CALLS_PER_RUN = 6
 MAX_TOOL_CALLS_PER_AGENT_CALL = 8

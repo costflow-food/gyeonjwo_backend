@@ -1,10 +1,9 @@
-"""Read-only MVP adapter, without new SQL/RPC installation.
+"""Read-only adapter.
 
 Read owner-filtered keyset batches, then join only owner-filtered initial-mail
 metadata. Searching/sorting derived mail fields is done in the service. This costs
 O(owner's cases) per page for exact cross-table search/counts; fail explicitly above
-10,000 cases rather than return incomplete counts. A future single SQL read RPC can
-replace this adapter after review with the DB owner. Never select body_text/tokens.
+10,000 cases rather than return incomplete counts. Never select body_text/tokens.
 """
 from app.core.errors import ServiceError
 from uuid import UUID

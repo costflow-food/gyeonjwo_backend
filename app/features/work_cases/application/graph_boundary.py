@@ -1,4 +1,3 @@
-"""Backend-owned START adapter; later entry points need their own storage contract."""
 import inspect
 import logging
 from contextlib import ExitStack
@@ -52,7 +51,7 @@ def run_graph(*, settings, scope, runner_factory=None, store_factory=GraphStore)
         tools.use_priority_store(proxy)
         nodes.use_card_store(proxy)
     # No shared user's store in globals. Every protocol call is routed through
-    # CURRENT_SCOPE. No stop-after-extraction option is added to the graph.
+    # CURRENT_SCOPE.
     def bounded_request(request):
         remaining = scope.remaining_seconds()
         request.extensions['timeout'] = {key: min(settings.agent_graph_request_timeout_seconds, remaining)

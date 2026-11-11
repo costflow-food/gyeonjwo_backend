@@ -1,9 +1,4 @@
-"""Pure request identity helpers, not an in-memory substitute for persistent idempotency.
-
-The future DB adapter must atomically claim (user_id, method, path, key), compare
-body_hash, and store the first response together with the business mutation/job.
-No record expiry or automatic takeover of in-progress requests is assumed here.
-"""
+"""Pure request identity helpers, not an in-memory substitute for persistent idempotency."""
 import hashlib
 import json
 from dataclasses import dataclass
