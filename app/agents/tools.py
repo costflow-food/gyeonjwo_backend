@@ -288,7 +288,34 @@ _CURRENCIES = {'원': 'KRW', '₩': 'KRW', 'KRW': 'KRW', '원화': 'KRW', '원(K
                '$': 'USD', '달러': 'USD', 'EUR': 'EUR', '€': 'EUR', '유로': 'EUR', 'JPY': 'JPY', '¥': 'JPY', '엔': 'JPY',
                'CNY': 'CNY', '위안': 'CNY'}
 _NUMBER = r'(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?'
-_FOREIGN_PRICE = re.compile(rf'(?P<pre>US\$|\$|€|¥|₩)?\s*(?P<num>{_NUMBER})\s*(?P<post>USD|EUR|JPY|CNY|KRW|달러|유로|엔|위안)?')
+_FOREIGN_PRICE = re.compile(rf'(?P<pre>US\$|\$|€|¥|₩|USD|EUR|JPY|CNY|KRW)?\s*(?P<num>{_NUMBER})\s*'
+                            r'(?P<post>USD|EUR|JPY|CNY|KRW|달러|유로|엔|위안)?')
+# 금액 배수 표기 (KAN-208). 숫자 뒤('9,700천원'·'970만원')나 표 머리글('(단위: 천원)'·'금액(천원)')에 온다.
+# 머리글 패턴은 공백·천 단위 쉼표를 뺀 원문 줄(_normalized)에 쓴다
+_SCALES = {'천': 1000, '만': 10_000, '백만': 1_000_000, '억': 100_000_000}
+_SCALE_WORD = r'(백만|천|만|억)'
+_SCALED_PRICE = re.compile(rf'\s*({_NUMBER})\s*{_SCALE_WORD}\s*(원.*)')
+_SCALE_HEADER = rf'단위[:：]?\(?{_SCALE_WORD}원|\({_SCALE_WORD}원\)'
+_FOREIGN_WORD = r'(?:US\$|\$|€|¥|USD|EUR|JPY|CNY|달러|유로|엔|위안)'
+_CURRENCY_HEADER = rf'단위[:：]?\(?{_FOREIGN_WORD}|\({_FOREIGN_WORD}\)'
+FOUND_TEXT_LIMIT = 120      # 거절 힌트(found)로 돌려주는 원문 한 줄의 길이 상한
+# 단가 표기 허용 목록 (KAN-208). 원문 단가 숫자 바로 뒤에 올 수 있는 표기: 줄 끝·구분 기호, 원·통화, 배수+원, per, 조사
+_NOTATION_AFTER_OK = (r"(?:$|[^A-Za-z가-힣$€¥₩£₹₽'’千円]|원|KRW|USD|EUR|JPY|CNY|달러|유로|위안|엔(?![가-힣])"
+                      rf'|{_SCALE_WORD}원|per|PER|VAT|vat|(?:으로|로|에서|에|입니다|이며|이고|부터|까지|씩|이상|이하|미만|초과)'
+                      r'(?![가-힣]))')
+_SPACED_UNKNOWN = r'(?:[kK](?![A-Za-z])|千|円|(?:백만|천|만|억)(?!원)|[Tt]housand)'
+# 숫자 바로 앞의 통화처럼 보이는 표기('HK$', 'RMB', '£'). 아는 통화·단위 표기면 허용한다
+_NOTATION_BEFORE_RUN = r"[A-Za-z$€¥₩£₹₽'’]*$"
+_NOTATION_BEFORE_SUSPECT = r"[A-Z]{1,4}[$€¥₩£]?|[$€¥₩£₹₽'’]+"
+_NOTATION_BEFORE_OK = {'USD', 'EUR', 'JPY', 'CNY', 'KRW', 'US$', '$', '€', '¥', '₩', 'KG', 'EA', 'BOX', 'PER'}
+# 숫자 바로 뒤가 수량 단위면 그 자리는 단가가 아니다('1,000kg'). 허용 목록 검사에서 건너뛴다
+_QUANTITY_AFTER = r'(?:kg|KG|Kg|g|t|톤|박스|box|Box|BOX|상자|개|EA|ea|팩|봉|포대)(?![A-Za-z])'
+# 읽을 수 없는 천 단위 표기 (표 머리글의 '000·千 등)
+_UNKNOWN_SCALE = r"['’]000|\(000\)|千|[Tt]housand|THOUSAND"
+_UNIT_HEADER = r'[(\[]단위[:：]?(?P<a>[^)\]]*)[)\]]|단위[:：](?P<b>[^)\],|]*)'
+# 배수(천원·만원)를 적용한 단가가 기준 단가(같은 메일의 인상 전 단가·같은 업체 이전 견적)와 이 배수를 넘게 차이 나면
+# 거절한다. 배수 없이 원문 그대로 읽은 단가는 비교하지 않는다 (2026-11-11 사용자 결정 5배)
+PRICE_REFERENCE_RATIO = Decimal(5)
 # 비용이 없다고 원문에 적힌 표기. 0원으로 저장하고 원문 구절은 그대로 남긴다 (적혀 있지 않은 비용은 0원이 아니라 미확인)
 _ZERO_AMOUNTS = {'무료', '무상', '없음', '없습니다', '해당없음'}
 # 단가의 뜻을 정하는 조건. 이전 버전과 값이 다르면 이전 단가·단가 구간·이 조건들을 이어받지 않는다
@@ -346,6 +373,21 @@ _HINTS = {
     'TIER_BOUND_MISPLACED': '구간마다 "이상·초과·부터" 경계는 min_quantity, "미만·이하·까지" 경계는 max_quantity에 나눠 넣는다.',
     'TIER_OVERLAP': '단가 구간의 경계를 원문에서 다시 확인한다.',
     'CURRENCY_MISMATCH': '단가의 통화 표기와 currency가 다르다. 원문을 다시 확인한다.',
+    # KAN-208: 아래 단가 코드들은 rejected 항목에 sent(보낸 값)·found(문제를 찾은 원문 줄 {mail_id, part, page, line, text})가 붙는다
+    'PRICE_SCALE_MISSING': '원문 found 줄에 천원·만원 같은 배수 표기가 있다. 숫자 뒤에 붙어 있으면 단가를 "9,700천원"처럼 '
+                           '배수까지 옮기고, 표 머리글에만 있으면(예: "(단위: 천원)") 단가는 숫자 그대로 두고 '
+                           'price_scale_text에 그 머리글 구절을 넣어 다시 보낸다.',
+    'PRICE_SCALE_INVALID': 'price_scale_text는 단가(unit_price·previous_unit_price·price_tiers)에만, 원문의 배수 구절'
+                           '(예: "단위: 천원")을 그대로 넣는다. 단가에 원·통화·배수가 이미 적혀 있으면 보내지 않는다.',
+    'CURRENCY_MISSING': '원문 found 줄에 외화 표기가 있다. 단가를 "USD 3.10"처럼 통화까지 옮기거나, 통화가 표 머리글에만 '
+                        '있으면 currency에 그 통화를 넣어 다시 보낸다.',
+    'PRICE_NOTATION_UNKNOWN': '원문 found 줄의 단가 표기(숫자 앞뒤의 배수·통화·머리글)를 도구가 읽을 수 없다. 원·통화·천원·만원 '
+                              '중 그 뜻에 맞는 표기로 확인할 수 없으면 그 단가만 null로 보낸다(값을 짐작해 바꾸지 않는다).',
+    'PRICE_IMPLAUSIBLE': '배수(천원·만원)를 적용한 단가가 기준 단가(reference: 같은 메일의 인상 전 단가 또는 이 업체의 이전 '
+                         '견적)와 5배 넘게 차이 난다. 그 배수가 이 단가에 적용되는 표기인지 found 줄에서 다시 확인한다. '
+                         '다른 표·문장의 배수면 price_scale_text를 빼고, 확인할 수 없으면 그 단가만 null로 보낸다.',
+    'PRICE_UNIT_MISMATCH': '단가의 단위는 원문에서 단가 바로 뒤("54,500원/박스" → "박스")나 같은 줄·단위 머리글'
+                           '("원/kg"·"kg당")에 적힌 단위다. "박스당 10kg" 같은 중량은 quantity_per_order_unit으로 보낸다.',
     'MISSING_FIELD': '업체가 연결되지 않은 메일이면 원문의 업체명을 supplier_name으로 보낸다. 원문에 없으면 HOLD한다.',
     'SUPPLIER_NOT_MATCHED': '등록된 업체명과 글자가 정확히 같지 않다. 결과의 next를 따른다.',
     'SUPPLIER_MISMATCH': '메일에 연결된 업체와 업체명이 다르다. 저장하지 말고 HOLD한다.',
@@ -378,6 +420,8 @@ class QuoteField(StrictModel):
     tax_basis: Literal['INCLUDED', 'EXCLUDED', 'EXEMPT'] | None = None
     # 단위가 있는 항목(unit·order_unit·수량)에서 원문 단위 표기가 정해진 이름과 다를 때 ①이 고른 단위 ('킬로' → kg)
     unit_code: UnitCode | None = None
+    # 단가 항목만: 배수가 표 머리글에만 있을 때 그 원문 구절 ('(단위: 천원)'). 숫자 뒤에 붙은 배수는 raw_value에 둔다
+    price_scale_text: str | None = None
 
 
 class PriceTier(StrictModel):
@@ -385,6 +429,7 @@ class PriceTier(StrictModel):
     max_quantity: str | None = None
     unit_price: str
     evidence: EvidenceRef
+    price_scale_text: str | None = None  # QuoteField와 같다
 
 
 class CostTerm(StrictModel):
@@ -510,8 +555,11 @@ def _unit(raw: str, field_name: str, code: str | None = None) -> str:
 
 
 def _price(raw: str, field_name: str) -> tuple[str, str | None]:
-    """단가·금액을 (소수 문자열, 외화 통화 코드)로 읽는다. '3.20 USD', '$3.20'은 통화를 나누고, 그 밖에는 원화 표기만 받는다."""
+    """단가·금액을 (소수 문자열, 외화 통화 코드)로 읽는다. '3.20 USD', 'USD 3.10', '$3.20'은 통화를 나누고,
+    그 밖에는 원화 표기만 받는다. '9,700천원'·'970만원'은 배수를 곱한다."""
     raw = _nfkc(raw)
+    if scaled := _SCALED_PRICE.fullmatch(raw):
+        return _scaled(str(decimal_value(scaled[1] + scaled[3], field_name)), _SCALES[scaled[2]]), None
     match = _FOREIGN_PRICE.fullmatch(raw.strip())
     if match and (match['pre'] or match['post']):
         return str(decimal_value(match['num'], field_name)), _CURRENCIES[match['pre'] or match['post']]
@@ -613,6 +661,195 @@ class _SourceCheck:
         location = ' '.join(filter(None, [part.get('location'), evidence.cell]))
         return None, {'mail_id': evidence.mail_id, 'location': location}
 
+    def find(self, evidence: EvidenceRef, pattern: str, anchor: str | None = None) -> tuple[dict, re.Match] | None:
+        """pattern이 맞는 첫 원문 줄(공백·천 단위 쉼표를 뺀 줄에서 찾는다)의 위치와 매치. 위치는 거절 힌트 found로 쓴다.
+        anchor(단가 숫자 패턴)를 주면 그 첫 줄과 그 위로 빈 줄 전까지(같은 표·문단 덩어리)에서만 찾는다.
+        같은 쪽의 다른 표 머리글('(단위: 천원)')을 단가에 적용하지 않기 위해서다.
+        AI·시스템에게 하는 문장으로 보이는 줄은 위치만 주고 글은 주지 않는다 (LLM에게 다시 전달되지 않게)."""
+        lines = self.lines_of(evidence)
+        rows = range(len(lines))
+        if anchor is not None:
+            at = next((i for i, line in enumerate(lines) if re.search(anchor, _normalized(line, True))), None)
+            if at is None:
+                return None
+            rows = range(next((i + 1 for i in range(at - 1, -1, -1) if not lines[i].strip()), 0), at + 1)
+        for index in rows:
+            if match := re.search(pattern, _normalized(lines[index], True)):
+                return self.located(evidence, index + 1, lines[index]), match
+        return None
+
+    def lines_of(self, evidence: EvidenceRef) -> list[str]:
+        return (self._part(evidence) or {}).get('text', '').splitlines()
+
+    @staticmethod
+    def located(evidence: EvidenceRef, line_no: int, line: str) -> dict:
+        found = {'mail_id': evidence.mail_id, 'part': evidence.part, 'page': evidence.page, 'line': line_no}
+        if not _INSTRUCTION.search(line):
+            found['text'] = ' '.join(line.split())[:FOUND_TEXT_LIMIT]
+        return found
+
+
+def _scaled(value: str, scale: int) -> str:
+    return format(Decimal(value) * scale, 'f')
+
+
+def _number_pattern(raw: str) -> str:
+    """단가 표기의 숫자를 정규화한 원문 줄에서 찾는 패턴. 더 긴 숫자의 일부는 맞지 않는다."""
+    number = re.search(_NUMBER, _nfkc(raw))[0].replace(',', '')
+    return rf'(?<![\d.]){re.escape(number)}(?!\.?\d)'
+
+
+def _known_header(token: str) -> bool:
+    """'(단위: …)' 머리글 값을 읽을 수 있는지. 금액 표기(원·천원·통화)나 정해진 단위, 그 둘의 '/' 조합('천원/박스')만 안다."""
+    def known(part: str) -> bool:
+        if re.fullmatch(rf'{_SCALE_WORD}?원|KRW|₩|{_FOREIGN_WORD}', part):
+            return True
+        try:
+            _unit(part, 'unit')
+            return True
+        except ReviewRequired:
+            return False
+    return all(known(part) for part in token.split('/') if part) and bool(token.strip('/'))
+
+
+def _notation_issue(check: _SourceCheck, evidence: EvidenceRef, raw: str, number: str) -> dict | None:
+    """원문에서 단가 숫자가 나오는 자리마다 바로 앞뒤 표기가 아는 표기인지 (허용 목록, KAN-208).
+    모르는 표기가 한 자리라도 있으면 PRICE_NOTATION_UNKNOWN. 목록에 없는 배수·통화 표기('9.7k', '9,700천', 'HK$',
+    '千円')가 숫자만 읽혀 저장되지 않게 한다. 숫자 뒤가 수량 단위인 자리('1,000kg')는 단가가 아니라 건너뛴다."""
+    for index, line in enumerate(check.lines_of(evidence)):
+        # 공백은 남긴다: 표의 칸 사이 공백·탭 뒤 낱말('9,700\t냉동딸기')은 표기가 아니다
+        text = re.sub(r'(?<=\d),(?=\d)', '', _nfkc(line))
+        for match in re.finditer(number, text):
+            after = text[match.end():]
+            if re.match(_QUANTITY_AFTER, after.lstrip()):
+                continue
+            # 붙어 있으면 허용 목록, 띄어 있으면 배수처럼 보이는 낱말만 거절한다('9,700 k', '9,700 천')
+            bad_after = re.match(_SPACED_UNKNOWN, after.lstrip()) if after[:1].isspace() \
+                else not re.match(_NOTATION_AFTER_OK, after)
+            before = re.search(_NOTATION_BEFORE_RUN, text[:match.start()].rstrip())[0]
+            suspect = re.fullmatch(_NOTATION_BEFORE_SUSPECT, before) and before.upper() not in _NOTATION_BEFORE_OK
+            if suspect or bad_after:
+                return {'code': 'PRICE_NOTATION_UNKNOWN', 'sent': raw,
+                        'found': check.located(evidence, index + 1, line)}
+    return None
+
+
+def _price_issue(check: _SourceCheck, evidence: EvidenceRef, raw: str, scale_text: str | None,
+                 foreign_given: bool) -> tuple[int, dict | None]:
+    """단가의 배수·통화 표기를 원문과 대조한다 (KAN-208). 원문 대조를 통과한 단가에만 부른다. 반환: (곱할 배수, 거절 항목).
+    1) 원문 단가 줄에서 숫자 앞뒤 표기가 아는 표기여야 한다(허용 목록).
+    2) raw에 원·통화·배수가 적혀 있으면 원문 대조로 확인된 표기다.
+    3) 숫자만 왔는데 원문에서 그 숫자 바로 뒤에 '천원'·통화가 붙어 있거나, 같은 표 덩어리에 '(단위: 천원)'·'(단위: USD)'
+       머리글이 있으면 거절한다. 읽을 수 없는 '단위' 머리글이나 천 단위 표기('000·千)가 있으면 PRICE_NOTATION_UNKNOWN.
+    머리글은 단가 줄과 그 위로 빈 줄 전까지만 본다. price_scale_text도 그 범위에 있어야 한다.
+    foreign_given이면(currency로 외화를 따로 보냄) 통화 표기는 확인된 것으로 본다."""
+    number = _number_pattern(raw)
+    if problem := _notation_issue(check, evidence, raw, number):
+        return 1, problem
+    marked = re.search(rf'원|₩|KRW|{_FOREIGN_WORD}', _nfkc(raw))
+    if scale_text:
+        word = re.search(rf'{_SCALE_WORD}\s*원', _nfkc(scale_text))
+        if marked or word is None or not check.find(evidence, re.escape(_normalized(scale_text, True)), number):
+            return 1, {'code': 'PRICE_SCALE_INVALID', 'sent': scale_text}
+        return _SCALES[word[1]], None
+    if marked:
+        return 1, None
+    checks = [('PRICE_SCALE_MISSING', rf'{number}{_SCALE_WORD}원', None),
+              ('PRICE_SCALE_MISSING', _SCALE_HEADER, number)]
+    if not foreign_given:
+        checks += [('CURRENCY_MISSING', rf'{_FOREIGN_WORD}{number}|{number}{_FOREIGN_WORD}', None),
+                   ('CURRENCY_MISSING', _CURRENCY_HEADER, number)]
+    checks += [('PRICE_NOTATION_UNKNOWN', _UNKNOWN_SCALE, number)]
+    for code, pattern, anchor in checks:
+        if hit := check.find(evidence, pattern, anchor):
+            return 1, {'code': code, 'sent': raw, 'found': hit[0]}
+    header = check.find(evidence, _UNIT_HEADER, number)
+    if header and not _known_header(re.split(r'[,，]', header[1]['a'] if header[1]['a'] is not None
+                                             else header[1]['b'])[0]):
+        return 1, {'code': 'PRICE_NOTATION_UNKNOWN', 'sent': raw, 'found': header[0]}
+    return 1, None
+
+
+def _implausible(value: str, reference: str | None) -> bool:
+    """기준 단가와 PRICE_REFERENCE_RATIO배 넘게 차이 나는지. 기준이 없거나 0 이하면 비교하지 않는다."""
+    if reference is None or Decimal(reference) <= 0 or Decimal(value) <= 0:
+        return False
+    ratio = Decimal(value) / Decimal(reference)
+    return not 1 / PRICE_REFERENCE_RATIO <= ratio <= PRICE_REFERENCE_RATIO
+
+
+def _reference_price(values: dict, previous: tuple[str, 'QuoteVersionRecord'] | None) -> dict | None:
+    """기준 단가 {value, source}. 같은 메일의 인상 전 단가, 없으면 이 업체 이전 견적의 단가(단위·통화가 같을 때만.
+    이번 메일에 단위·통화가 없으면 이전 견적 것을 이어받으므로 같다고 본다). 둘 다 없으면 None(처음 받은 견적)."""
+    if 'previous_unit_price' in values:
+        return {'value': values['previous_unit_price']['value'], 'source': 'previous_unit_price'}
+    if previous is None or previous[1].unit_price is None:
+        return None
+    record = previous[1]
+    if values.get('unit', {}).get('value', record.unit) != record.unit or \
+            values.get('currency', {}).get('value', record.currency) != record.currency:
+        return None
+    return {'value': record.unit_price, 'source': f'quote_versions:{previous[0]}'}
+
+
+def _scale_applied(raw: str, entry: dict) -> bool:
+    """배수를 곱해 읽은 단가인지 ('970만원', price_scale_text로 머리글 배수 적용)."""
+    return 'price_scale_text' in entry or _SCALED_PRICE.fullmatch(_nfkc(raw)) is not None
+
+
+def _implausible_prices(check: _SourceCheck, values: dict, refs: dict, tiers: list[dict],
+                        sent_tiers: list['PriceTier'], previous) -> list[dict]:
+    """배수를 적용한 단가·구간 단가 중 기준 단가와 PRICE_REFERENCE_RATIO배 넘게 차이 나는 것 (PRICE_IMPLAUSIBLE).
+    배수 없이 원문 그대로 읽은 단가는 비교하지 않는다. 실제로 크게 오른 단가를 막지 않기 위해서다 (2026-11-11 사용자 결정)."""
+    reference = _reference_price(values, previous)
+    if reference is None:
+        return []
+    out = []
+    unit_price = values.get('unit_price')
+    candidates = ([('unit_price', unit_price['value'], unit_price['raw_value'], refs.get('unit_price'))]
+                  if unit_price and _scale_applied(unit_price['raw_value'], unit_price) else []) + \
+        [(f'price_tiers[{index}]', tier['unit_price'], tier['unit_price_raw'],
+          next((sent.evidence for sent in sent_tiers if sent.unit_price == tier['unit_price_raw']), None))
+         for index, tier in enumerate(tiers) if _scale_applied(tier['unit_price_raw'], tier)]
+    for field, value, raw, evidence in candidates:
+        if _implausible(value, reference['value']):
+            hit = check.find(evidence, _number_pattern(raw)) if evidence else None
+            out.append({'field': field, 'code': 'PRICE_IMPLAUSIBLE', 'sent': raw, 'value': value,
+                        'reference': reference, **({'found': hit[0]} if hit else {})})
+    return out
+
+
+def _attached_unit(check: _SourceCheck, evidence: EvidenceRef, raw: str) -> tuple[str, dict] | None:
+    """원문에서 단가 바로 뒤에 붙은 단위와 그 줄 ('54,500원/박스' → 'box', 'USD 3.10 per kg' → 'kg').
+    정해진 단위가 아니면 None."""
+    hit = check.find(evidence, rf'{_number_pattern(raw)}{_SCALE_WORD}?(?:원|KRW|{_FOREIGN_WORD})?(?:/|per|PER)'
+                               r'(1?[가-힣A-Za-z]+)')
+    if hit is None:
+        return None
+    try:
+        return _unit(hit[1].groups()[-1], 'unit'), hit[0]
+    except ReviewRequired:
+        return None
+
+
+def _unit_pair_issue(check: _SourceCheck, price_ref: EvidenceRef, price_raw: str, unit_ref: EvidenceRef,
+                     unit: dict) -> dict | None:
+    """단가와 단위가 짝인지 (KAN-208). 원문에서 단가 바로 뒤에 단위가 붙어 있으면('54,500원/박스') 그 단위여야 하고,
+    붙어 있지 않으면 단위가 단가와 같은 줄이나 단위 머리글('원/kg'·'kg당'·'단위: kg')에 있어야 한다.
+    숫자 바로 뒤의 단위('박스당 10kg'의 kg)는 수량이라 단가의 단위로 보지 않는다."""
+    attached = _attached_unit(check, price_ref, price_raw)
+    if attached:
+        return None if attached[0] == unit['value'] else \
+            {'code': 'PRICE_UNIT_MISMATCH', 'sent': unit['raw_value'], 'found': attached[1]}
+    core = re.sub(r'^1(?=\D)', '', re.sub(r'당$', '', re.sub(r'^(?:원)?/', '', _normalized(unit['raw_value'], True))))
+    word, number = rf'(?<![\d.])1?{re.escape(core)}', _number_pattern(price_raw)
+    header = rf'/1?{re.escape(core)}|{word}당|단위[:：]?\(?{re.escape(core)}'
+    if check.find(price_ref, rf'{number}.*{word}|{word}.*{number}') or check.find(price_ref, header, number) \
+            or check.find(unit_ref, header):
+        return None
+    line = check.find(price_ref, number)
+    return {'code': 'PRICE_UNIT_MISMATCH', 'sent': unit['raw_value'], **({'found': line[0]} if line else {})}
+
 
 def _number(check, raw: str | None, name: str, evidence: EvidenceRef, zero_words=False, quantity=False):
     """(값, 사유 코드). 원문에 없으면 (None, None). quantity면 '이상·미만' 같은 수식어를 떼고 읽는다.
@@ -637,7 +874,10 @@ def _misplaced(low: str | None, high: str | None) -> bool:
         any(word in (high or '') for word in _LOWER_BOUND_WORDS)
 
 
-def _tiers(check, tiers: list[PriceTier], rejected: list, adjusted: list) -> list[dict]:
+def _tiers(check, tiers: list[PriceTier], rejected: list, adjusted: list, foreign_given: bool,
+           unit: dict | None) -> list[dict]:
+    """단가 구간. 구간 단가도 단가와 같이 배수·통화·붙은 단위를 원문과 대조한다 (KAN-208).
+    구간마다 currency(단가에 적힌 외화, 없으면 None — 견적 통화는 save_structured_quote가 채운다)를 남긴다."""
     out = []
     for index, tier in enumerate(tiers):
         tier_values, issue = {}, None
@@ -653,8 +893,19 @@ def _tiers(check, tiers: list[PriceTier], rejected: list, adjusted: list) -> lis
         if issue:
             rejected.append({'field': f'price_tiers[{index}]', 'code': issue})
             continue
+        scale, problem = _price_issue(check, tier.evidence, tier.unit_price, tier.price_scale_text, foreign_given)
+        attached = _attached_unit(check, tier.evidence, tier.unit_price) if unit and not problem else None
+        if attached and attached[0] != unit['value']:
+            problem = {'code': 'PRICE_UNIT_MISMATCH', 'sent': tier.unit_price, 'found': attached[1]}
+        if problem:
+            rejected.append({'field': f'price_tiers[{index}]', **problem})
+            continue
+        if scale != 1:
+            tier_values |= {'unit_price': _scaled(tier_values['unit_price'], scale),
+                            'price_scale_text': tier.price_scale_text}
         # 경계의 이상·미만 같은 뜻은 원문 표기로 남긴다
-        raw = {'min_quantity_raw': tier.min_quantity, 'max_quantity_raw': tier.max_quantity}
+        raw = {'min_quantity_raw': tier.min_quantity, 'max_quantity_raw': tier.max_quantity,
+               'unit_price_raw': tier.unit_price, 'currency': _price(tier.unit_price, 'unit_price')[1]}
         out.append(tier_values | raw | check(tier.evidence, tier.unit_price, numeric=True)[1])
     bounded = sorted((t for t in out if t['min_quantity'] is not None), key=lambda t: Decimal(t['min_quantity']))
     for before, after in zip(bounded, bounded[1:]):
@@ -915,7 +1166,7 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         return {'status': 'REVISION_CHANGED'}
 
     check, rejected, review, adjusted = _SourceCheck(store, case_id), [], [], []
-    values, sent_null, seen, refs = {}, [], set(), {}
+    values, sent_null, seen, refs, scale_texts = {}, [], set(), {}, {}
     for field in fields:
         if field.field_name not in QUOTE_FIELDS:
             rejected.append({'field': field.field_name, 'code': 'UNKNOWN_FIELD'})
@@ -929,6 +1180,10 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         if field.unit_code and field.field_name not in _UNIT_FIELDS:
             rejected.append({'field': field.field_name, 'code': 'UNIT_CODE_NOT_UNIT_FIELD'})
             continue
+        if field.price_scale_text and QUOTE_FIELDS[field.field_name][0] != 'price':
+            rejected.append({'field': field.field_name, 'code': 'PRICE_SCALE_INVALID'})
+            continue
+        scale_texts[field.field_name] = field.price_scale_text
         seen.add(field.field_name)
         if field.raw_value is None or not field.raw_value.strip():
             sent_null.append(field.field_name)
@@ -954,7 +1209,19 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
             entry['currency'] = currency
         if field.tax_basis:             # 근거 원문과 함께 저장되고, 다음 버전으로도 이어받는다
             entry['tax_basis'] = field.tax_basis
-    tiers = _tiers(check, price_tiers, rejected, adjusted)
+    # 단가의 배수·통화·단위 짝을 원문 줄과 대조한다 (KAN-208). 숫자만 맞고 뜻이 다른 단가가 CONFIRMED로 저장되지 않게
+    foreign_given = values.get('currency', {}).get('value') not in (None, 'KRW')
+    for name in ('unit_price', 'previous_unit_price'):
+        if name not in values:
+            continue
+        scale, problem = _price_issue(check, refs[name], values[name]['raw_value'], scale_texts.get(name), foreign_given)
+        if problem is None and name == 'unit_price' and 'unit' in values:
+            problem = _unit_pair_issue(check, refs[name], values[name]['raw_value'], refs['unit'], values['unit'])
+        if problem:
+            rejected.append({'field': name, **problem})
+        elif scale != 1:
+            values[name] |= {'value': _scaled(values[name]['value'], scale), 'price_scale_text': scale_texts[name]}
+    tiers = _tiers(check, price_tiers, rejected, adjusted, foreign_given, values.get('unit'))
     costs = _costs(check, cost_terms, rejected, review)
     notes = []
     for index, note in enumerate(item_notes):
@@ -969,12 +1236,20 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         else:
             notes.append({'text': note.text, 'category': note.category, **source})
 
-    # 단가에 외화가 적혀 있으면 그 통화가 견적 통화다 ('3.20 USD')
-    price_currency = values.get('unit_price', {}).get('currency')
-    if price_currency and 'currency' in values and values['currency']['value'] != price_currency:
+    # 단가·구간 단가에 외화가 적혀 있으면 그 통화가 견적 통화다 ('3.20 USD'). 단가끼리 통화가 다르면 거절한다
+    marked = [(entry, entry['currency']) for entry in [values.get('unit_price', {}), *tiers] if entry.get('currency')]
+    price_currency = marked[0][1] if marked else None
+    if len({currency for _, currency in marked}) > 1 or \
+            (price_currency and 'currency' in values and values['currency']['value'] != price_currency):
         rejected.append({'field': 'currency', 'code': 'CURRENCY_MISMATCH'})
     elif price_currency and 'currency' not in values:
-        values['currency'] = {**values['unit_price'], 'value': price_currency}
+        source = marked[0][0]
+        values['currency'] = {'raw_value': source.get('raw_value') or source.get('unit_price_raw'),
+                              'value': price_currency, 'mail_id': source['mail_id'], 'location': source['location']}
+    # 구간마다 통화·단위를 남긴다. 구간 단가는 견적 통화·단위를 따르고, 다른 통화·붙은 단위는 위에서 거절했다
+    for tier in tiers:
+        tier |= {'currency': price_currency or values.get('currency', {}).get('value') or 'KRW',
+                 'unit': values.get('unit', {}).get('value')}
     # 적용일보다 이른 유효기간은 회신 기한이다. DB 제약(valid_until >= effective_from)에 닿기 전에 거절한다 (KAN-207)
     if 'valid_until' in values and 'effective_from' in values and \
             values['valid_until']['value'] < values['effective_from']['value']:     # ISO 날짜 문자열
@@ -1009,6 +1284,9 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
 
     current = dict(values)
     previous = _read(lambda: store.latest_quote_version(case_id, supplier_id))
+    # 기준 단가와 크기를 비교한다 (KAN-208). 배수·통화·단위를 잘못 읽은 단가는 표기와 상관없이 기준과 크게 차이 난다
+    if implausible := _implausible_prices(check, values, refs, tiers, price_tiers, previous):
+        return _with_hints({'status': 'REJECTED', 'rejected': implausible}, implausible)
     carried = []
     if previous:
         tiers, costs, carried = _carry(previous, values, tiers, costs, review)
@@ -1109,6 +1387,9 @@ def store_structured_mail(fields: list[QuoteField], runtime: ToolRuntime[RunCont
       previous_unit_price(인상 전 단가), increase_reason(인상 사유)
     raw_value는 원문에서 값 부분만 그대로 옮긴다 (예: unit_price "54,500원" 또는 "3.20 USD", unit "박스",
       valid_until "2026년 12월 31일", quantity_per_order_unit "박스당 10kg").
+    단가의 배수·통화는 원문 그 단가 줄 그대로 옮긴다("9,700천원", "USD 3.10"). 배수가 표 머리글에만 있으면
+      ("(단위: 천원)") 단가(unit_price·previous_unit_price·price_tiers)에 price_scale_text로 그 구절을 붙인다.
+      unit은 단가 바로 뒤나 같은 줄의 단위다("54,500원/박스 (박스당 10kg)" → unit "박스").
     price_tiers·cost_terms·item_notes는 fields가 아니라 각 인자로 보낸다.
     price_tiers: 단가 구간 min_quantity·max_quantity(원문 그대로, 원문에 없으면 null)·unit_price
       "이상·초과"는 min_quantity, "미만·이하"는 max_quantity다 (예: "500kg 이상 ~ 1,000kg 미만" → min "500kg 이상",
@@ -1127,6 +1408,7 @@ def store_structured_mail(fields: list[QuoteField], runtime: ToolRuntime[RunCont
     - STORED: quote_version_id·version_no·extraction_status·unknown_fields(값이 없는 필드)·
       review(field·code: 확인이 필요해 NEEDS_REVIEW로 저장한 항목)·adjusted(field·code: 도구가 바꾸거나 뺀 항목)·hints
     - REJECTED: rejected(field·code)와 hints(code별 고치는 방법). 아무것도 저장하지 않았다.
+      단가 배수·통화·단위 거절은 sent(보낸 값)·found(문제를 찾은 원문 줄 mail_id·part·page·line·text)가 붙는다.
     - REVISION_CHANGED / CASE_NOT_FOUND: 저장하지 않았다.
     '''
     context = _run_context(_quote_store, runtime)
@@ -1899,7 +2181,8 @@ def cost_sheet(quote_version_id: str, record: QuoteVersionRecord, quantity, case
         sheet.blocked.append('UNIT_MISSING')
     elif ratio is None:
         sheet.blocked.append('UNIT_MISMATCH')
-    if (pricing.get('currency') or record.currency or 'KRW') != 'KRW':
+    if (pricing.get('currency') or record.currency or 'KRW') != 'KRW' or \
+            any((tier.get('currency') or 'KRW') != 'KRW' for tier in pricing.get('price_tiers') or []):
         sheet.blocked.append('FOREIGN_CURRENCY')
     if sheet.blocked:
         return sheet
