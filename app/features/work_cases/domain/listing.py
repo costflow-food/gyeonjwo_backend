@@ -9,7 +9,10 @@ from app.shared.domain.schemas import StrictModel
 
 from app.features.work_cases.domain.hold import HoldInfo
 
-QueueFilter = Literal['Waiting', 'Running', 'Complete']
+QueueFilter = Literal['Waiting', 'Running', 'Complete', 'Pending', 'Confirm']
+# 업무 상태 → 큐 탭. 화면 탭과 같다: 메일만 확인한 업무(Confirm)는 대기, 보류·승인 대기(Pending)는 진행 중
+QUEUE_TABS = {'Waiting': 'Waiting', 'Confirm': 'Waiting', 'Running': 'Running', 'Pending': 'Running',
+              'Complete': 'Complete'}
 
 
 class StepDetail(StrictModel):

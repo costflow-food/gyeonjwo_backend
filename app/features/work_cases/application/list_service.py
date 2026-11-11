@@ -5,11 +5,13 @@ from uuid import UUID
 
 from app.core.errors import ServiceError
 from app.features.work_cases.application.cursor import CursorCodec, iso_z, utc_time
-from app.features.work_cases.domain.listing import QueueCounts, WorkCaseList, WorkCaseRow
+from app.features.work_cases.domain.listing import QUEUE_TABS, QueueCounts, WorkCaseList, WorkCaseRow
 
 from app.features.work_cases.application.case_actions import case_actions
 from app.features.work_cases.application.start_readiness import StartReadiness
 from app.shared.domain.item_names import contains_ignoring_spaces
+
+QUEUE_TAB_NAMES = frozenset(QUEUE_TABS.values())
 
 _PAGE_READS = ThreadPoolExecutor(max_workers=8, thread_name_prefix='case-page-read')
 
@@ -24,8 +26,8 @@ STEP_MESSAGES = {
     'FAILED': '처리 오류 확인 필요',
     'ON_HOLD': '검토 보류',
     'NEEDS_INFO': '추가 정보 확인 필요',
-    'SELECTING_CANDIDATES': '후보 찾기 대기',
-    'CANDIDATES': '견적 요청 준비 중',
+    'SELECTING_CANDIDATES': '견적 요청 후보 찾는 중',
+    'CANDIDATES': '견적 요청 업체 선택 대기',
     'GENERATING_PLANS': '검토안 생성 중',
     'BUILDING_PLANS': '구매 대응안 생성 중',
     'BUILDING_COUNTER_OFFER': '역제안 생성 중',
@@ -94,9 +96,11 @@ class WorkCaseListService:
                 if query and not any(contains_ignoring_spaces(value, query) for value in searchable):
                     continue
                 counts.total += 1
-                if case['status'] in {'Waiting', 'Running', 'Complete'}:
-                    setattr(counts, case['status'], getattr(counts, case['status']) + 1)
-                if status is not None and case['status'] != status:
+                tab = QUEUE_TABS.get(case['status'])
+                if tab is not None:
+                    setattr(counts, tab, getattr(counts, tab) + 1)
+                # 탭(Waiting·Running·Complete)은 그 탭에 묶인 상태 전체, Pending·Confirm은 그 상태만
+                if status is not None and (tab != status if status in QUEUE_TAB_NAMES else case['status'] != status):
                     continue
                 received = iso_z(utc_time(mail['sent_or_received_at']))
                 key = (received, str(UUID(case['id'])))

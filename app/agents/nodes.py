@@ -64,7 +64,8 @@ _EXTENSION_TYPES = {'.pdf': 'application/pdf', '.txt': 'text/plain', '.csv': 'te
 DOCUMENT_ISSUES = {'NO_TEXT': '글자가 없는 PDF(스캔본)라 읽지 못했습니다', 'UNSUPPORTED': '지원하지 않는 첨부 형식입니다',
                    'TOO_LARGE': '첨부가 너무 커서 읽지 않았습니다', 'FAILED': '첨부를 읽는 중 오류가 났습니다',
                    'DOWNLOAD_FAILED': '첨부를 받아오지 못했습니다',
-                   'PDF_CONTENT': 'PDF가 손상됐거나 암호·쪽수 한도 때문에 읽을 수 없습니다'}
+                   'PDF_CONTENT': 'PDF가 손상됐거나 암호·쪽수·크기 한도 때문에 읽을 수 없습니다',
+                   'PDF_TIMEOUT': 'PDF를 읽는 데 시간이 너무 오래 걸려 중단했습니다'}
 PDF_RETRY_EXHAUSTED = '첨부를 읽는 중 오류가 나 {attempts}번 시도했지만 읽지 못했습니다'
 
 
@@ -140,6 +141,12 @@ def preprocess(state) -> dict:
         raise RuntimeError('document store is not configured')
     issues = []
     for item in _document_store.list_unread_attachments(state['case_id'], state.get('mail_ids', [])):
+        if type(item.get('size_bytes')) is int and item['size_bytes'] > MAX_ATTACHMENT_BYTES:
+            # 메일 수신 때 기록한 크기로 먼저 거른다. 너무 큰 첨부는 받지 않는다
+            document = {'status': 'TOO_LARGE', 'pages': []}
+            _document_store.save_document(state['case_id'], item['mail_id'], item['attachment_ref'], document)
+            issues.append(f"{item['mail_id']} {item['filename']}: {DOCUMENT_ISSUES['TOO_LARGE']}")
+            continue
         content = _document_store.download_attachment(state['case_id'], item['mail_id'], item['attachment_ref'])
         if content is None:
             issues.append(f"{item['mail_id']} {item['filename']}: {DOCUMENT_ISSUES['DOWNLOAD_FAILED']}")
@@ -158,6 +165,8 @@ def _document_issue(status: str, log: dict | None) -> str:
             return PDF_RETRY_EXHAUSTED.format(attempts=log['attempts'])
         if log['error_kind'] == 'CONTENT':
             return DOCUMENT_ISSUES['PDF_CONTENT']
+        if log['error_kind'] == 'TIMEOUT':
+            return DOCUMENT_ISSUES['PDF_TIMEOUT']
     return DOCUMENT_ISSUES[status]
 
 

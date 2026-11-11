@@ -300,7 +300,7 @@ QUOTE_FIELDS = {
     'previous_unit_price': ('price', 'mail'),
     'increase_reason': ('text', 'mail'),
 }
-# fields가 아니라 각 인자로 받는 항목. fields에 null로 들어오면 무시하고, 값이 있으면 UNKNOWN_FIELD로 거절한다
+# fields가 아니라 각 인자로 받는 항목. fields에 넣으면 값이 null이어도 UNKNOWN_FIELD로 거절한다
 ARGUMENT_FIELDS = ('price_tiers', 'cost_terms', 'item_notes')
 # ①의 unknown_fields와 ③④⑤가 넘기는 recheck_fields에 쓸 수 있는 이름
 EXTRACTION_FIELD_NAMES = frozenset(QUOTE_FIELDS) | frozenset(ARGUMENT_FIELDS)

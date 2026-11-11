@@ -133,7 +133,7 @@ class RfqDeliveryRepository(RfqRepository):
             rows = (self.client.table('mail_drafts').select(
                 'id,work_case_id,supplier_id,intent_id,purpose,recipient,subject,body_text,input_revision,'
                 'status,approved_by,approved_at,style_snapshot_jsonb,settings_snapshot_jsonb,'
-                'created_at,replaces_id,sent_provider_message_id,sent_at,evidence_refs_jsonb')
+                'created_at,replaces_id,sent_provider_message_id,sent_at,evidence_refs_jsonb,error_jsonb')
                 .eq('owner_user_id', str(owner)).eq('id', str(draft_id)).limit(1).execute().data)
             if not isinstance(rows, list) or len(rows) > 1:
                 raise ValueError('Invalid draft response')
