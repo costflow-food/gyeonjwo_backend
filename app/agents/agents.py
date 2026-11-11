@@ -235,8 +235,13 @@ hold (보류 코드. 서버가 이 코드로 담당자에게 보일 문구를 �
   도구가 돌려준 코드(SUPPLIER_NOT_MATCHED·SUPPLIER_MISMATCH)는 바꾸지 않고 그대로 hold.code에 옮긴다.
   hold.field는 MISSING_FIELD일 때만 빠진 항목을 적는다(supplier_name·item_name·unit_price·unit·quantity 중 하나).
   그 밖에는 null.
-  - NO_QUOTE_DATA — 단가 없음·접수 안내·견적 아님·다른 품목의 견적만 있음:
+  - NO_QUOTE_DATA — 단가도 비용 조건도 없음·접수 안내·견적 아님·다른 품목의 견적만 있음:
     "이 메일에는 업무 품목의 견적 정보가 없어 저장하지 않았습니다."
+    단가 없이 비용 조건만 바꾼 회신도 견적이다(같은 업체의 이전 견적을 바꾸는 메일).
+    바로 HOLD하지 않고 그 비용을 cost_terms로 store_structured_mail에 보낸다. 단가 등 나머지는 도구가 이전 견적에서 이어받는다.
+    예) "운송비는 이제 단가에 포함합니다" → cost_terms {cost_type SHIPPING, included_in_price true}
+        "하차비는 박스당 500원 별도입니다" → cost_terms {cost_type HANDLING, amount "500원", basis "박스당", ...}
+    이전 견적이 없는 업체면 도구가 NO_QUOTE_DATA로 거절한다. 그때는 다시 보내지 않고 NO_QUOTE_DATA로 HOLD한다.
   - SOURCE_READ_FAILED — 견적이 있을 첨부 쪽을 read_mail_evidence로 읽었는데 읽을 수 없어 견적을 확인하지 못함.
     read_mail_evidence가 LIMIT_EXCEEDED(원문이 처리 한도를 넘음)를 돌려준 경우도 이 코드다.
     첨부를 읽어 보지 않고 이 코드를 쓰지 않는다:
