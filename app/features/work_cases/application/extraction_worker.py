@@ -10,6 +10,7 @@ from app.core.errors import ServiceError
 from app.core.leases import LeaseHeartbeat
 from app.features.mail.infrastructure.attachments import AttachmentRepository
 from app.features.work_cases.application.extraction_scope import CURRENT_SCOPE, ExtractionScope
+from app.core.logs import error_origin
 
 logger = logging.getLogger('uvicorn.error.case_extraction')
 
@@ -71,7 +72,8 @@ class ExtractionWorker:
             code = 'INPUT_REVISION_CHANGED' if isinstance(error, ServiceError) and error.code == 'REVISION_CONFLICT' else 'EXTRACTION_FAILED'
             # The DB token/revision guard prevents this from changing newer work.
             self.repo.fail(job, code)
-            logger.warning('extraction failed code=%s', code)
+            logger.warning('extraction failed code=%s job_id=%s case_id=%s %s', code, job.get('job_id'), job.get('case_id'),
+                           error_origin(error))
         return True
 
     def start(self):
@@ -93,8 +95,8 @@ class ExtractionWorker:
                             last_recovery = time.monotonic()
                         if self.process_once():
                             continue
-                    except Exception:
-                        logger.warning('extraction worker unavailable code=STORAGE_UNAVAILABLE')
+                    except Exception as error:
+                        logger.warning('extraction worker unavailable code=STORAGE_UNAVAILABLE %s', error_origin(error))
                     self.wake.wait(5)
                     self.wake.clear()
             finally:

@@ -13,7 +13,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.responses import ErrorEnvelope, api_error, service_error_response
 from app.core.config import get_settings
-from app.core.request_context import new_request_id
+from app.core.logs import configure_logging, error_origin, stack_summary
+from app.core.request_context import current_request_id, new_request_id
 from app.shared.infrastructure.db.contracts import OwnershipLost, WorkNotFound
 from app.core.errors import ServiceError
 from app.features.mail.infrastructure.gmail import verify_push
@@ -63,8 +64,20 @@ async def prime_work_case_reads(state):
         await to_thread.run_sync(connect, abandon_on_cancel=True)
 
 
+def route_template(request) -> str:
+    """요청 경로의 템플릿(/api/v1/work-cases/{case_id}). 실제 ID가 든 경로는 남기지 않는다."""
+    return getattr(request.scope.get('route'), 'path', 'unknown')
+
+
+def log_unexpected(request, error: BaseException, request_id: str) -> None:
+    """처리하지 못한 예외를 종류·코드 위치·DB 오류 코드와 함께 남긴다(메시지는 남기지 않는다)."""
+    logger.error('request failed status=503 code=UNHANDLED_EXCEPTION path_template=%s request_id=%s exception=%s %s stack=%s',
+                 route_template(request), request_id, type(error).__name__, error_origin(error), stack_summary(error))
+
+
 def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_service=None):
     settings = settings or get_settings()
+    configure_logging()
     require_startup_configuration(settings)
 
     @asynccontextmanager
@@ -148,10 +161,10 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
         if response is None:
             try:
                 response = await call_next(request)
-            except Exception:
+            except Exception as error:
                 # Handled here (not only in the outermost server-error handler) so the error keeps
                 # X-Request-ID, no-store and CORS headers like every other response.
-                logger.error('request failed path_template=%s', getattr(request.scope.get('route'), 'path', 'unknown'))
+                log_unexpected(request, error, request_id)
                 response = api_error('PROCESSING_UNAVAILABLE', '요청을 처리하지 못했습니다.', 503)
         response.headers['Cache-Control'] = 'private, no-store'
         response.headers['X-Content-Type-Options'] = 'nosniff'
@@ -167,6 +180,9 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
 
     @app.exception_handler(ServiceError)
     async def service_error(request, error):
+        if error.status >= 500:
+            logger.error('request failed status=%d code=%s path_template=%s request_id=%s %s', error.status, error.code,
+                         route_template(request), current_request_id(), error_origin(error))
         return service_error_response(error)
 
     @app.exception_handler(OwnershipLost)
@@ -192,7 +208,7 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
 
     @app.exception_handler(Exception)
     async def unexpected(request, error):
-        logger.error('request failed path_template=%s', getattr(request.scope.get('route'), 'path', 'unknown'))
+        log_unexpected(request, error, current_request_id())
         return api_error('PROCESSING_UNAVAILABLE', '요청을 처리하지 못했습니다.', 503)
 
     app.include_router(system_router)
