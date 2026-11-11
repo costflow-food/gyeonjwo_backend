@@ -1040,6 +1040,8 @@ def _resolve_supplier_name(store: QuoteStore, case_id: str, supplier_name: str |
 # SUPPLIER_NOT_MATCHED 뒤에 할 일. 법인 표기·부서·직책은 도구가 이미 빼고 찾았으므로 다시 보내지 않는다
 _SUPPLIER_NOT_MATCHED_NEXT = ('등록된 거래처에 없다. 다시 보내지 말고(업체명을 빼고 보내지도 않는다) '
                               '바로 HOLD로 최종 응답한다. hold.code는 SUPPLIER_NOT_MATCHED다.')
+# NO_QUOTE_DATA(이전 견적 없는 업체의 단가 없는 메일) 뒤에 할 일
+_NO_QUOTE_DATA_NEXT = '이 업체의 이전 견적이 없고 단가도 없다. 다시 보내지 말고 바로 HOLD로 최종 응답한다. hold.code는 NO_QUOTE_DATA다.'
 
 
 def _carry(previous: tuple[str, QuoteVersionRecord], values: dict, tiers: list, costs: list,
@@ -1063,9 +1065,18 @@ def _carry(previous: tuple[str, QuoteVersionRecord], values: dict, tiers: list, 
     if not price_given and previous_record.pricing_terms_jsonb.get('price_tiers') and not basis_changed:
         tiers = previous_record.pricing_terms_jsonb['price_tiers']
         carried.append('price_tiers')
-    if not costs and previous_record.cost_terms_jsonb:
-        costs = previous_record.cost_terms_jsonb
+    # 비용은 종류 단위로 합친다. 이번 메일이 말한 종류(포함·무료·없음 포함)는 이번 것만 쓰고, 말하지 않은 종류는 이어받는다 (KAN-211)
+    mentioned = {cost['cost_type'] for cost in costs}
+    kept = [cost for cost in previous_record.cost_terms_jsonb or [] if cost['cost_type'] not in mentioned]
+    if kept:
+        costs = costs + [{**cost, 'carried_from': cost.get('carried_from', previous_id)} for cost in kept]
         carried.append('cost_terms')
+    # OTHER는 서로 다른 비용(보관비·포장비 등)이 섞이므로, 이번 메일에 없는 이전 OTHER가 빠지면 담당자 확인으로 남긴다
+    def same(c): return c.get('amount'), c.get('basis'), c.get('included_in_price')   # 이전 버전 행은 키가 빠졌을 수 있다
+    new_other = {same(c) for c in costs if c['cost_type'] == 'OTHER'}
+    if 'OTHER' in mentioned and any(same(c) not in new_other
+                                    for c in previous_record.cost_terms_jsonb or [] if c['cost_type'] == 'OTHER'):
+        review.append({'field': 'cost_terms', 'code': 'OTHER_COST_DROPPED'})
     had_price = 'unit_price' in before or bool(previous_record.pricing_terms_jsonb.get('price_tiers'))
     if basis_changed and not price_given and had_price:
         review.append({'field': 'unit_price', 'code': 'PRICE_BASIS_CHANGED'})
@@ -1311,7 +1322,11 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
     carried = []
     if previous:
         tiers, costs, carried = _carry(previous, values, tiers, costs, review)
-    unit_missing = 'unit_price' in values and 'unit' not in values
+    elif 'unit_price' not in values and not tiers:
+        # 이전 견적이 없는 업체의 단가 없는 메일(비용 조건만 등)은 견적이 아니다. LLM은 업체별 이전 견적을 구분하지 못한다 (KAN-211)
+        missing = {'field': 'unit_price', 'code': 'NO_QUOTE_DATA'}
+        return {**_with_hints({'status': 'REJECTED', 'rejected': [missing]}, [missing]), 'next': _NO_QUOTE_DATA_NEXT}
+    unit_missing ='unit_price' in values and 'unit' not in values
     if unit_missing:
         # 단위 없는 단가는 비교할 수 없다. 견적 열에는 넣지 않고 메일 정규화 값에만 원문과 함께 남긴다
         del values['unit_price']
@@ -1503,12 +1518,21 @@ def _key(text) -> str:
 
 # 인증의 우리말 공식 이름 → 영문 약칭 (대조 키). 같은 인증으로 본다
 _CERT_ALIASES = {'식품안전관리인증기준': 'haccp', '식품안전관리인증': 'haccp', '안전관리인증기준': 'haccp', '해썹': 'haccp'}
+# 인증 이름 뒤에 붙는 말 ('식품 안전 관리 인증 보유', 'HACCP 인증서', 'ISO 22000 인증 획득'). 떼고 다시 대조한다
+_CERT_TAIL = re.compile(r'(보유|획득|취득|완료|있음|서|인증)$')
+
+
+def _cert_alias(key: str) -> str:
+    """공백을 뺀 인증 표기 하나의 대조 키. 공식 이름이면 약칭으로, 뒤에 붙은 말(보유·인증서 등)은 떼어 본다.
+    떼어 낼 말이 없거나 다 떼면 빈 글자가 되는 표기는 그대로 둔다."""
+    while key not in _CERT_ALIASES and (shorter := _CERT_TAIL.sub('', key)) and shorter != key:
+        key = shorter
+    return _CERT_ALIASES.get(key, key)
 
 
 def _cert_key(name) -> str:
     """필수 인증 이름 하나의 대조 키: 공백·대소문자를 무시하고, 우리말 공식 이름은 약칭으로."""
-    key = _key(name)
-    return _CERT_ALIASES.get(key, key)
+    return _cert_alias(_key(name))
 
 
 def _cert_keys(names) -> set[str]:
@@ -1519,7 +1543,7 @@ def _cert_keys(names) -> set[str]:
         for chunk in re.split(r'[,/·()（）\[\]]+', str(name)):
             if chunk.strip():
                 keys |= {_key(chunk), *(_key(word) for word in chunk.split())}
-    return {_CERT_ALIASES.get(key, key) for key in keys}
+    return {_cert_alias(key) for key in keys}
 
 
 def _required_names(conditions) -> list[str]:
