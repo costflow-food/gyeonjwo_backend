@@ -8,6 +8,9 @@ OCR 모드(`ocr <쪽 번호> <모델 폴더> <dpi>`): 그 한 쪽만 그림으�
 종료 코드 — 호출자(documents._pdf_worker)가 재시도 여부를 정한다
   0 성공 / 1 기술 오류(예상하지 못한 예외, 재시도 대상) / 2 내용 문제(암호화·한도 초과·손상, 재시도하지 않음)
   3 OCR 준비 안 됨(라이브러리·모델 파일 없음, 설정 문제라 재시도하지 않음)
+
+메모리 한도는 부모(documents._pdf_worker)가 이 프로세스의 실제 메모리를 지켜보다 넘으면 끝낸다. 주소 공간 상한(RLIMIT_AS)은
+쓰지 않는다: OCR 엔진(onnxruntime)이 실제보다 훨씬 큰 가상 메모리(A4 한 쪽에 약 5GB)를 잡아 정상 OCR까지 죽는다.
 """
 import io
 import json
@@ -18,6 +21,12 @@ from pypdf import PdfReader
 from pypdf.errors import PyPdfError
 
 MAX_PAGES = 100
+# OCR 렌더링 한 쪽의 픽셀 수 상한. A4 300dpi가 약 870만, A3 300dpi가 약 1,740만 픽셀이다.
+# 더 큰 쪽은 상한에 맞게 해상도를 낮춰 렌더링하고, MIN_RENDER_DPI보다 낮춰야 하면 읽지 않는다(내용 문제).
+# OCR 엔진은 어차피 긴 변 2,000픽셀로 줄여 읽으므로(rapidocr Global.max_side_len) 더 크게 그려도 얻는 것이 없다
+MAX_RENDER_PIXELS = 20_000_000
+MIN_RENDER_DPI = 100
+OCR_THREADS = 1
 EXIT_TECHNICAL, EXIT_CONTENT, EXIT_OCR_UNAVAILABLE = 1, 2, 3
 
 # 고정한 OCR 모델 (rapidocr 3.10.0 기본 모델 목록 기준, 파일은 SHA256으로 확인된다)
@@ -69,7 +78,11 @@ def _engine(model_dir: str):
     return RapidOCR(params={
         'Global.model_root_dir': model_dir, 'Global.use_cls': False, 'Global.log_level': 'error',
         'Det.ocr_version': OCRVersion.PPOCRV6, 'Det.model_type': ModelType.SMALL,
-        'Rec.lang_type': LangRec.KOREAN, 'Rec.ocr_version': OCRVersion.PPOCRV5, 'Rec.model_type': ModelType.MOBILE})
+        'Rec.lang_type': LangRec.KOREAN, 'Rec.ocr_version': OCRVersion.PPOCRV5, 'Rec.model_type': ModelType.MOBILE,
+        # 스레드는 하나. 기본값(-1)은 호스트 코어 수만큼 띄워, CPU 0.5개 컨테이너에서 A4 한 쪽이 82초 걸렸다(1개면 13초,
+        # 결과 같음. 2026-11-11 서버 이미지·--cpus=0.5 측정)
+        'EngineConfig.onnxruntime.intra_op_num_threads': OCR_THREADS,
+        'EngineConfig.onnxruntime.inter_op_num_threads': OCR_THREADS})
 
 
 def _lines(boxes, texts) -> str:
@@ -87,6 +100,18 @@ def _lines(boxes, texts) -> str:
     return '\n'.join(' '.join(text for *_, text in sorted(line, key=lambda i: i[1])) for line in lines)
 
 
+def render_scale(width_pt: float, height_pt: float, dpi: int) -> float:
+    """쪽 크기(포인트, 1/72인치)에 쓸 렌더링 배율. 픽셀 수가 MAX_RENDER_PIXELS를 넘으면 그 안에 들도록 배율을 낮춘다.
+    MIN_RENDER_DPI보다 낮춰야 할 만큼 큰 쪽(또는 크기를 알 수 없는 쪽)은 ContentError다."""
+    area = float(width_pt) * float(height_pt)
+    if not area > 0:
+        raise ContentError('PDF page size invalid')
+    scale = min(dpi / 72, (MAX_RENDER_PIXELS / area) ** 0.5)
+    if scale * 72 < MIN_RENDER_DPI:
+        raise ContentError('PDF page too large to render')
+    return scale
+
+
 def ocr_page(raw, number: int, model_dir: str, dpi: int) -> str:
     """number쪽(1부터)을 렌더링해 OCR한 텍스트."""
     if not 1 <= number <= len(_reader(raw).pages):
@@ -102,8 +127,10 @@ def ocr_page(raw, number: int, model_dir: str, dpi: int) -> str:
     except pdfium.PdfiumError:
         raise ContentError('PDF cannot be rendered') from None
     try:
+        page = pdf[number - 1]
+        scale = render_scale(*page.get_size(), dpi)
         # 회색조로 렌더링해 3채널로 넘긴다 (모델 입력이 BGR)
-        gray = pdf[number - 1].render(scale=dpi / 72, grayscale=True).to_numpy()
+        gray = page.render(scale=scale, grayscale=True).to_numpy()
     finally:
         pdf.close()
     image = gray[:, :, :1].repeat(3, axis=2) if gray.ndim == 3 else gray[:, :, None].repeat(3, axis=2)
@@ -130,7 +157,7 @@ def main(argv) -> int:
         else:
             text, pages = extract(raw)
             output = {'text': text, 'pages': pages}
-    except (ContentError, PyPdfError):
+    except (ContentError, PyPdfError, MemoryError):
         return EXIT_CONTENT
     except OcrUnavailable:
         return EXIT_OCR_UNAVAILABLE
