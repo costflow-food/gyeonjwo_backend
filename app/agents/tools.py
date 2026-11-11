@@ -51,6 +51,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Literal, Protocol
 
 from langchain.tools import ToolRuntime
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool, tool
 from pydantic import Field, StrictBool
 
@@ -211,6 +212,12 @@ def crawl_supplier_candidates(query: str, runtime: ToolRuntime[RunContext], limi
     request = SupplierSearchInput(query=query, limit=limit)
     if request.limit > 5:
         return {'status': 'ERROR', 'code': 'LIMIT_EXCEEDED', 'suppliers': []}
+    # 한 실행에서 웹 검색은 WEB_SEARCH_CALLS_PER_RUN번까지다(프롬프트의 "한 번"을 코드로도 지킨다). 외부 호출이라 비용·차단 위험이 있다
+    done = [m for m in ((getattr(runtime, 'state', None) or {}).get('messages') or [])
+            if isinstance(m, ToolMessage) and m.name == 'crawl_supplier_candidates']
+    if len(done) >= WEB_SEARCH_CALLS_PER_RUN:
+        return {'status': 'ERROR', 'code': 'SEARCH_LIMIT_REACHED', 'suppliers': [],
+                'hint': '웹 검색은 한 번만 한다. 다시 부르지 말고 앞선 결과로 최종 응답한다.'}
     case = _read(lambda: _case_store.get_work_case(context.case_id))
     if case is None:
         return {'status': 'CASE_NOT_FOUND', 'suppliers': []}
@@ -306,8 +313,19 @@ _DOTTED_DATE = re.compile(r'(\d{4})\s*[./]\s*(\d{1,2})\s*[./]\s*(\d{1,2})\s*\.?'
 _INSTRUCTION = re.compile(r'(?i)(?<![a-z])(?:AI|LLM|GPT|assistant|chatbot)(?![a-z])|인공지능|챗봇|어시스턴트'
                           r'|시스템\s*(?:안내|지시|메시지|프롬프트)|system\s*prompt|이\s*메일을\s*처리하는'
                           r'|지시(?:를|는)?\s*무시|ignore\s+(?:all|previous|the\s+above)')
+# 글자 항목(text)의 저장 값 길이 상한. 원문에서 값 부분만 옮기면 넘지 않는 길이다. 넘으면 TOO_LONG으로 거절한다
+TEXT_FIELD_LIMITS = {'supplier_name': 60, 'item_name': 60, 'specification': 120, 'origin': 60, 'certifications': 120,
+                     'tax_terms': 120, 'lead_time': 120, 'increase_reason': 300}
+NOTE_TEXT_LIMIT = 300       # 품목 비고 원문 한 문장
+COST_TEXT_LIMIT = 300       # 비용 조건 원문 구절
+# 밖으로 나가는 메일(견적 요청·보완 질문·역제안)에 넣는 업무 값의 길이 상한과 지울 주소 표기
+MAIL_VALUE_LIMITS = {'품목': 60, '규격': 120, '조건': 150}
+# 한 실행(②)에서 웹 검색(crawl_supplier_candidates)을 부를 수 있는 횟수
+WEB_SEARCH_CALLS_PER_RUN = 1
+_URL = re.compile(r'(?i)\b(?:https?://|www\.)\S+')
 # 거절·조정 코드별로 LLM이 다음 호출에서 고칠 방법
 _HINTS = {
+    'TOO_LONG': '그 항목의 값 부분만 짧게 옮긴다. 앞뒤 문장·설명은 넣지 않는다. 품목명·규격은 원문 표기 그대로 핵심만 쓴다.',
     'SOURCE_MISMATCH': '원문 표기 그대로 값 부분만 옮긴다. 원문에 없는 값은 null로 보낸다.',
     'MISSING_EVIDENCE': '값을 읽은 메일의 evidence{mail_id, part, page}를 붙인다. 원문에서 그 항목을 직접 읽지 않았다면 '
                         '(다른 항목의 값을 옮겨 쓴 경우 등) 그 항목은 빼고 다시 보낸다.',
@@ -525,7 +543,7 @@ def _parse(kind: str, field_name: str, raw: str, unit_code: str | None = None) -
         return _unit(raw, field_name, unit_code)
     if kind == 'currency':
         return _CURRENCIES.get(raw.strip(), raw.strip().upper())
-    return raw.strip()
+    return ' '.join(raw.split())        # 글자 항목: 표의 줄바꿈·여러 공백은 한 칸으로 (원문 대조는 raw_value로 한다)
 
 
 def _normalized(text: str, numeric: bool) -> str:
@@ -647,6 +665,8 @@ def _costs(check, costs: list[CostTerm], rejected: list, review: list) -> list[d
     out = []
     for index, cost in enumerate(costs):
         issue, source = check(cost.evidence, cost.source_text)
+        if issue is None and len(cost.source_text) > COST_TEXT_LIMIT:
+            issue = 'TOO_LONG'
         amount_text, basis = cost.amount, cost.basis
         for text, numeric in ((amount_text, amount_text and _compact(amount_text) not in _ZERO_AMOUNTS),
                               (basis, False), (cost.payer, False)):
@@ -837,6 +857,14 @@ def _registered_item(items: list[dict], current: dict, case: dict) -> dict | Non
     return found[0] if len(found) == 1 else None
 
 
+def _item_name_variant(name: str, case_item: str | None, item: dict | None) -> bool:
+    """견적의 품목명이 업무 품목명과도, 그 업체의 등록 품목명과도 다른지(담당자 확인 대상).
+    업무 품목명이 아직 없으면 확인하지 않는다. 띄어쓰기·호환 문자 차이는 같은 표기로 본다."""
+    if not case_item:
+        return False
+    return _compact(name) not in {_compact(case_item), _compact((item or {}).get('item_name') or case_item)}
+
+
 def _case_conditions(case: dict, current: dict, item: dict | None, initial_mails: set) -> dict | None:
     """이번 메일 값으로 채울 업무 조건. 업무에 아직 없는 것만 채운다.
     품목·규격은 처음 추출할 때(등록 품목이 확인되면 그 품목 키도) 채운다.
@@ -909,6 +937,8 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
                 value = _parse(kind, field.field_name, field.raw_value, field.unit_code)
             except ReviewRequired as error:
                 issue = error.issue['code']
+        if issue is None and len(value) > TEXT_FIELD_LIMITS.get(field.field_name, len(value)):
+            issue = 'TOO_LONG'
         if issue:
             rejected.append({'field': field.field_name, 'code': issue})
             continue
@@ -926,6 +956,8 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
     notes = []
     for index, note in enumerate(item_notes):
         issue, source = check(note.evidence, note.text)
+        if issue is None and len(note.text) > NOTE_TEXT_LIMIT:
+            issue = 'TOO_LONG'
         if issue:
             rejected.append({'field': f'item_notes[{index}]', 'code': issue})
         elif note.evidence.mail_id in check.instruction_mails and _INSTRUCTION.search(note.text):
@@ -940,10 +972,6 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         rejected.append({'field': 'currency', 'code': 'CURRENCY_MISMATCH'})
     elif price_currency and 'currency' not in values:
         values['currency'] = {**values['unit_price'], 'value': price_currency}
-    # 같은 품목인지는 LLM이 판단한다(업무 품목의 견적만 보낸다). 이름 표기가 업무와 다르면 담당자 확인만 남긴다
-    case_item = case.get('item_name')
-    if case_item and 'item_name' in values and _compact(values['item_name']['value']) != _compact(case_item):
-        review.append({'field': 'item_name', 'code': 'ITEM_NAME_VARIANT'})
     # 이번 호출의 모든 근거는 한 업체의 메일이어야 한다
     case_mails = {mail['mail_id']: mail for mail in _read(lambda: store.list_case_mails(case_id))}
     evidence_mails = {entry['mail_id'] for entry in [*values.values(), *tiers, *costs, *notes]}
@@ -1003,6 +1031,10 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
     quantity_units = {f'{name}_unit': values[name]['quantity_unit'] for name in sorted(_QUANTITY_FIELDS)
                       if values.get(name, {}).get('quantity_unit')}
     item = _registered_item(_read(lambda: store.list_supplier_items(case_id, supplier_id)) or [], current, case)
+    # 같은 품목인지는 LLM이 판단한다(업무 품목의 견적만 보낸다). 이름 표기가 업무와도, 그 업체의 등록 품목명과도 다르면
+    # 담당자 확인만 남긴다 (우리가 보낸 메일의 등록 품목명으로 회신한 경우는 확인하지 않는다)
+    if 'item_name' in values and _item_name_variant(values['item_name']['value'], case.get('item_name'), item):
+        review.append({'field': 'item_name', 'code': 'ITEM_NAME_VARIANT'})
     initial_mails = {mail_id for mail_id, mail in case_mails.items() if mail.get('message_role') == 'INITIAL'}
     conditions = _case_conditions(case, current, item, initial_mails)
     record = QuoteVersionRecord(
@@ -1511,9 +1543,35 @@ def _style_values(style: dict) -> dict:
             '서명': str(style.get('signature') or '').strip()}
 
 
+def mail_value(text, limit: int) -> str:
+    """밖으로 나가는 메일에 넣는 업무 값. 메일에서 읽은 값이 그대로 다른 업체에 가지 않게 한 줄로 합치고,
+    주소(URL) 표기를 지우고, limit자를 넘으면 자른다."""
+    text = ' '.join(_URL.sub('', str(text or '')).split())
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + '…'
+
+
+def recipient_item_name(store, case: dict, supplier_id: str | None) -> str:
+    """메일 받는 업체에게 쓸 품목명. 그 업체의 등록 품목 중 업무 품목 키와 같은 것이 하나면 그 등록 이름,
+    아니면 업무 품목명(메일에서 읽은 값)이다. 어느 쪽이든 mail_value로 정제한다."""
+    name, key = case.get('item_name'), case.get('standardized_item_key')
+    if key and supplier_id and hasattr(store, 'list_supplier_items'):
+        items = _read(lambda: store.list_supplier_items(case['id'], supplier_id)) or []
+        names = {item['item_name'] for item in items
+                 if item.get('standardized_item_key') == key and (item.get('item_name') or '').strip()}
+        if len(names) == 1:
+            name = names.pop()
+    return mail_value(name, MAIL_VALUE_LIMITS['품목']) or '요청 품목'
+
+
 def _request_lines(facts: dict) -> str:
-    """요청 내용 목록. 값이 있는 항목만 쓴다(없는 수량·납기를 '협의'로 채워 문장을 만들지 않는다)."""
-    return '\n'.join(f'- {label}: {facts[label]}' for label in ('품목', '규격', '수량', '납기일') if facts.get(label))
+    """요청 내용 목록. 값이 있는 항목만 쓴다(없는 수량·납기를 '협의'로 채워 문장을 만들지 않는다).
+    품목·규격은 메일에서 읽은 값일 수 있어 mail_value로 정제한다."""
+    lines = []
+    for label in ('품목', '규격', '수량', '납기일'):
+        value = mail_value(facts.get(label), MAIL_VALUE_LIMITS.get(label, 60))
+        if value:
+            lines.append(f'- {label}: {value}')
+    return '\n'.join(lines)
 
 
 class SupplierQuestions(StrictModel):
@@ -1587,8 +1645,8 @@ def save_mail_drafts(store: MailDraftStore, context: RunContext, purpose: str, s
 
     facts = found['rfq_facts']
     style = _read(lambda: store.current_send_settings(context.case_id)) or {}
-    common = {'회신기한': REPLY_DEADLINE, '품목': facts['품목'],
-              '요청내용': _request_lines(facts), **_style_values(style)}
+    case = (_read(lambda: store.get_work_case(context.case_id)) or {}) | {'id': context.case_id}
+    common = {'회신기한': REPLY_DEADLINE, **_style_values(style)}
     drafts, rejected = [], []
     for supplier_id in supplier_ids:
         candidate = candidates.get(supplier_id)
@@ -1601,7 +1659,9 @@ def save_mail_drafts(store: MailDraftStore, context: RunContext, purpose: str, s
         if not recipient:
             rejected.append({'supplier_id': supplier_id, 'code': 'NO_CONTACT'})
             continue
-        values = {**common, '업체명': supplier.get('name') or '담당자',
+        item_name = recipient_item_name(store, case, supplier_id)
+        values = {**common, '업체명': supplier.get('name') or '담당자', '품목': item_name,
+                  '요청내용': _request_lines(facts | {'품목': item_name}),
                   '질문목록': '\n'.join(f'{n}. {q}' for n, q in enumerate(
                       _questions(candidate['checklist'], _origin_question(chosen.get(supplier_id), candidate.get('origin')),
                                  bool(facts.get('납기일'))), 1))}
@@ -2224,10 +2284,9 @@ def save_clarification_drafts(store: PriorityStore, context: RunContext, request
     if compared['status'] != 'OK':
         return {'status': compared['status']}
     suppliers = {s['supplier_id']: s for s in compared['suppliers']}
-    case = _read(lambda: store.get_work_case(context.case_id))
+    case = (_read(lambda: store.get_work_case(context.case_id)) or {}) | {'id': context.case_id}
     style = _read(lambda: store.current_send_settings(context.case_id)) or {}
-    common = {'회신기한': REPLY_DEADLINE,
-              '품목': case.get('item_name') or '요청 품목', **_style_values(style)}
+    common = {'회신기한': REPLY_DEADLINE, **_style_values(style)}
     drafts, rejected = [], []
     for request in requests:
         supplier = suppliers.get(request.supplier_id)
@@ -2248,7 +2307,8 @@ def save_clarification_drafts(store: PriorityStore, context: RunContext, request
             continue
         lines = '\n'.join(f'{n}. {clarify_question(field)}' for n, field in enumerate(fields, 1))
         subject, body = _mail_text(CLARIFY_SUBJECT, CLARIFY_BODY,
-                                   {**common, '업체명': contact.get('name') or '담당자', '질문목록': lines})
+                                   {**common, '업체명': contact.get('name') or '담당자', '질문목록': lines,
+                                    '품목': recipient_item_name(store, case, request.supplier_id)})
         key = hashlib.sha256(
             f'{context.case_id}|{context.input_revision}|CLARIFICATION|{request.supplier_id}'.encode()).hexdigest()
         record = MailDraftRecord(
@@ -2703,11 +2763,11 @@ def save_counter_offer_draft(store: CounterOfferStore, context: RunContext, targ
     recipient = (contact.get('contact_email') or '').strip()
     if not recipient:
         return {'status': 'REJECTED', 'code': 'NO_CONTACT'}
-    case = _read(lambda: store.get_work_case(context.case_id))
+    case = (_read(lambda: store.get_work_case(context.case_id)) or {}) | {'id': context.case_id}
     style = _read(lambda: store.current_send_settings(context.case_id)) or {}
-    lines = '\n'.join(f'- {text.strip()}' for text in conditions if text.strip())
+    lines = '\n'.join(f'- {text}' for text in (mail_value(c, MAIL_VALUE_LIMITS['조건']) for c in conditions) if text)
     subject, body = _mail_text(COUNTER_SUBJECT, COUNTER_BODY, {
-        '회신기한': REPLY_DEADLINE, '품목': case.get('item_name') or '요청 품목',
+        '회신기한': REPLY_DEADLINE, '품목': recipient_item_name(store, case, numbers['supplier_id']),
         '업체명': contact.get('name') or '담당자', '목표단가': f"{Decimal(checked['target_unit_price']):,}",
         '단위': numbers['unit'] or '', '조건목록': lines, **_style_values(style)})
     key = hashlib.sha256(f"{context.case_id}|{context.input_revision}|COUNTER_OFFER|{numbers['supplier_id']}|"
