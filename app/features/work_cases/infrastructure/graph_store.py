@@ -169,7 +169,7 @@ class GraphStore(AgentStore):
 
     def incumbent_supplier_ids(self, case_id):
         case = self.get_work_case(case_id)
-        # Reply suppliers must not become incumbents when REPLY is added later.
+        # 기존 업체는 인상 통보(최초 메일) 견적의 업체만이다. 회신을 보낸 업체는 기존 업체가 아니다
         rows = self.rows(self.repo.client.table('quote_versions').select('supplier_id')
             .eq('owner_user_id', self.scope.owner).eq('work_case_id', str(case_id))
             .eq('source_mail_id', case['initial_mail_id']).limit(1000))
@@ -187,7 +187,7 @@ class GraphStore(AgentStore):
                 raise ValueError('Invalid candidate keyword')
             if not item_name_key(word):
                 continue
-            # 띄어쓰기 무시(KAN-192): '냉동망고'로 '냉동 망고' 등록 품목도 찾는다. ilike는 글자 사이 공백을 허용하는
+            # 띄어쓰기 무시: '냉동망고'로 '냉동 망고' 등록 품목도 찾는다. ilike는 글자 사이 공백을 허용하는
             # 느슨한 1차 조회이고, 실제 판정은 공백을 뺀 이름에 검색어가 들어 있는지로 다시 거른다.
             rows = self.rows(self.repo.client.table('supplier_items').select(ITEM_COLUMNS)
                 .eq('owner_user_id', self.scope.owner).ilike('item_name', spaced_ilike_pattern(word))

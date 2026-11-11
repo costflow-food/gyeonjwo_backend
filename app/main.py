@@ -1,5 +1,6 @@
 """Application assembly. Feature endpoints live under app/features/*/api."""
 import asyncio
+import hashlib
 import logging
 import math
 import threading
@@ -13,7 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.responses import ErrorEnvelope, api_error, service_error_response
 from app.core.config import get_settings
-from app.core.request_context import new_request_id
+from app.core.logs import configure_logging, error_origin, stack_summary
+from app.core.request_context import current_request_id, new_request_id
 from app.shared.infrastructure.db.contracts import OwnershipLost, WorkNotFound
 from app.core.errors import ServiceError
 from app.features.mail.infrastructure.gmail import verify_push
@@ -39,7 +41,11 @@ from app.features.system.application.workers import (
 
 logger = logging.getLogger('gyeonjwo')
 RATE_WINDOW_SECONDS = 60
+# 로그인한 요청은 토큰(사용자)마다, 토큰 없는 요청은 IP마다 이만큼. 같은 사무실(같은 IP)의 여러 사용자가 화면 폴링
+# (목록 15초, 진행 상황·초안 3초)을 합산당해 429가 나지 않게 사용자 단위로 센다
 RATE_LIMIT_PER_WINDOW = 120
+# 토큰을 바꿔 가며 사용자 단위 제한을 피하지 못하게 IP 전체에도 넉넉한 상한을 둔다
+RATE_LIMIT_PER_IP_WINDOW = 600
 RATE_LIMIT_EXEMPT_PATHS = frozenset({'/api/v1/webhooks/gmail'})
 
 async def prime_work_case_reads(state):
@@ -63,8 +69,29 @@ async def prime_work_case_reads(state):
         await to_thread.run_sync(connect, abandon_on_cancel=True)
 
 
+def bearer_token(header: str | None) -> str | None:
+    """Authorization: Bearer <토큰>의 토큰. 없거나 형식이 다르면 None."""
+    if not header:
+        return None
+    scheme, _, token = header.partition(' ')
+    token = token.strip()
+    return token if scheme.lower() == 'bearer' and token else None
+
+
+def route_template(request) -> str:
+    """요청 경로의 템플릿(/api/v1/work-cases/{case_id}). 실제 ID가 든 경로는 남기지 않는다."""
+    return getattr(request.scope.get('route'), 'path', 'unknown')
+
+
+def log_unexpected(request, error: BaseException, request_id: str) -> None:
+    """처리하지 못한 예외를 종류·코드 위치·DB 오류 코드와 함께 남긴다(메시지는 남기지 않는다)."""
+    logger.error('request failed status=503 code=UNHANDLED_EXCEPTION path_template=%s request_id=%s exception=%s %s stack=%s',
+                 route_template(request), request_id, type(error).__name__, error_origin(error), stack_summary(error))
+
+
 def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_service=None):
     settings = settings or get_settings()
+    configure_logging()
     require_startup_configuration(settings)
 
     @asynccontextmanager
@@ -112,6 +139,7 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
                   responses=common_errors)
     app.state.settings, app.state.services = settings, services
     app.state.mailbox_service = mailbox_service
+    app.state.membership_checker = None
     app.state.connected_mailbox_worker = None
     app.state.extraction_worker = None
     app.state.graph_startup_code = 'GRAPH_RUNTIME_UNAVAILABLE'
@@ -132,25 +160,34 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
         response = None
         # Google Pub/Sub pushes are authenticated separately; throttling them would only trigger redelivery storms.
         if request.url.path not in RATE_LIMIT_EXEMPT_PATHS:
-            key = request.client.host if request.client else 'unknown'
+            host = request.client.host if request.client else 'unknown'
+            token = bearer_token(request.headers.get('authorization'))
+            # 토큰은 이 단계에서 검증하지 않는다(검증은 require_google_user). 묶음 키로만 쓰고 원문은 남기지 않는다
+            limits = [('ip:' + host, RATE_LIMIT_PER_IP_WINDOW)]
+            limits.append(('user:' + hashlib.sha256(token.encode()).hexdigest()[:32], RATE_LIMIT_PER_WINDOW) if token
+                          else ('ip-anon:' + host, RATE_LIMIT_PER_WINDOW))
+            blocked = None
             with rate_lock:
                 if len(rates) > 5000:
                     for old in [k for k, value in rates.items() if now - value[0] > RATE_WINDOW_SECONDS]:
                         del rates[old]
-                started, count = rates.get(key, (now, 0))
-                if now - started >= RATE_WINDOW_SECONDS:
-                    started, count = now, 0
-                rates[key] = started, count + 1
-            if count >= RATE_LIMIT_PER_WINDOW:
-                retry_after = max(1, math.ceil(RATE_WINDOW_SECONDS - (now - started)))
+                for key, limit in limits:
+                    started, count = rates.get(key, (now, 0))
+                    if now - started >= RATE_WINDOW_SECONDS:
+                        started, count = now, 0
+                    rates[key] = started, count + 1
+                    if count >= limit and blocked is None:
+                        blocked = started
+            if blocked is not None:
+                retry_after = max(1, math.ceil(RATE_WINDOW_SECONDS - (now - blocked)))
                 response = api_error('RATE_LIMITED', '요청이 너무 많습니다.', 429, headers={'Retry-After': str(retry_after)})
         if response is None:
             try:
                 response = await call_next(request)
-            except Exception:
+            except Exception as error:
                 # Handled here (not only in the outermost server-error handler) so the error keeps
                 # X-Request-ID, no-store and CORS headers like every other response.
-                logger.error('request failed path_template=%s', getattr(request.scope.get('route'), 'path', 'unknown'))
+                log_unexpected(request, error, request_id)
                 response = api_error('PROCESSING_UNAVAILABLE', '요청을 처리하지 못했습니다.', 503)
         response.headers['Cache-Control'] = 'private, no-store'
         response.headers['X-Content-Type-Options'] = 'nosniff'
@@ -166,6 +203,9 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
 
     @app.exception_handler(ServiceError)
     async def service_error(request, error):
+        if error.status >= 500:
+            logger.error('request failed status=%d code=%s path_template=%s request_id=%s %s', error.status, error.code,
+                         route_template(request), current_request_id(), error_origin(error))
         return service_error_response(error)
 
     @app.exception_handler(OwnershipLost)
@@ -191,7 +231,7 @@ def create_app(settings=None, services=None, push_verifier=verify_push, mailbox_
 
     @app.exception_handler(Exception)
     async def unexpected(request, error):
-        logger.error('request failed path_template=%s', getattr(request.scope.get('route'), 'path', 'unknown'))
+        log_unexpected(request, error, current_request_id())
         return api_error('PROCESSING_UNAVAILABLE', '요청을 처리하지 못했습니다.', 503)
 
     app.include_router(system_router)

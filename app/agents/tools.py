@@ -99,7 +99,7 @@ def tools_for(role: AgentRole) -> list[BaseTool]:
 #   06 work_cases·mail_messages·agent_runs 기준. 업무·revision·실행 ID는 runtime.context(RunContext),
 #   역할은 build_agent가 정한 에이전트 이름에서 읽는다 (LLM 인자 아님).
 
-# read_mail_evidence가 한 번에 돌려주는 원문 길이 (제안값). 단가표 한 쪽을 대개 한 번에 읽어 도구 호출 한도를 아낀다 (KAN-212)
+# read_mail_evidence가 한 번에 돌려주는 원문 길이 (제안값). 단가표 한 쪽을 대개 한 번에 읽어 도구 호출 한도를 아낀다
 MAX_EVIDENCE_CHARS = 12000
 _CASE_KEYS = ('input_revision', 'item_name', 'specification', 'mandatory_conditions', 'quantity', 'unit', 'due_date',
               'policy', 'latest_quote_version_ids')
@@ -171,7 +171,7 @@ def load_evidence(store: CaseStore, context: RunContext, mail_id: str, part: str
     except ServiceError as error:
         if error.code != 'EXTRACTION_DOCUMENT_LIMIT':
             raise
-        # 업무 한 번 실행에서 읽을 수 있는 원문 양(12만 자)을 넘었다. 일부만 읽고 판단하지 않는다 (KAN-212)
+        # 업무 한 번 실행에서 읽을 수 있는 원문 양(12만 자)을 넘었다. 일부만 읽고 판단하지 않는다
         return {'status': 'LIMIT_EXCEEDED', 'mail_id': mail_id, 'part': part, 'page': page,
                 'next': '원문이 처리 한도를 넘었다. 다른 쪽을 더 읽지 말고 바로 HOLD로 최종 응답한다. '
                         'hold.code가 있으면 SOURCE_READ_FAILED로 하고, hold가 없는 역할은 reason에 SOURCE_READ_FAILED를 함께 적는다.'}
@@ -198,7 +198,7 @@ def load_evidence(store: CaseStore, context: RunContext, mail_id: str, part: str
     result = {'status': 'OK', 'mail_id': mail_id, 'part': part, 'page': page, 'offset': offset,
               'text': text[offset:end], 'location': item.get('location'), 'truncated': len(text) > end,
               'empty': not text.strip(), 'text_source': item.get('text_source') or 'TEXT'}
-    if len(text) > end:     # 긴 단가표의 뒷부분은 같은 쪽을 next_offset부터 다시 읽는다 (KAN-212)
+    if len(text) > end:     # 긴 단가표의 뒷부분은 같은 쪽을 next_offset부터 다시 읽는다
         result['next_offset'] = end
     return result
 
@@ -300,7 +300,7 @@ QUOTE_FIELDS = {
     'previous_unit_price': ('price', 'mail'),
     'increase_reason': ('text', 'mail'),
 }
-# fields가 아니라 각 인자로 받는 항목. fields에 null로 들어오면 무시하고, 값이 있으면 UNKNOWN_FIELD로 거절한다
+# fields가 아니라 각 인자로 받는 항목. fields에 넣으면 값이 null이어도 UNKNOWN_FIELD로 거절한다
 ARGUMENT_FIELDS = ('price_tiers', 'cost_terms', 'item_notes')
 # ①의 unknown_fields와 ③④⑤가 넘기는 recheck_fields에 쓸 수 있는 이름
 EXTRACTION_FIELD_NAMES = frozenset(QUOTE_FIELDS) | frozenset(ARGUMENT_FIELDS)
@@ -311,7 +311,7 @@ _CURRENCIES = {'원': 'KRW', '₩': 'KRW', 'KRW': 'KRW', '원화': 'KRW', '원(K
 _NUMBER = r'(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?'
 _FOREIGN_PRICE = re.compile(rf'(?P<pre>US\$|\$|€|¥|₩|USD|EUR|JPY|CNY|KRW)?\s*(?P<num>{_NUMBER})\s*'
                             r'(?P<post>USD|EUR|JPY|CNY|KRW|달러|유로|엔|위안)?')
-# 금액 배수 표기 (KAN-208). 숫자 뒤('9,700천원'·'970만원')나 표 머리글('(단위: 천원)'·'금액(천원)')에 온다.
+# 금액 배수 표기. 숫자 뒤('9,700천원'·'970만원')나 표 머리글('(단위: 천원)'·'금액(천원)')에 온다.
 # 머리글 패턴은 공백·천 단위 쉼표를 뺀 원문 줄(_normalized)에 쓴다
 _SCALES = {'천': 1000, '만': 10_000, '백만': 1_000_000, '억': 100_000_000}
 _SCALE_WORD = r'(백만|천|만|억)'
@@ -320,7 +320,7 @@ _SCALE_HEADER = rf'단위[:：]?\(?{_SCALE_WORD}원|\({_SCALE_WORD}원\)'
 _FOREIGN_WORD = r'(?:US\$|\$|€|¥|USD|EUR|JPY|CNY|달러|유로|엔|위안)'
 _CURRENCY_HEADER = rf'단위[:：]?\(?{_FOREIGN_WORD}|\({_FOREIGN_WORD}\)'
 FOUND_TEXT_LIMIT = 120      # 거절 힌트(found)로 돌려주는 원문 한 줄의 길이 상한
-# 단가 표기 허용 목록 (KAN-208). 원문 단가 숫자 바로 뒤에 올 수 있는 표기: 줄 끝·구분 기호, 원·통화, 배수+원, per, 조사
+# 단가 표기 허용 목록. 원문 단가 숫자 바로 뒤에 올 수 있는 표기: 줄 끝·구분 기호, 원·통화, 배수+원, per, 조사
 _NOTATION_AFTER_OK = (r"(?:$|[^A-Za-z가-힣$€¥₩£₹₽'’千円]|원|KRW|USD|EUR|JPY|CNY|달러|유로|위안|엔(?![가-힣])"
                       rf'|{_SCALE_WORD}원|per|PER|VAT|vat|(?:으로|로|에서|에|입니다|이며|이고|부터|까지|씩|이상|이하|미만|초과)'
                       r'(?![가-힣]))')
@@ -335,7 +335,7 @@ _QUANTITY_AFTER = r'(?:kg|KG|Kg|g|t|톤|박스|box|Box|BOX|상자|개|EA|ea|팩|
 _UNKNOWN_SCALE = r"['’]000|\(000\)|千|[Tt]housand|THOUSAND"
 _UNIT_HEADER = r'[(\[]단위[:：]?(?P<a>[^)\]]*)[)\]]|단위[:：](?P<b>[^)\],|]*)'
 # 배수(천원·만원)를 적용한 단가가 기준 단가(같은 메일의 인상 전 단가·같은 업체 이전 견적)와 이 배수를 넘게 차이 나면
-# 거절한다. 배수 없이 원문 그대로 읽은 단가는 비교하지 않는다 (2026-11-11 사용자 결정 5배)
+# 거절한다. 배수 없이 원문 그대로 읽은 단가는 비교하지 않는다
 PRICE_REFERENCE_RATIO = Decimal(5)
 # 비용이 없다고 원문에 적힌 표기. 0원으로 저장하고 원문 구절은 그대로 남긴다 (적혀 있지 않은 비용은 0원이 아니라 미확인)
 _ZERO_AMOUNTS = {'무료', '무상', '없음', '없습니다', '해당없음'}
@@ -394,7 +394,7 @@ _HINTS = {
     'TIER_BOUND_MISPLACED': '구간마다 "이상·초과·부터" 경계는 min_quantity, "미만·이하·까지" 경계는 max_quantity에 나눠 넣는다.',
     'TIER_OVERLAP': '단가 구간의 경계를 원문에서 다시 확인한다.',
     'CURRENCY_MISMATCH': '단가의 통화 표기와 currency가 다르다. 원문을 다시 확인한다.',
-    # KAN-208: 아래 단가 코드들은 rejected 항목에 sent(보낸 값)·found(문제를 찾은 원문 줄 {mail_id, part, page, line, text})가 붙는다
+    # 아래 단가 코드들은 rejected 항목에 sent(보낸 값)·found(문제를 찾은 원문 줄 {mail_id, part, page, line, text})가 붙는다
     'PRICE_SCALE_MISSING': '원문 found 줄에 천원·만원 같은 배수 표기가 있다. 숫자 뒤에 붙어 있으면 단가를 "9,700천원"처럼 '
                            '배수까지 옮기고, 표 머리글에만 있으면(예: "(단위: 천원)") 단가는 숫자 그대로 두고 '
                            'price_scale_text에 그 머리글 구절을 넣어 다시 보낸다.',
@@ -734,7 +734,7 @@ def _known_header(token: str) -> bool:
 
 
 def _notation_issue(check: _SourceCheck, evidence: EvidenceRef, raw: str, number: str) -> dict | None:
-    """원문에서 단가 숫자가 나오는 자리마다 바로 앞뒤 표기가 아는 표기인지 (허용 목록, KAN-208).
+    """원문에서 단가 숫자가 나오는 자리마다 바로 앞뒤 표기가 아는 표기인지 (허용 목록).
     모르는 표기가 한 자리라도 있으면 PRICE_NOTATION_UNKNOWN. 목록에 없는 배수·통화 표기('9.7k', '9,700천', 'HK$',
     '千円')가 숫자만 읽혀 저장되지 않게 한다. 숫자 뒤가 수량 단위인 자리('1,000kg')는 단가가 아니라 건너뛴다."""
     for index, line in enumerate(check.lines_of(evidence)):
@@ -757,7 +757,7 @@ def _notation_issue(check: _SourceCheck, evidence: EvidenceRef, raw: str, number
 
 def _price_issue(check: _SourceCheck, evidence: EvidenceRef, raw: str, scale_text: str | None,
                  foreign_given: bool) -> tuple[int, dict | None]:
-    """단가의 배수·통화 표기를 원문과 대조한다 (KAN-208). 원문 대조를 통과한 단가에만 부른다. 반환: (곱할 배수, 거절 항목).
+    """단가의 배수·통화 표기를 원문과 대조한다. 원문 대조를 통과한 단가에만 부른다. 반환: (곱할 배수, 거절 항목).
     1) 원문 단가 줄에서 숫자 앞뒤 표기가 아는 표기여야 한다(허용 목록).
     2) raw에 원·통화·배수가 적혀 있으면 원문 대조로 확인된 표기다.
     3) 숫자만 왔는데 원문에서 그 숫자 바로 뒤에 '천원'·통화가 붙어 있거나, 같은 표 덩어리에 '(단위: 천원)'·'(단위: USD)'
@@ -821,7 +821,7 @@ def _scale_applied(raw: str, entry: dict) -> bool:
 def _implausible_prices(check: _SourceCheck, values: dict, refs: dict, tiers: list[dict],
                         sent_tiers: list['PriceTier'], previous) -> list[dict]:
     """배수를 적용한 단가·구간 단가 중 기준 단가와 PRICE_REFERENCE_RATIO배 넘게 차이 나는 것 (PRICE_IMPLAUSIBLE).
-    배수 없이 원문 그대로 읽은 단가는 비교하지 않는다. 실제로 크게 오른 단가를 막지 않기 위해서다 (2026-11-11 사용자 결정)."""
+    배수 없이 원문 그대로 읽은 단가는 비교하지 않는다. 실제로 크게 오른 단가를 막지 않기 위해서다."""
     reference = _reference_price(values, previous)
     if reference is None:
         return []
@@ -855,7 +855,7 @@ def _attached_unit(check: _SourceCheck, evidence: EvidenceRef, raw: str) -> tupl
 
 def _unit_pair_issue(check: _SourceCheck, price_ref: EvidenceRef, price_raw: str, unit_ref: EvidenceRef,
                      unit: dict) -> dict | None:
-    """단가와 단위가 짝인지 (KAN-208). 원문에서 단가 바로 뒤에 단위가 붙어 있으면('54,500원/박스') 그 단위여야 하고,
+    """단가와 단위가 짝인지. 원문에서 단가 바로 뒤에 단위가 붙어 있으면('54,500원/박스') 그 단위여야 하고,
     붙어 있지 않으면 단위가 단가와 같은 줄이나 단위 머리글('원/kg'·'kg당'·'단위: kg')에 있어야 한다.
     숫자 바로 뒤의 단위('박스당 10kg'의 kg)는 수량이라 단가의 단위로 보지 않는다."""
     attached = _attached_unit(check, price_ref, price_raw)
@@ -897,7 +897,7 @@ def _misplaced(low: str | None, high: str | None) -> bool:
 
 def _tiers(check, tiers: list[PriceTier], rejected: list, adjusted: list, foreign_given: bool,
            unit: dict | None) -> list[dict]:
-    """단가 구간. 구간 단가도 단가와 같이 배수·통화·붙은 단위를 원문과 대조한다 (KAN-208).
+    """단가 구간. 구간 단가도 단가와 같이 배수·통화·붙은 단위를 원문과 대조한다.
     구간마다 currency(단가에 적힌 외화, 없으면 None — 견적 통화는 save_structured_quote가 채운다)를 남긴다."""
     out = []
     for index, tier in enumerate(tiers):
@@ -1065,7 +1065,7 @@ def _carry(previous: tuple[str, QuoteVersionRecord], values: dict, tiers: list, 
     if not price_given and previous_record.pricing_terms_jsonb.get('price_tiers') and not basis_changed:
         tiers = previous_record.pricing_terms_jsonb['price_tiers']
         carried.append('price_tiers')
-    # 비용은 종류 단위로 합친다. 이번 메일이 말한 종류(포함·무료·없음 포함)는 이번 것만 쓰고, 말하지 않은 종류는 이어받는다 (KAN-211)
+    # 비용은 종류 단위로 합친다. 이번 메일이 말한 종류(포함·무료·없음 포함)는 이번 것만 쓰고, 말하지 않은 종류는 이어받는다
     mentioned = {cost['cost_type'] for cost in costs}
     kept = [cost for cost in previous_record.cost_terms_jsonb or [] if cost['cost_type'] not in mentioned]
     if kept:
@@ -1118,13 +1118,13 @@ _NAME_SPACES = re.compile(r'[\s\u00a0\u3000\u200b\ufeff]+')   # DB item_name_nor
 
 def _item_key(text) -> str:
     """등록 품목 대조용 품목명: 공백을 모두 빼고 소문자로 ('냉동 망고' → '냉동망고').
-    DB internal.item_name_norm(KAN-192)과 같은 기준이다. 업무 키가 없을 때(최초 추출)만 쓴다."""
+    DB internal.item_name_norm과 같은 기준이다. 업무 키가 없을 때(최초 추출)만 쓴다."""
     return _NAME_SPACES.sub('', str(text or '')).lower()
 
 
 def _registered_item(items: list[dict], current: dict, case: dict) -> dict | None:
     """이번 메일의 품목과 같은 그 업체의 등록 품목. 하나로 정해질 때만 돌려준다(애매하면 연결하지 않는다).
-    업무에 품목 키가 있으면 같은 키인 등록 품목만 본다. DB(KAN-190)가 같은 품목을 키로만 판정하므로 이름은 비교하지 않는다.
+    업무에 품목 키가 있으면 같은 키인 등록 품목만 본다. DB가 같은 품목을 키로만 판정하므로 이름은 비교하지 않는다.
     업무 키가 없으면(최초 추출) _item_key 기준으로 품목명이 같을 때만 본다.
     이름이 서로 포함되는 정도('냉동딸기'와 '냉동딸기 (IQF)')로는 연결하지 않는다.
     후보가 여럿이면 규격으로 좁힌다."""
@@ -1154,7 +1154,7 @@ def _item_name_variant(name: str, case_item: str | None, item: dict | None) -> b
 def _case_conditions(case: dict, current: dict, item: dict | None, initial_mails: set) -> dict | None:
     """이번 메일 값으로 채울 업무 조건. 업무에 아직 없는 것만 채운다.
     품목·규격은 처음 추출할 때(등록 품목이 확인되면 그 품목 키도) 채운다.
-    업무 비교 수량은 기존 업체 인상 통보(INITIAL 메일)의 공급 물량(available_quantity)이다(2026-11-05 팀 결정).
+    업무 비교 수량은 기존 업체 인상 통보(INITIAL 메일)의 공급 물량(available_quantity)이다.
     단위는 그 수량의 단위, 없으면 같은 메일의 단가 단위다. 대안 업체 회신의 공급 가능량으로는 채우지 않는다."""
     conditions = {}
     if not case.get('item_name') and 'item_name' in current:
@@ -1171,7 +1171,7 @@ def _case_conditions(case: dict, current: dict, item: dict | None, initial_mails
 
 
 def _supply_quantity_missing(case: dict, source_mail: dict, values: dict) -> bool:
-    """기존 업체 인상 통보(INITIAL 메일)인데 업무 비교 수량을 정할 공급 물량·단위가 없는지 (2026-11-06 팀 결정).
+    """기존 업체 인상 통보(INITIAL 메일)인데 업무 비교 수량을 정할 공급 물량·단위가 없는지.
     업무 수량이 비어 있을 때만 본다. 저장한 뒤에는 보류할 수 없으므로(DB가 거부) 저장 전에 거절한다.
     단위는 공급 물량의 단위, 없으면 같은 메일의 단가 단위로 정한다(_case_conditions와 같은 기준).
     공급 물량 값이 규격·주문 단위 표기 안의 수량이면(예: '특품 10kg/박스'의 10kg) 공급 물량이 아니다 (S3-15).
@@ -1241,7 +1241,7 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
             entry['currency'] = currency
         if field.tax_basis:             # 근거 원문과 함께 저장되고, 다음 버전으로도 이어받는다
             entry['tax_basis'] = field.tax_basis
-    # 단가의 배수·통화·단위 짝을 원문 줄과 대조한다 (KAN-208). 숫자만 맞고 뜻이 다른 단가가 CONFIRMED로 저장되지 않게
+    # 단가의 배수·통화·단위 짝을 원문 줄과 대조한다. 숫자만 맞고 뜻이 다른 단가가 CONFIRMED로 저장되지 않게
     foreign_given = values.get('currency', {}).get('value') not in (None, 'KRW')
     for name in ('unit_price', 'previous_unit_price'):
         if name not in values:
@@ -1282,7 +1282,7 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
     for tier in tiers:
         tier |= {'currency': price_currency or values.get('currency', {}).get('value') or 'KRW',
                  'unit': values.get('unit', {}).get('value')}
-    # 적용일보다 이른 유효기간은 회신 기한이다. DB 제약(valid_until >= effective_from)에 닿기 전에 거절한다 (KAN-207)
+    # 적용일보다 이른 유효기간은 회신 기한이다. DB 제약(valid_until >= effective_from)에 닿기 전에 거절한다
     if 'valid_until' in values and 'effective_from' in values and \
             values['valid_until']['value'] < values['effective_from']['value']:     # ISO 날짜 문자열
         rejected.append({'field': 'valid_until', 'code': 'VALID_UNTIL_BEFORE_EFFECTIVE'})
@@ -1296,7 +1296,7 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         values['supplier_name']['value'] = matched_name
     # 원문 근거가 확인된 업체명이 등록 거래처와 맞지 않으면(미등록·연결 업체와 다름) 다른 항목의 거절보다 먼저 알린다.
     # 다른 항목을 고쳐도 저장할 수 없는 견적이라, 다시 보내기를 다른 항목에 쓰고 원인을 잃지 않게 한다
-    # (2026-11-06 실제 LLM 재현: 규격 근거 거절로 두 번 다시 보내고 SUPPLIER_MISMATCH에 닿지 못함)
+    # (실제 LLM 재현: 규격 근거 거절로 두 번 다시 보내고 SUPPLIER_MISMATCH에 닿지 못함)
     if rejected and not (supplier_name and issue and issue['code'] in ('SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH')):
         return _with_hints({'status': 'REJECTED', 'rejected': rejected}, rejected)
     if issue:
@@ -1316,14 +1316,14 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
 
     current = dict(values)
     previous = _read(lambda: store.latest_quote_version(case_id, supplier_id))
-    # 기준 단가와 크기를 비교한다 (KAN-208). 배수·통화·단위를 잘못 읽은 단가는 표기와 상관없이 기준과 크게 차이 난다
+    # 기준 단가와 크기를 비교한다. 배수·통화·단위를 잘못 읽은 단가는 표기와 상관없이 기준과 크게 차이 난다
     if implausible := _implausible_prices(check, values, refs, tiers, price_tiers, previous):
         return _with_hints({'status': 'REJECTED', 'rejected': implausible}, implausible)
     carried = []
     if previous:
         tiers, costs, carried = _carry(previous, values, tiers, costs, review)
     elif 'unit_price' not in values and not tiers:
-        # 이전 견적이 없는 업체의 단가 없는 메일(비용 조건만 등)은 견적이 아니다. LLM은 업체별 이전 견적을 구분하지 못한다 (KAN-211)
+        # 이전 견적이 없는 업체의 단가 없는 메일(비용 조건만 등)은 견적이 아니다. LLM은 업체별 이전 견적을 구분하지 못한다
         missing = {'field': 'unit_price', 'code': 'NO_QUOTE_DATA'}
         return {**_with_hints({'status': 'REJECTED', 'rejected': [missing]}, [missing]), 'next': _NO_QUOTE_DATA_NEXT}
     unit_missing ='unit_price' in values and 'unit' not in values
@@ -1535,14 +1535,24 @@ def _cert_key(name) -> str:
     return _cert_alias(_key(name))
 
 
+# 인증이 없거나 아직 아니라는 표현. 이 말이 든 항목('HACCP 미보유', 'HACCP 인증 심사 중')은 보유 인증으로 세지 않는다
+_CERT_NEGATION = re.compile(r'미\s*보유|미\s*취득|미\s*인증|미\s*해당|없음|없습니다|없다|불가|만료|취소|정지|예정|'
+                            r'(?:진행|심사|신청|준비)\s*중|\b(?:no|not|none|pending|expired|applying)\b', re.IGNORECASE)
+
+
 def _cert_keys(names) -> set[str]:
     """보유 인증 표기들의 대조 키. 쉼표·괄호 등으로 나눈 덩어리 전체와 그 안의 띄어 쓴 낱말을 모두 키로 둔다
-    ('식품안전관리인증(HACCP), ISO 22000' → {'haccp', 'iso22000', 'iso', '22000'})."""
+    ('식품안전관리인증(HACCP), ISO 22000' → {'haccp', 'iso22000', 'iso', '22000'}).
+    쉼표·빗금으로 나눈 항목에 부정·미완료 표현이 있으면 그 항목은 통째로 세지 않는다
+    ('ISO 22000, HACCP 미보유' → {'iso22000', 'iso', '22000'}, 'HACCP(인증 심사 중)' → 없음)."""
     keys = set()
     for name in names:
-        for chunk in re.split(r'[,/·()（）\[\]]+', str(name)):
-            if chunk.strip():
-                keys |= {_key(chunk), *(_key(word) for word in chunk.split())}
+        for item in re.split(r'[,/·]+', str(name)):
+            if _CERT_NEGATION.search(item):
+                continue
+            for chunk in re.split(r'[()（）\[\]]+', item):
+                if chunk.strip():
+                    keys |= {_key(chunk), *(_key(word) for word in chunk.split())}
     return {_cert_alias(key) for key in keys}
 
 
@@ -2928,7 +2938,7 @@ def _missing_keep(store: ComparisonStore, case_id: str, case: dict, records: dic
 # ─────────────────────────────────────────────
 # ⑤ COUNTER_OFFER: calculate_counter_offer, validate_counter_offer, create_counter_offer_draft (+ 가격 검증 노드)
 #   설계: docs/AGENT5_COUNTER_OFFER_DESIGN.md. 회사 정책(policy_jsonb)은 허용 인상률(max_increase_rate)과
-#   기존 업체 선호 폭(incumbent_premium_rate) 두 값이다(2026-11-04 확정, 4%·4%).
+#   기존 업체 선호 폭(incumbent_premium_rate) 두 값이다(4%·4%).
 #   요청 인상률이 허용 인상률 이하이거나 요청 단가로도 대안보다 싸면 수용을 추천한다(역제안 생략).
 #   그 외에는 [인상 전 단가, min(요청 단가, 인상 전 × (1+허용 인상률))] 안에서 역제안한다. 대안과 경쟁할 수 있는 선
 #   (유지 상한 × (1+선호 폭))이 그 범위 안이면 상한을 그 선으로 낮추고, 범위보다 낮으면 그대로 두되 대안보다 비싸다고 알린다.

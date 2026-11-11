@@ -2,6 +2,7 @@
 import logging
 import threading
 from app.core.errors import ServiceError
+from app.core.logs import error_origin
 
 logger = logging.getLogger('uvicorn.error.rfq_workflow')
 
@@ -42,15 +43,16 @@ class RfqWorkflowWorker:
                 logger.info('rfq preparation_finished')
             except ServiceError as error:
                 if error.code != 'WORK_ALREADY_STARTED':
-                    logger.warning('rfq preparation_failed code=PREPARATION_UNAVAILABLE')
+                    logger.warning('rfq preparation_failed code=PREPARATION_UNAVAILABLE case_id=%s cause_code=%s %s',
+                                   row['id'], error.code, error_origin(error))
         for job in self.repo.reconcile_jobs(owner):
             if self.stop.is_set():
                 return
             try:
                 self.delivery.reconcile(owner, job['draft_id'])
-            except Exception:
+            except Exception as error:
                 self.repo.finish_reconcile_job(owner, job, failed=True)
-                logger.warning('rfq reconciliation_unavailable')
+                logger.warning('rfq reconciliation_unavailable draft_id=%s %s', job['draft_id'], error_origin(error))
             else:
                 self.repo.finish_reconcile_job(owner, job)
         if self.stop.is_set():
@@ -68,9 +70,13 @@ class RfqWorkflowWorker:
                     or (draft.get('approved_by') == owner and draft.get('approved_at'))):
                 continue
             try:
-                self.delivery.send(owner, draft['id'])
-            except Exception:
-                logger.warning('rfq dispatch_failed code=DISPATCH_UNAVAILABLE')
+                result = self.delivery.send(owner, draft['id'])
+            except Exception as error:
+                logger.warning('rfq dispatch_failed code=DISPATCH_UNAVAILABLE draft_id=%s cause_code=%s %s', draft['id'],
+                               getattr(error, 'code', None), error_origin(error))
+            else:
+                if isinstance(result, dict) and not result.get('sent_now'):
+                    logger.info('rfq dispatch_skipped draft_id=%s status=%s', draft['id'], result.get('status'))
 
     def start(self):
         def loop():
@@ -79,16 +85,16 @@ class RfqWorkflowWorker:
                 while not self.stop.is_set():
                     try:
                         owners = self.owners()
-                    except Exception:
+                    except Exception as error:
                         owners = ()
-                        logger.warning('rfq workflow_unavailable code=STORAGE_UNAVAILABLE')
+                        logger.warning('rfq workflow_unavailable code=STORAGE_UNAVAILABLE %s', error_origin(error))
                     for owner in owners:
                         if self.stop.is_set():
                             break
                         try:
                             self.process_owner(owner)
-                        except Exception:
-                            logger.warning('rfq workflow_unavailable code=STORAGE_UNAVAILABLE')
+                        except Exception as error:
+                            logger.warning('rfq workflow_unavailable code=STORAGE_UNAVAILABLE %s', error_origin(error))
                     self.wake.wait(15)
                     self.wake.clear()
             finally:

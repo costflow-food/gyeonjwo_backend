@@ -6,7 +6,7 @@ from pydantic import HttpUrl, SecretStr, ValidationError, field_validator, model
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[2]
-# OpenAI reasoning effort 값 (2026-11-02 문서 기준). 모델마다 받는 값이 다르다 (예: gpt-5.4-mini는 minimal·max 없음)
+# OpenAI reasoning effort 값. 모델마다 받는 값이 다르다 (예: gpt-5.4-mini는 minimal·max 없음)
 ReasoningEffort = Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
 
@@ -38,7 +38,8 @@ class Settings(BaseSettings):
     analysis_timeout_seconds: ClassVar[int] = 600
     calculation_rounds: ClassVar[int] = 3
     max_document_characters: ClassVar[int] = 120000
-    # 최초 메일함 가져오기와 만료된 history 복구에만 쓴다. 새 메일은 개수 제한이 없다
+    # 최초 메일함 가져오기(가장 최근 N통)에만 쓴다. 만료된 history 복구는 별도 경로가 페이지를 넘기며 가져오고,
+    # 새 메일은 개수 제한이 없다
     gmail_initial_sync_limit: ClassVar[int] = 10
     agent_graph_review_timeout_seconds: ClassVar[int] = 300
     agent_graph_timeout_seconds: ClassVar[int] = 180

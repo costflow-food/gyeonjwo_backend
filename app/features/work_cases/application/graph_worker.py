@@ -1,4 +1,4 @@
-"""Separate durable GRAPH_START queue consumer. Never consumes legacy jobs."""
+"""그래프 작업 큐 소비자. GRAPH_START_V1(인상 통보로 시작)과 GRAPH_REVIEW_V1(회신·구매안 다시 검토)을 처리한다."""
 import logging
 import time
 from uuid import UUID
@@ -8,6 +8,7 @@ from app.core.leases import LeaseHeartbeat
 from app.features.work_cases.application.extraction_scope import CURRENT_SCOPE, ExtractionScope
 from app.features.work_cases.application.extraction_worker import ExtractionWorker
 from app.features.work_cases.application.graph_boundary import graph_contract, run_graph
+from app.core.logs import error_origin
 
 logger = logging.getLogger('uvicorn.error.case_graph')
 
@@ -122,7 +123,8 @@ class GraphWorker(ExtractionWorker):
                 code = {'REVISION_CONFLICT': 'INPUT_REVISION_CHANGED', 'EXTRACTION_TIME_LIMIT': 'GRAPH_TIME_LIMIT',
                         'WORKER_INTERRUPTED': 'WORKER_INTERRUPTED'}.get(error.code, 'GRAPH_FAILED')
             self.repo.fail(job, code)
-            logger.warning('graph failed code=%s', code)
+            logger.warning('graph failed code=%s job_id=%s case_id=%s start_from=%s %s', code, job.get('job_id'),
+                           job.get('case_id'), mode, error_origin(error))
         finally:
             if scope is not None:
                 scope.blocked = True

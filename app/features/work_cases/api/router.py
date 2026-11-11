@@ -1,3 +1,4 @@
+import time
 from typing import Annotated, Literal
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
@@ -30,6 +31,15 @@ from app.features.work_cases.application.case_actions import case_actions
 
 router = APIRouter(prefix='/api/v1/work-cases', tags=['Work cases'])
 _LIST_READINESS = ThreadPoolExecutor(max_workers=2, thread_name_prefix='case-list-readiness')
+# 직전 준비 상태 확인 결과를 이만큼 오래된 것까지 쓴다(초). 그보다 오래되면 '확인 중'으로 버튼을 끈다
+READINESS_REUSE_SECONDS = 60
+
+
+def _remember_readiness(state, done) -> None:
+    """끝난 준비 상태 확인의 결과를 시각과 함께 남긴다. 실패한 확인은 남기지 않는다."""
+    if done.cancelled() or done.exception() is not None:
+        return
+    state.work_case_list_readiness_done = (time.monotonic(), done.result())
 
 
 def resume_readiness(request, repo=None, *, fresh=False):
@@ -116,8 +126,9 @@ def list_work_cases(
     """Read only: never starts extraction or changes work state.
 
     Reset cursor when status, archive filter or search changes. Counts ignore only
-    status, not search/archive. Pending/Confirm rows remain unchanged when status
-    is omitted; total includes them, while named counters use API-01's three tabs.
+    status, not search/archive. Counts and the Waiting/Running/Complete filters use
+    the queue tabs: Waiting includes Confirm, Running includes Pending, so the three
+    counters add up to total. status=Pending or Confirm returns only that status.
     sender_name is null when the source column or its value is unavailable.
     Actions may be temporarily disabled while integration checks finish.
     reply_summary counts distinct suppliers from SENT RFQs and verified quote
@@ -142,13 +153,18 @@ def list_work_cases(
         probe = getattr(request.app.state, 'work_case_list_readiness', None)
         if probe is None or probe.done():
             probe = _LIST_READINESS.submit(probe_actions)
+            probe.add_done_callback(lambda done: _remember_readiness(request.app.state, done))
             request.app.state.work_case_list_readiness = probe
 
     def ready_for_actions():
         try:
             start, resume, changes_ready = probe.result(timeout=0.025)
         except TimeoutError:
-            return fallback, fallback, False
+            # 확인이 늦으면 직전에 끝난 확인 결과를 쓴다(있으면). 그래야 버튼이 주기적으로 꺼졌다 켜지지 않는다
+            last = getattr(request.app.state, 'work_case_list_readiness_done', None)
+            if last is None or time.monotonic() - last[0] > READINESS_REUSE_SECONDS:
+                return fallback, fallback, False
+            start, resume, changes_ready = last[1]
         if start.available:
             live = worker_readiness(settings, getattr(request.app.state, 'extraction_worker', None))
             if not live.available:
@@ -336,7 +352,7 @@ def progress_waiting_reason(step):
 
 def progress_error(step, code):
     """API-03 error. ON_HOLD already explains itself through `hold`, so an unknown
-    stored code there is not re-labelled as EXTRACTION_FAILED (KAN-161 S7-12)."""
+    stored code there is not re-labelled as EXTRACTION_FAILED."""
     if not code:
         return None
     if isinstance(code, str) and code in PROGRESS_ERROR_CODES:
@@ -348,7 +364,7 @@ def progress_error(step, code):
 def case_messages(case_id: UUID, request: Request, principal=Depends(require_google_user),
                   cursor: Annotated[str | None, Query()] = None,
                   limit: Annotated[int, Query(ge=1, le=100)] = 25):
-    """API-10 (KAN-175). Reuses the list service's client, cursor key and reply facts RPC."""
+    """API-10. Reuses the list service's client, cursor key and reply facts RPC."""
     from app.features.work_cases.infrastructure.messages_repository import list_case_messages
     service = get_list_service(request.app.state)
     return api_json(list_case_messages(service.repo.client, service.codec, principal.user_id, case_id,
@@ -422,7 +438,7 @@ def get_case(case_id: UUID, request: Request, principal=Depends(require_google_u
         block = CandidateRepository(repo.client).blocks(principal.user_id, [row]).get(str(case_id))
         apply_candidate_action(row, actions, disabled, block)
     batch_id = row.pop('current_batch_id')
-    # KAN-161 S2-6: API-02 carries the stored goal conditions and policy (08 §5).
+    # API-02 carries the stored goal conditions and policy (08 §5).
     row['mandatory_conditions'] = row.pop('mandatory_conditions_jsonb', None)
     row['policy'] = row.pop('policy_jsonb', None)
     return api_json({'case_id': row.pop('id'), **row,
