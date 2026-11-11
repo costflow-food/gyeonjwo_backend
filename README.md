@@ -19,7 +19,7 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 - 로그 수준은 `LOG_LEVEL`(기본 INFO), PDF 워커 메모리 상한은 `PDF_WORKER_MEMORY_MB`(기본 760)로 바꿀 수 있습니다.
 - 스캔 PDF OCR 모델은 한 번 받아 둡니다: `python -m app.features.review.infrastructure.pdf_worker setup models/ocr`.
   서버 이미지는 빌드할 때 받습니다.
-- 서버 문서: http://127.0.0.1:8000/docs. `/health`는 서버 생존, `/ready`는 필수 설정·DB 읽기·워커 상태입니다.
+- 서버 문서: http://127.0.0.1:8000/docs (`APP_ENVIRONMENT=production`이면 `/docs`·`/redoc`·`/openapi.json`을 열지 않습니다). `/health`는 서버 생존, `/ready`는 필수 설정·DB 읽기·워커 상태입니다.
 - 메일함 수신·RFQ·그래프 워커는 서버 시작 때 같이 뜹니다. 비밀값이 없으면 항목 이름만 경고하고 그 워커만 꺼집니다.
   같은 DB에 붙는 서버는 하나만 띄웁니다(단일 프로세스). 분석 중에는 `--reload`로 재시작하지 않습니다.
 - 코드는 DB 구조를 만들거나 바꾸지 않습니다. DB 변경은 Supabase 마이그레이션으로 따로 합니다.
@@ -42,7 +42,7 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 | `app/agents/` | LangGraph 그래프, 에이전트 ①~⑤ 프롬프트·도구·계약, LLM 검증자. [에이전트 작업 안내](app/agents/README.md) |
 | `app/features/<기능>/` | 기능별 `api` / `application` / `domain` / `infrastructure` |
 | `app/shared/` | 여러 기능이 쓰는 도메인 규칙, DB 클라이언트·저장소, LLM 어댑터 |
-| `scripts/` | 연결 점검(`check_connection.py`), 로컬 회귀 점검(`check_*.py`), 서버 실행 스크립트 |
+| `scripts/` | 연결 점검(`check_connection.py`, 서버가 읽는 테이블 접근 확인), 로컬 회귀 점검(`check_*.py`), 서버 실행 스크립트 |
 
 기능 폴더:
 
@@ -51,8 +51,8 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 | `mailboxes` | Google 로그인 사용자 확인·허용 사용자 확인, Gmail 연결·토큰, 메일함 수신 워커 |
 | `mail` | Gmail 알림(Pub/Sub) 수신, 원문·첨부 조회 |
 | `work_cases` | 업무 큐·상세, 그래프 워커, 후보 선택, RFQ 초안·발송, 견적, 검토 카드 |
-| `review` | 원문·첨부 읽기(PDF 텍스트·OCR 워커), 검토 파이프라인 |
-| `suppliers`, `workflow_logs`, `mail_management`, `system`, `auth` | 거래처, 실행 로그, 메일 관리, `/health`·`/ready`, 인증 보조 |
+| `review` | 원문·첨부 읽기(PDF 텍스트·OCR 워커), 계산식·값 검사 규칙 |
+| `suppliers`, `workflow_logs`, `mail_management`, `system` | 거래처, 실행 로그, 메일 관리, `/health`·`/ready` |
 | `supplier_crawl` | 검색어로 공급처 홈페이지 연락처를 모으는 도구(아직 에이전트에 연결하지 않음) |
 
 ## 점검
