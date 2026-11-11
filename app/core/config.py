@@ -53,9 +53,13 @@ class Settings(BaseSettings):
     google_token_encryption_key: SecretStr | None = None
     # 빌드 시 주입한다
     app_build_revision: str = 'development'
-    # 에이전트 실행은 항상 LangSmith에 기록한다(MVP는 합성 데이터만 쓴다). 키가 없을 때만 기록하지 않는다
+    # 에이전트 실행은 키가 있으면 LangSmith에 기록한다. 키가 없을 때만 기록하지 않는다
     langsmith_api_key: SecretStr | None = None
     langsmith_project: str = 'gyeonjwo-dev'
+    # 기록의 입력·출력 내용(메일 원문·업체명·단가)을 가린다. 기본 켬(운영). 합성 데이터로 개발할 때만 false로 둔다
+    langsmith_hide_content: bool = True
+    # 실행 환경 이름. LangSmith 기록 metadata(environment)로 운영·개발 기록을 구분한다(운영은 production)
+    app_environment: str = 'development'
     # 조직 단위 Service Key는 기록할 작업 공간 ID가 있어야 한다(LangSmith Settings 화면에서 확인)
     langsmith_workspace_id: str | None = None
 
