@@ -1518,12 +1518,21 @@ def _key(text) -> str:
 
 # 인증의 우리말 공식 이름 → 영문 약칭 (대조 키). 같은 인증으로 본다
 _CERT_ALIASES = {'식품안전관리인증기준': 'haccp', '식품안전관리인증': 'haccp', '안전관리인증기준': 'haccp', '해썹': 'haccp'}
+# 인증 이름 뒤에 붙는 말 ('식품 안전 관리 인증 보유', 'HACCP 인증서', 'ISO 22000 인증 획득'). 떼고 다시 대조한다
+_CERT_TAIL = re.compile(r'(보유|획득|취득|완료|있음|서|인증)$')
+
+
+def _cert_alias(key: str) -> str:
+    """공백을 뺀 인증 표기 하나의 대조 키. 공식 이름이면 약칭으로, 뒤에 붙은 말(보유·인증서 등)은 떼어 본다.
+    떼어 낼 말이 없거나 다 떼면 빈 글자가 되는 표기는 그대로 둔다."""
+    while key not in _CERT_ALIASES and (shorter := _CERT_TAIL.sub('', key)) and shorter != key:
+        key = shorter
+    return _CERT_ALIASES.get(key, key)
 
 
 def _cert_key(name) -> str:
     """필수 인증 이름 하나의 대조 키: 공백·대소문자를 무시하고, 우리말 공식 이름은 약칭으로."""
-    key = _key(name)
-    return _CERT_ALIASES.get(key, key)
+    return _cert_alias(_key(name))
 
 
 def _cert_keys(names) -> set[str]:
@@ -1534,7 +1543,7 @@ def _cert_keys(names) -> set[str]:
         for chunk in re.split(r'[,/·()（）\[\]]+', str(name)):
             if chunk.strip():
                 keys |= {_key(chunk), *(_key(word) for word in chunk.split())}
-    return {_CERT_ALIASES.get(key, key) for key in keys}
+    return {_cert_alias(key) for key in keys}
 
 
 def _required_names(conditions) -> list[str]:
