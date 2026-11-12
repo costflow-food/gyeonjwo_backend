@@ -35,8 +35,8 @@ from app.features.work_cases.api.review_card import router as review_card_router
 from app.features.mail_management.api.router import router as mail_management_router
 from app.features.system.application.diagnostics import require_startup_configuration
 from app.features.system.application.workers import (
-    create_missing_rfq_workers, retry_unavailable_workers, start_call_recording_worker, start_graph_worker,
-    start_transcription_worker)
+    create_missing_rfq_workers, retry_unavailable_workers, start_call_recording_worker,
+    start_call_transcription_worker, start_graph_worker)
 from app.features.call_recordings.router import router as call_recordings_router
 
 logger = logging.getLogger('gyeonjwo')
@@ -112,7 +112,7 @@ def create_app(settings=None, push_verifier=verify_push, mailbox_service=None):
             rfq_workers = create_missing_rfq_workers(app.state, settings)
             start_graph_worker(app.state, settings)
             start_call_recording_worker(app.state, settings)
-            start_transcription_worker(app.state, settings)
+            start_call_transcription_worker(app.state, settings)
             await prime_work_case_reads(app.state)
             for prepared_worker in (connected_worker, *rfq_workers):
                 if prepared_worker is not None:
@@ -129,7 +129,7 @@ def create_app(settings=None, push_verifier=verify_push, mailbox_service=None):
                     pass
             # 재시도로 나중에 뜬 워커도 닫히도록 state에서 읽는다.
             for name in ('rfq_workflow_worker', 'rfq_metadata_worker', 'connected_mailbox_worker', 'extraction_worker',
-                         'call_recording_worker', 'transcription_worker'):
+                         'call_recording_worker', 'call_transcription_worker'):
                 worker = getattr(app.state, name, None)
                 if worker:
                     worker.close()
@@ -150,7 +150,7 @@ def create_app(settings=None, push_verifier=verify_push, mailbox_service=None):
     app.state.rfq_metadata_worker = None
     app.state.rfq_workflow_worker = None
     app.state.call_recording_worker = None
-    app.state.transcription_worker = None
+    app.state.call_transcription_worker = None
     app.state.call_recording_service = None
     app.state.service_lock = threading.Lock()
     if getattr(settings, 'google_token_encryption_key', None):

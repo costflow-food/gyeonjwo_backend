@@ -19,7 +19,19 @@ class CallRecordingCleanupWorker:
         self.stop = threading.Event()
         self.thread = None
 
+    def release_extracted_audio(self):
+        """견적 추출이 끝난 통화의 음성 파일을 삭제 대기열에 넣는다. DB가 통화 회신 연결(CALL_REPLY)을 제공할 때만."""
+        ready = getattr(self.repo, 'call_reply_ready', None)
+        if ready is None or not ready():
+            return 0
+        released = self.repo.release_extracted_audio(20)
+        return released if type(released) is int else 0
+
     def run_once(self):
+        try:
+            self.release_extracted_audio()
+        except Exception:
+            logger.warning('call_recording audio_release_failed')
         expired = self.repo.expire_uploads(100)
         jobs = self.repo.claim_deletions(self.worker_id, 20, 120)
         if not isinstance(jobs, list):
