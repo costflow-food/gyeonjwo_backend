@@ -1,4 +1,5 @@
 """통화 녹음 DB(RPC)·Storage 어댑터. 파일 바이트는 서버를 거치지 않는다(서명 업로드 URL)."""
+from datetime import datetime, timezone
 import logging
 
 from app.core.errors import ServiceError
@@ -70,6 +71,24 @@ class CallRecordingRepository:
         return self.rpc('finish_call_recording_file_deletion', p_id=str(deletion_id), p_worker=worker,
                         p_ok=ok, p_error=error)
 
+    def require_transcription_schema(self):
+        if self.claim_transcription(None, 300) != [] or self.finish_transcription(None, None, None) is not False:
+            raise RuntimeError('Unexpected transcription DB contract')
+
+    def transcription_candidates(self, limit):
+        now = datetime.now(timezone.utc).isoformat()
+        rows = (self.client.table('call_recording_stt').select('recording_id')
+                .or_(f'status.eq.rec-pending,and(status.eq.rec-processing,lease_until.lte.{now})')
+                .order('lease_until').order('recording_id').limit(limit).execute().data)
+        return [row['recording_id'] for row in rows]
+
+    def claim_transcription(self, recording_id, lease_seconds):
+        return self.rpc('claim_call_recording_stt', p_recording_id=recording_id, p_lease_seconds=lease_seconds)
+
+    def finish_transcription(self, recording_id, lease_token, transcript):
+        return self.rpc('finish_call_recording_stt', p_recording_id=recording_id, p_lease_token=lease_token,
+                        p_transcript=transcript)
+
 
 def _storage_failure():
     return ServiceError('CALL_RECORDING_STORAGE_UNAVAILABLE', '녹음 저장소에 연결할 수 없습니다.', 503, retryable=True)
@@ -111,6 +130,9 @@ class CallRecordingStorage:
         if type(size) is not int or size < 0:
             raise _storage_failure()
         return size
+
+    def download(self, path):
+        return self.bucket.download(path)
 
     def remove(self, paths):
         # 없는 파일 삭제도 성공으로 돌아온다(멱등).
