@@ -11,6 +11,11 @@ from app.features.mail.domain.attachment_ids import part_reference
 from app.features.review.infrastructure.documents import read_pdf_pages
 
 
+def mail_channel(mail):
+    """mail_messages 행의 채널. provider가 CALL이면 통화 녹음 전사문(CALL), 아니면 메일(MAIL)."""
+    return 'CALL' if str(mail.get('provider') or '').upper() == 'CALL' else 'MAIL'
+
+
 class AgentStore:
     def __init__(self, scope, job):
         self.scope, self.repo, self.job = scope, scope.repo, job
@@ -48,7 +53,7 @@ class AgentStore:
     def mails(self, case_id):
         self.check(case_id)
         mails = self.rows(self.repo.client.table('mail_messages').select(
-            'id,subject,body_text,sender,attachments_jsonb,supplier_id,message_role,direction,sent_or_received_at')
+            'id,subject,body_text,sender,attachments_jsonb,supplier_id,message_role,direction,sent_or_received_at,provider')
             .eq('owner_user_id', self.scope.owner).eq('work_case_id', str(case_id))
             .in_('id', list(self.scope.mail_ids)))
         for mail in mails:
@@ -86,7 +91,7 @@ class AgentStore:
                     status = self.document_status[(mail['id'], part)]
                 attachments.append({'attachment_ref': part, 'filename': attachment.get('filename'),
                                     'pages': len(pages), 'status': status})
-            result.append({'mail_id': mail['id'], 'subject': mail['subject'],
+            result.append({'mail_id': mail['id'], 'subject': mail['subject'], 'channel': mail_channel(mail),
                 'supplier_id': mail.get('supplier_id'), 'message_role': mail['message_role'],
                 'direction': mail['direction'], 'received_at': mail['sent_or_received_at'],
                 'attachments': attachments})
@@ -139,6 +144,8 @@ class AgentStore:
                 return None
             text=mail.get('body_text') or ''
             self.charge(mail_id, part, page, text)
+            if mail_channel(mail)=='CALL':
+                return {'text':text,'location':'call','text_source':'STT'}
             return {'text':text,'location':'body'}
         for a in mail.get('attachments_jsonb') or []:
             if part_reference(a)==part and a.get('mime_type')=='application/pdf':
