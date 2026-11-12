@@ -1,6 +1,6 @@
 """통화 녹음 전사에 쓰는 값: 발화 목록과 근거 본문, 파일에서 읽는 통화 시각, STT 파일 크기 상한.
 
-통화 시각은 파일 이름 → m4a 같은 MP4 계열 컨테이너의 생성 시각 → 없음 순서로 읽는다(업로드 시각은 통화 시각이 아니다).
+통화 시각은 m4a 같은 MP4 계열 컨테이너의 생성 시각 → 파일 이름 → 없음 순서로 읽는다(업로드 시각은 통화 시각이 아니다).
 """
 import re
 import struct
@@ -108,12 +108,13 @@ def mp4_times(path: Path) -> tuple[datetime | None, float | None]:
 
 
 def resolve_call_time(file_name: str, extension: str, path: Path) -> tuple[datetime | None, str, float | None]:
-    """통화 시작 시각, 출처(FILE_NAME·CONTAINER·NONE), 녹음 길이(초).
-    컨테이너 생성 시각은 녹음이 끝난 시각이라(삼성 녹음 확인) 길이를 빼서 시작 시각으로 본다."""
+    """통화 시작 시각, 출처(CONTAINER·FILE_NAME·NONE), 녹음 길이(초).
+    파일 안의 메타데이터를 먼저 쓴다(사용자가 이름을 바꿔도 그대로다). 컨테이너 생성 시각은 녹음이 끝난 시각이라
+    (삼성 녹음 확인) 길이를 빼서 시작 시각으로 본다. 메타데이터가 없는 파일(mp3 등)만 파일 이름의 날짜를 쓴다."""
     created, duration = mp4_times(path) if extension in _MP4_EXTENSIONS else (None, None)
+    if created is not None:
+        return created - timedelta(seconds=duration or 0), 'CONTAINER', duration
     named = call_time_from_file_name(file_name)
     if named is not None:
         return named, 'FILE_NAME', duration
-    if created is not None:
-        return created - timedelta(seconds=duration or 0), 'CONTAINER', duration
     return None, 'NONE', duration
