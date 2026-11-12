@@ -405,6 +405,8 @@ next_action:
      넣고 RECHECK_SOURCE를 반환한다. source_text는 그 답이 적힌 원문 구절을 그대로 옮긴다(예: "월 1,000kg 공급 가능",
      "운송비 박스당 1,500원"). 원문 구절을 옮길 수 없으면 원문에 답이 없는 것이다.
      비용은 금액이나 "무료"·"없음"이 적힌 구절만 답이다. "운송비 별도"처럼 금액이 없으면 원문에 답이 없는 것이다.
+     금액이 있으면 "별도"가 붙어도 답이다(예: "운송비: 회당 10,000원 별도" → 답, "운송비 별도" → 답 아님).
+     recheck에는 missing_required·unknown_costs에 있는 field만 넣는다. 이미 견적에 있는 값은 원문에 있어도 다시 넣지 않는다.
      quantity_per_order_unit은 "박스당 10kg"처럼 중량이 적힌 구절만 답이다. "박스당 54,000원"처럼 단가만 있으면 답이 없는 것이다.
    - 원문에도 답이 없는 필수 누락은 그 field를 MUST_CONFIRM으로 묻는다. 원문에도 금액이 없는 비용은 5번으로 판단한다.
    - 재추출할 항목이 있으면 질문·초안보다 먼저 RECHECK_SOURCE로 끝낸다. 다시 추출된 뒤 이 역할이 다시 실행되어 질문을 보낸다.
@@ -1283,6 +1285,7 @@ pending_call이 있으면 create_clarification_draft를 실행하기 직전이�
 확인 항목(code):
 - ANSWER_IN_SOURCE: 업체에 묻는 field의 답이 이번 실행에서 읽은 그 업체 메일 원문(read_mail_evidence 결과)에 있다.
   묻지 말고 recheck로 재추출해야 한다. 비용은 금액이나 "무료"·"없음"이 적힌 구절만 답이다("운송비 별도"는 답이 아니다).
+  금액이 있으면 "별도"가 붙어도 답이다("운송비: 회당 10,000원 별도"는 답이다).
 - WRONG_REQUIREMENT: requirements에서 state가 CHECK인 항목을 잘못 판단했다. stated가 required를 분명히 충족하는데 묻거나
   (예: 업무 "HACCP"·견적 "식품안전관리인증(HACCP)"), 분명히 충족하지 않는데 묻지 않았다(예: 업무 "10kg 박스"·견적 "5kg 박스").
 - WRONG_RECHECK: recheck의 source_text가 그 field의 답이 아니다(다른 항목·다른 품목의 구절이거나 금액 없는 비용 구절).
