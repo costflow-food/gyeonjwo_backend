@@ -3,7 +3,7 @@ from copy import deepcopy
 from decimal import Decimal
 from uuid import UUID
 from app.core.errors import ServiceError
-from app.features.work_cases.infrastructure.agent_store import AgentStore
+from app.features.work_cases.infrastructure.agent_store import AgentStore, mail_channel
 from app.features.mail.application.attachments import fetch_gmail_attachment
 from app.features.mail.domain.attachment_ids import part_reference
 from app.features.mail_management.infrastructure.repository import MailManagementRepository
@@ -335,7 +335,8 @@ class GraphStore(AgentStore):
                 attachments.append({'attachment_ref': part, 'filename': attachment.get('filename'),
                     'pages': len(doc['pages']) if doc else 0, 'status': doc['status'] if doc else 'DOWNLOAD_FAILED'})
             items.append({**{key: mail[key] for key in ('subject', 'supplier_id', 'message_role', 'direction')},
-                          'mail_id': mail['id'], 'received_at': mail['sent_or_received_at'], 'attachments': attachments})
+                          'mail_id': mail['id'], 'channel': mail_channel(mail), 'received_at': mail['sent_or_received_at'],
+                          'attachments': attachments})
         return items
 
     def read_mail_part(self, case_id, mail_id, part, page):

@@ -2,6 +2,8 @@
 from datetime import datetime, timezone
 import logging
 
+import httpx
+
 from app.core.errors import ServiceError
 from app.features.call_recordings.domain import BUCKET, CONTRACT_VERSION, MAX_BYTES, MAX_PER_CASE
 
@@ -89,6 +91,38 @@ class CallRecordingRepository:
         return self.rpc('finish_call_recording_stt', p_recording_id=recording_id, p_lease_token=lease_token,
                         p_transcript=transcript, p_language=language, p_model=model, p_error=error)
 
+    def recording(self, recording_id):
+        """전사에 필요한 녹음 행(업무·거래처·파일 이름·확장자·크기). 없으면 None."""
+        rows = (self.client.table('call_recordings')
+                .select('id,owner_user_id,work_case_id,supplier_id,storage_path,file_name,extension,size_bytes')
+                .eq('id', str(recording_id)).limit(1).execute().data)
+        return rows[0] if rows else None
+
+    def capabilities(self):
+        """call_recording_health의 기능 목록. 읽지 못하면 빈 집합."""
+        try:
+            result = self.health()
+        except ServiceError:
+            return set()
+        values = result.get('capabilities') if isinstance(result, dict) else None
+        return {value for value in values if isinstance(value, str)} if isinstance(values, list) else set()
+
+    def call_reply_ready(self):
+        """DB가 통화 회신 연결(CALL_REPLY: register_call_reply·release_extracted_call_audio)을 제공하는지."""
+        return 'CALL_REPLY' in self.capabilities()
+
+    def register_call_reply(self, recording, body, call_started_at):
+        """전사문을 메일 회신과 같은 회신 자료(통화 행·회신 이벤트)로 넣는다. 같은 녹음은 한 번만 들어간다."""
+        result = self.rpc('register_call_reply', p_owner=str(recording['owner_user_id']), p_recording=str(recording['id']),
+                          p_body=body, p_call_started_at=call_started_at.isoformat() if call_started_at else None)
+        if not isinstance(result, dict) or result.get('kind') not in {'CREATED', 'REPLAY', 'SKIPPED'}:
+            raise ValueError('Call reply not registered')
+        return result
+
+    def release_extracted_audio(self, limit=20):
+        """견적 추출(①)이 끝난 통화의 음성 파일을 삭제 대기열에 넣는다. 넣은 수를 돌려준다."""
+        return self.rpc('release_extracted_call_audio', p_limit=limit)
+
 
 def _storage_failure():
     return ServiceError('CALL_RECORDING_STORAGE_UNAVAILABLE', '녹음 저장소에 연결할 수 없습니다.', 503, retryable=True)
@@ -133,6 +167,31 @@ class CallRecordingStorage:
 
     def download(self, path):
         return self.bucket.download(path)
+
+    def download_to(self, path, target, *, transport=None):
+        """비공개 파일을 짧은 서명 URL로 받아 target 파일에 스트리밍으로 쓴다(메모리에 통째로 올리지 않는다)."""
+        try:
+            signed = self.bucket.create_signed_url(path, 300)
+        except Exception:
+            logger.warning('call_recording download_sign_failed')
+            raise _storage_failure() from None
+        url = signed.get('signedURL') or signed.get('signedUrl') or signed.get('signed_url') if isinstance(signed, dict) else None
+        if not url:
+            raise _storage_failure()
+        try:
+            with httpx.Client(timeout=120, transport=transport) as client, client.stream('GET', url) as response:
+                if response.status_code == 404:
+                    raise ServiceError('CALL_RECORDING_NOT_FOUND', '녹음 파일이 저장소에 없습니다.', 404)
+                response.raise_for_status()
+                with open(target, 'wb') as handle:
+                    for chunk in response.iter_bytes(1024 * 1024):
+                        handle.write(chunk)
+        except ServiceError:
+            raise
+        except Exception:
+            logger.warning('call_recording download_failed')
+            raise _storage_failure() from None
+
 
     def remove(self, paths):
         removed = self.bucket.remove(list(paths))

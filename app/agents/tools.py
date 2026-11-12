@@ -103,7 +103,7 @@ def tools_for(role: AgentRole) -> list[BaseTool]:
 MAX_EVIDENCE_CHARS = 12000
 _CASE_KEYS = ('input_revision', 'item_name', 'specification', 'mandatory_conditions', 'quantity', 'unit', 'due_date',
               'policy', 'latest_quote_version_ids')
-_MAIL_KEYS = ('mail_id', 'message_role', 'direction', 'supplier_id', 'received_at', 'subject', 'attachments')
+_MAIL_KEYS = ('mail_id', 'channel', 'message_role', 'direction', 'supplier_id', 'received_at', 'subject', 'attachments')
 
 
 class CaseStore(Protocol):
@@ -118,8 +118,9 @@ class CaseStore(Protocol):
         업무가 없거나 범위 밖이면 None."""
 
     def list_case_mails(self, case_id: str) -> list[dict]:
-        """업무에 연결된 mail_messages의 {mail_id, message_role, direction, supplier_id, received_at, subject,
+        """업무에 연결된 mail_messages의 {mail_id, channel, message_role, direction, supplier_id, received_at, subject,
         attachments: [{attachment_ref, filename, pages, status}]}. 본문은 넣지 않는다.
+        channel은 MAIL(메일) 또는 CALL(통화 녹음 전사문, mail_messages.provider='CALL'). 없으면 MAIL로 본다.
         status는 전처리 노드가 읽은 결과(READ·NO_TEXT·UNSUPPORTED 등, nodes.read_document)다."""
 
     def read_mail_part(self, case_id: str, mail_id: str, part: str, page: int | None) -> dict | None:
@@ -161,7 +162,8 @@ def load_case_context(store: CaseStore, context: RunContext) -> dict:
         return {'status': 'REVISION_CHANGED'}
     mails = _read(lambda: store.list_case_mails(context.case_id))
     return {'status': 'OK', **{key: case.get(key) for key in _CASE_KEYS},
-            'mails': [{key: mail.get(key) for key in _MAIL_KEYS} for mail in mails]}
+            'mails': [{key: mail.get(key) for key in _MAIL_KEYS} | {'channel': mail.get('channel') or 'MAIL'}
+                      for mail in mails]}
 
 
 def load_evidence(store: CaseStore, context: RunContext, mail_id: str, part: str, page: int | None,
@@ -982,6 +984,9 @@ def _quote_supplier(store: QuoteStore, case_id: str, case_mails: dict, evidence_
     반환: (supplier_id, 거절 사유, 등록 업체와 맞은 업체명 — 법인 표기를 뺐으면 뺀 이름)."""
     if not evidence_mails:
         return None, {'field': 'supplier_name', 'code': 'MISSING_FIELD'}, None
+    if all((case_mails.get(mail_id) or {}).get('channel') == 'CALL' for mail_id in evidence_mails):
+        # 통화 전사문은 녹음을 올릴 때 고른 거래처로 이미 연결돼 있다. 음성 인식이 회사명을 잘못 옮길 수 있어 업체명은 대조하지 않는다
+        supplier_name = None
     linked = {(case_mails.get(mail_id) or {}).get('supplier_id') for mail_id in evidence_mails}
     named, matched_name = _resolve_supplier_name(store, case_id, supplier_name)
     if None in linked:

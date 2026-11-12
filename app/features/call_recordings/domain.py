@@ -3,7 +3,8 @@
 규칙(2026-11-11 결정)
 - 파일 1개 최대 50MB, 업무 1건당 진행 중·완료 녹음 최대 10개(실패는 세지 않음)
 - 업무를 수용(삭제)하면 녹음 행은 DB 에서 함께 지워지고 Storage 파일은 삭제 대기열이 지운다
-- 업무가 남아 있는 동안 보관한다(별도 보관 기한 없음)
+- 음성 파일은 견적 추출(①)이 끝나면 지운다. 전사문은 업무가 남아 있는 동안 보관한다(2026-11-12 결정)
+- 업로드에 실패한(기한 만료·크기 불일치) 녹음은 실패 2시간 뒤 파일만 지우고 행은 남긴다(2026-11-12 결정)
 - 오류 코드는 통화 녹음 전용 `CALL_RECORDING_*` 를 쓴다(멱등 공통 코드만 예외)
 - 녹음은 견적 요청에 대한 거래처 회신이다: 이 업무에서 견적 요청(RFQ)을 보낸 거래처(supplier_id)가 필수다.
   보낸 거래처인지는 DB 가 업무 잠금 안에서 판단한다(CALL_RECORDING_SUPPLIER_NOT_ALLOWED)
@@ -13,7 +14,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 
 from app.shared.domain.schemas import StrictModel
 
@@ -53,7 +54,7 @@ class CreateRecordingRequest(StrictModel):
     supplier_id: UUID
     file_name: str
     extension: str
-    size_bytes: int
+    size_bytes: StrictInt
 
 
 class UploadTarget(BaseModel):

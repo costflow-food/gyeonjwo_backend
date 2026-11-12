@@ -229,7 +229,7 @@
       "INFO_EXTRACTOR": 8,
       "CANDIDATE": 8,
       "INFO_PRIORITY": 10,
-      "RESPONSE_PLAN": 10,
+      "RESPONSE_PLAN": 14,
       "COUNTER_OFFER": 8
     },
     "role_calls_per_run": 6,
