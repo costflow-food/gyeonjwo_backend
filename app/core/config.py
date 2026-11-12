@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     supabase_publishable_key: SecretStr | None = None
     llm_base_url: HttpUrl | None = None
     llm_api_key: SecretStr | None = None
+    stt_url: HttpUrl | None = None
+    stt_model: str = ""
+    stt_api_key: SecretStr | None = None
     # 모델·추론 수준·시간 제한은 env가 아닌 코드 상수다. 모델과 추론 수준은 한 쌍으로 바꾼다
     llm_model: ClassVar[str] = 'gpt-6-luna'
     llm_classification_model: ClassVar[str] = 'gpt-5-nano'
@@ -36,9 +39,6 @@ class Settings(BaseSettings):
         'COUNTER_OFFER': 'high'}
     llm_timeout_seconds: ClassVar[int] = 60
     analysis_timeout_seconds: ClassVar[int] = 600
-    # 통화 녹음 STT. 화자 분리 모델은 발화마다 화자(A·B)와 시각을 준다. gpt-transcribe로 바꾸면 화자 없이 한 덩어리다
-    llm_stt_model: ClassVar[str] = 'gpt-4o-transcribe-diarize'
-    stt_timeout_seconds: ClassVar[int] = 300
     calculation_rounds: ClassVar[int] = 3
     max_document_characters: ClassVar[int] = 120000
     # 최초 메일함 가져오기(가장 최근 N통)에만 쓴다. 만료된 history 복구는 별도 경로가 페이지를 넘기며 가져오고,
@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     langsmith_workspace_id: str | None = None
 
     @field_validator('supabase_url', 'llm_base_url', 'supabase_secret_key', 'supabase_publishable_key',
-                     'llm_api_key', 'gmail_client_secret', 'google_token_encryption_key', 'langsmith_api_key',
+                     'llm_api_key', 'stt_url', 'stt_api_key', 'gmail_client_secret', 'google_token_encryption_key', 'langsmith_api_key',
                      'langsmith_workspace_id', mode='before')
     @classmethod
     def empty_optional_values(cls, value):

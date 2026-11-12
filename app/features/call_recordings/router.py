@@ -55,7 +55,7 @@ def complete_call_recording(case_id: UUID, recording_id: UUID, request: Request,
     업로드가 끝나면 전사 워커를 깨운다(전사는 백그라운드에서 하고 이 응답은 기다리지 않는다)."""
     data = service.complete(principal.user_id, case_id, recording_id)
     if data.get('status') == 'UPLOADED':
-        worker = getattr(request.app.state, 'call_transcription_worker', None)
+        worker = getattr(request.app.state, 'transcription_worker', None)
         if worker is not None:
             worker.wake()
     return api_json(data, model=CallRecording, headers=NO_STORE)

@@ -99,11 +99,11 @@ def start_graph_worker(state, settings):
 
 def start_call_recording_worker(state, settings):
     """통화 녹음 정리 워커(KAN-248)를 만들고 시작한다. DB 계약(버킷·한도)이 다르면 None으로 둔다."""
-    from app.features.call_recordings.infrastructure import CallRecordingStorage, CallTranscriptionRepository
+    from app.features.call_recordings.infrastructure import CallRecordingRepository, CallRecordingStorage
     from app.features.call_recordings.worker import CallRecordingCleanupWorker
     try:
         client = make_server_client(settings)
-        repo = CallTranscriptionRepository(client)
+        repo = CallRecordingRepository(client)
         if not repo.ready():
             raise RuntimeError('call recording contract unavailable')
         worker = CallRecordingCleanupWorker(repo, CallRecordingStorage(client))
@@ -115,24 +115,29 @@ def start_call_recording_worker(state, settings):
     return state.call_recording_worker
 
 
-def start_call_transcription_worker(state, settings):
-    """통화 녹음 전사 워커를 만들고 시작한다. DB가 전사 작업 함수(TRANSCRIPTION)를 제공하지 않거나 LLM 설정이 없으면 None."""
-    from app.features.call_recordings.infrastructure import CallRecordingStorage, CallTranscriptionRepository
-    from app.features.call_recordings.stt import OpenAiTranscriber
-    from app.features.call_recordings.transcription_worker import CallTranscriptionWorker
+def transcription_configured(settings):
+    return bool(getattr(settings, 'stt_url', None) and getattr(settings, 'stt_model', '').strip())
+
+
+def start_transcription_worker(state, settings):
+    if not transcription_configured(settings):
+        return None
+
+    from app.features.call_recordings.infrastructure import CallRecordingRepository, CallRecordingStorage
+    from app.features.call_recordings.transcription import HttpTranscriber, TranscriptionWorker
+
     try:
-        settings.require_llm()
         client = make_server_client(settings)
-        repo = CallTranscriptionRepository(client)
-        if not repo.transcription_ready():
-            raise RuntimeError('call transcription contract unavailable')
-        worker = CallTranscriptionWorker(repo, CallRecordingStorage(client), OpenAiTranscriber(settings))
+        repo = CallRecordingRepository(client)
+        repo.require_transcription_schema()
+        key = settings.stt_api_key.get_secret_value() if settings.stt_api_key else None
+        transcriber = HttpTranscriber(str(settings.stt_url), settings.stt_model.strip(), key)
+        worker = TranscriptionWorker(repo, CallRecordingStorage(client), transcriber)
         worker.start()
-        state.call_transcription_worker = worker
+        state.transcription_worker = worker
     except Exception:
-        state.call_transcription_worker = None
-        logger.warning('call transcription worker unavailable code=SCHEMA_REQUIRED; API remains available')
-    return state.call_transcription_worker
+        logger.warning('call recording transcription worker unavailable; API remains available')
+    return getattr(state, 'transcription_worker', None)
 
 
 def revive_workers(state, settings):
@@ -144,9 +149,8 @@ def revive_workers(state, settings):
         logger.info('worker recovered name=GraphWorker')
     if getattr(state, 'call_recording_worker', None) is None and start_call_recording_worker(state, settings) is not None:
         logger.info('worker recovered name=CallRecordingCleanupWorker')
-    if (getattr(state, 'call_transcription_worker', None) is None
-            and start_call_transcription_worker(state, settings) is not None):
-        logger.info('worker recovered name=CallTranscriptionWorker')
+    if getattr(state, 'transcription_worker', None) is None and start_transcription_worker(state, settings):
+        logger.info('worker recovered name=TranscriptionWorker')
 
 
 async def retry_unavailable_workers(state, settings, interval=WORKER_RETRY_SECONDS):
@@ -154,9 +158,9 @@ async def retry_unavailable_workers(state, settings, interval=WORKER_RETRY_SECON
     while True:
         await asyncio.sleep(interval)
         missing = state.extraction_worker is None or getattr(state, 'call_recording_worker', None) is None or (
-            getattr(state, 'call_transcription_worker', None) is None) or (
             state.connected_mailbox_worker is not None and (
             state.rfq_metadata_worker is None or state.rfq_workflow_worker is None))
+        missing = missing or (transcription_configured(settings) and getattr(state, 'transcription_worker', None) is None)
         if not missing:
             continue
         try:
