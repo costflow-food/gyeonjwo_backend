@@ -1,11 +1,11 @@
-"""통화 녹음 업로드 API (KAN-248, 업로드·목록만). STT·재생·삭제는 범위 밖.
+"""통화 녹음 업로드 API (KAN-248: 업로드·목록·삭제). 재생은 범위 밖.
 
 녹음은 견적 요청을 보낸 거래처의 회신으로 붙는다: 업로드 자리 요청에 supplier_id 가 필수다.
 """
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Header, Request, Response
 
 from app.api.responses import Envelope, ErrorEnvelope, api_json
 from app.core.request_context import current_request_id
@@ -66,3 +66,14 @@ def list_call_recordings(case_id: UUID, principal=Depends(require_google_user),
                          service=Depends(get_call_recording_service)):
     data = service.list(principal.user_id, case_id)
     return api_json(data, model=RecordingList, headers=NO_STORE)
+
+
+@router.delete('/{case_id}/call-recordings/{recording_id}', status_code=204, response_class=Response,
+               summary='통화 녹음 삭제: 행을 지우고 파일은 삭제 대기열이 지운다')
+def delete_call_recording(case_id: UUID, recording_id: UUID,
+                          principal=Depends(require_google_user), service=Depends(get_call_recording_service)):
+    """올리다 만·실패한 녹음도 지울 수 있다. 이미 없는 녹음이면 그대로 204(반복 호출해도 결과가 같다).
+    DB 가 지금은 지울 수 없다고 하면 CALL_RECORDING_DELETE_NOT_ALLOWED(409).
+    Storage 파일은 정리 워커가 다음 주기에 지운다."""
+    service.delete(principal.user_id, case_id, recording_id)
+    return Response(status_code=204, headers=NO_STORE)

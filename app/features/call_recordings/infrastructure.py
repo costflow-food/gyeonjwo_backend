@@ -62,6 +62,11 @@ class CallRecordingRepository:
     def list(self, owner, case_id):
         return self.rpc('list_call_recordings', p_owner=str(owner), p_case=str(case_id))
 
+    def delete(self, owner, case_id, recording_id):
+        """녹음 행을 지우고 Storage 파일을 삭제 대기열에 넣는다(DB 가 한 트랜잭션에서 처리)."""
+        return self.rpc('delete_call_recording', p_owner=str(owner), p_case=str(case_id),
+                        p_recording=str(recording_id))
+
     def expire_uploads(self, limit=100):
         return self.rpc('expire_call_recording_uploads', p_limit=limit)
 
