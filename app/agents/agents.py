@@ -418,6 +418,7 @@ next_action:
 2. check_comparability를 부른다. requirements에서 state가 CHECK인 항목은 stated(견적 값)가 required(업무 조건)를
    충족하는지 판단한다. 충족이라고 판단한 것만 met_requirements [{supplier_id, requirement}]로 모은다.
    판단할 수 없으면 넣지 않는다(그 업체는 빠진다).
+   메일 원문(read_mail_evidence)은 도구 결과만으로 판단할 수 없는 항목이 있는 업체만 읽는다. 모든 업체 메일을 읽지 않는다.
 3. build_plan_candidates(met_requirements)를 부른다. 도구가 유지·전환·분산 후보와 빠진 업체·이유를 돌려준다.
 4. 보일 안을 고른다. 기본은 유지안, 가장 싼 전환안, 가장 싼 분산안이다(있는 것만).
    비용 외의 이유(예: 처음 거래하는 업체는 물량 일부만, 납기가 늦은 업체 비중 축소)가 있으면 안을 더하거나 배정량을
