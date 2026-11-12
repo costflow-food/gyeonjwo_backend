@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     # 에이전트 역할별 추론 수준. 없는 역할은 llm_reasoning_effort(None이면 보내지 않음)
     llm_reasoning_effort: ClassVar[ReasoningEffort | None] = None
     llm_role_reasoning_efforts: ClassVar[dict[str, ReasoningEffort]] = {
-        'INFO_EXTRACTOR': 'low', 'CANDIDATE': 'low', 'INFO_PRIORITY': 'medium',
+        'INFO_EXTRACTOR': 'medium', 'CANDIDATE': 'low', 'INFO_PRIORITY': 'medium',
         'RESPONSE_PLAN': 'medium', 'COUNTER_OFFER': 'low'}
     # LLM 검증자(에이전트 결과를 원문·도구 결과와 대조). 여기에 추론 수준이 있는 역할만 검증한다.
     # ②③⑤는 초안 도구를 실행하기 전에, ①④는 최종 답을 검증한다
