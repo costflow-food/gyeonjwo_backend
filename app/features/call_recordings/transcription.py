@@ -2,6 +2,7 @@
 import logging
 from pathlib import PurePosixPath
 import threading
+from uuid import uuid4
 
 import httpx
 
@@ -30,7 +31,8 @@ class HttpTranscriber:
             timeout=120, follow_redirects=False,
         )
         response.raise_for_status()
-        return response.json()['text']
+        result = response.json()
+        return result['text'], result.get('language')
 
 
 class TranscriptionWorker:
@@ -39,11 +41,12 @@ class TranscriptionWorker:
         self.storage = storage
         self.transcriber = transcriber
         self.poll_seconds = poll_seconds
+        self.worker_id = f'stt-{uuid4().hex}'
         self.stop = threading.Event()
         self.thread = None
 
     def process(self, recording_id):
-        claims = self.repo.claim_transcription(recording_id, LEASE_SECONDS)
+        claims = self.repo.claim_transcription(recording_id, LEASE_SECONDS, self.worker_id)
         if claims == []:
             return
         if not isinstance(claims, list) or len(claims) != 1:
@@ -51,16 +54,22 @@ class TranscriptionWorker:
 
         job = claims[0]
         path = job['storage_path']
+        language = None
+        failure = None
         try:
-            transcript = self.transcriber.transcribe(path, self.storage.download(path))
-            if not isinstance(transcript, str) or '\x00' in transcript:
+            transcript, language = self.transcriber.transcribe(path, self.storage.download(path))
+            if not isinstance(transcript, str) or not transcript.strip() or '\x00' in transcript or len(transcript) > 200000:
                 raise ValueError('Invalid STT transcript')
+            if not isinstance(language, str) or '\x00' in language:
+                language = None
         except Exception as error:
             logger.warning('call recording transcription failed type=%s', type(error).__name__)
             transcript = None
+            failure = type(error).__name__
 
         # A DB transport failure leaves the lease available for recovery on expiry.
-        stored = self.repo.finish_transcription(recording_id, job['lease_token'], transcript)
+        stored = self.repo.finish_transcription(recording_id, job['lease_token'], transcript,
+                                                language=language, model=self.transcriber.model, error=failure)
         if stored is False:
             logger.info('call recording transcription result discarded after lease loss')
         elif stored is not True:
