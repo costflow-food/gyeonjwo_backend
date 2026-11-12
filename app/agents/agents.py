@@ -1754,6 +1754,82 @@ def with_note(output: AgentOutput, note: str) -> AgentOutput:
     return type(output).model_validate(output.model_dump() | {'reason': reason})
 
 
+UNKNOWN_SUPPLIER = '확인되지 않은 업체'
+# 업체 이름표(S3)와 바로 뒤 조사. 조사 한 글자는 뒤에 한글이 이어지면(예: "S3이며") 조사로 보지 않는다
+_SUPPLIER_LABEL = re.compile(r'(?<![A-Za-z0-9])(S\d+)(?![A-Za-z0-9])(으로|은|는|이|가|을|를|과|와|로)?')
+_PARTICLES = {'은': ('은', '는'), '는': ('은', '는'), '이': ('이', '가'), '가': ('이', '가'), '을': ('을', '를'),
+              '를': ('을', '를'), '과': ('과', '와'), '와': ('과', '와'), '으로': ('으로', '로'), '로': ('으로', '로')}
+
+
+def _particle(name: str, particle: str) -> str:
+    """name 뒤에 맞는 조사. 마지막 글자가 한글이 아니면 LLM이 쓴 조사를 그대로 둔다."""
+    last = name[-1:]
+    if not ('가' <= last <= '힣'):
+        return particle
+    final = (ord(last) - 0xAC00) % 28
+    with_final, without_final = _PARTICLES[particle]
+    if particle in ('으로', '로'):
+        return without_final if final in (0, 8) else with_final      # 받침 없음·ㄹ 받침은 '로'
+    return with_final if final else without_final
+
+
+def _named_text(text: str, names: dict[str, str], limit: int) -> str:
+    """문장 속 업체 이름표를 업체명으로(조사도 맞춘다). limit을 넘으면 앞을 줄인다."""
+    def replace(match: re.Match) -> str:
+        if match.group(1) not in names:
+            return match.group(0)
+        name = names[match.group(1)]
+        particle = match.group(2) or ''
+        after = text[match.end():match.end() + 1]
+        if particle and (len(particle) == 2 or not '가' <= after <= '힣'):
+            particle = _particle(name, particle)
+        return name + particle
+    named = _SUPPLIER_LABEL.sub(replace, text)
+    return named if len(named) <= limit else named[:limit - 1] + '…'
+
+
+def with_supplier_names(output: AgentOutput, handles: 'IdHandles', case_id: str) -> AgentOutput:
+    """담당자가 읽는 reason 문장의 업체 이름표(S1·S2…)를 업체명으로 바꾼다. 최종 검사·LLM 검증이 끝난 뒤
+    저장 직전에 한 번 쓴다(검사·검증은 도구 결과와 같은 이름표로 비교한다). reason 외의 필드(원문 인용·ID·산식)는
+    그대로 둔다. 업체명은 등록 업체 조회(get_supplier)로 얻고, 모르거나 조회에 실패하면 '확인되지 않은 업체'로 쓴다."""
+    from app.agents import tools as agent_tools
+    data = output.model_dump()
+    labels = set()
+
+    def collect(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == 'reason' and isinstance(item, str):
+                    labels.update(m.group(1) for m in _SUPPLIER_LABEL.finditer(item))
+                else:
+                    collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+    collect(data)
+    labels &= set(handles.by_handle)
+    if not labels:
+        return output
+    names = {}
+    for label in labels:
+        try:
+            row = agent_tools._candidate_store.get_supplier(case_id, handles.by_handle[label])
+            name = (row or {}).get('name')
+        except Exception as error:      # 표시용 이름 조회 실패로 실행을 실패시키지 않는다
+            logger.warning('supplier name lookup failed error=%s', type(error).__name__)
+            name = None
+        names[label] = name.strip() if isinstance(name, str) and name.strip() else UNKNOWN_SUPPLIER
+
+    def rename(value, top=False):
+        if isinstance(value, dict):
+            return {key: _named_text(item, names, 500 if top else 300) if key == 'reason' and isinstance(item, str)
+                    else rename(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [rename(item) for item in value]
+        return value
+    return type(output).model_validate(rename(data, top=True))
+
+
 class ToolCallLog(BaseCallbackHandler):
     """에이전트 실행 중 부른 도구와 결과를 순서대로 모은다. 실행이 실패하면 AgentRunner가 부분 결과로 남긴다."""
 
@@ -1832,6 +1908,8 @@ class AgentRunner:
                                            {'partial_tool_calls': log.calls} if log.calls else None,
                                            {'type': type(error).__name__})
             raise
+        if role != AgentRole.INFO_EXTRACTOR:      # ①은 KAN-259 범위 밖(테스트 진행 중)
+            output = with_supplier_names(output, handles, context.case_id)
         if self.runs is not None:      # 06 agent_runs.output_jsonb: 구조화 결과 + 참고한 견적 ID(source_quote_ids)
             sources = {'source_quote_ids': list(data.quote_version_ids)} if hasattr(data, 'quote_version_ids') else {}
             self.runs.finish_agent_run(context.agent_run_id, 'COMPLETED', output.model_dump(mode='json') | sources, None)
