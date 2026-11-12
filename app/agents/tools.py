@@ -2443,14 +2443,15 @@ def use_priority_store(store: PriorityStore | None) -> None:
 
 
 # 총액을 막는 사유 → 업체에 물을 견적 항목 (①이 다시 추출할 때도 같은 이름을 쓴다)
-_PRICE_BLOCK_FIELDS = {'NO_PRICE': 'unit_price', 'UNIT_MISSING': 'unit', 'UNIT_MISMATCH': 'unit',
+_PRICE_BLOCK_FIELDS = {'NO_PRICE': 'unit_price', 'UNIT_MISSING': 'unit', 'UNIT_MISMATCH': 'quantity_per_order_unit',
                        'TIER_NOT_COVERED': 'price_tiers', 'TIER_UNCLEAR': 'price_tiers', 'FOREIGN_CURRENCY': 'currency'}
 COST_LABELS = {'SHIPPING': '운송비', 'HANDLING': '하차비', 'OTHER': '기타 비용'}
 # 보완 요청 질문 문장. 비용은 'cost:<cost_type>' 필드로 묻는다
 CLARIFY_QUESTIONS = {'specification': '규격(등급·중량·포장 단위)', 'certifications': '인증 보유 여부와 증빙',
                      'available_quantity': '요청 수량 공급 가능 여부와 최대 공급량',
                      'delivery_date': '요청 납기일 납품 가능 여부(또는 발주 후 납품까지 걸리는 기간)',
-                     'unit_price': '단가', 'unit': '단가 기준 단위(예: kg당, 박스당)와 박스당 중량',
+                     'unit_price': '단가', 'unit': '단가 기준 단위(예: kg당, 박스당)',
+                     'quantity_per_order_unit': '박스(주문 단위)당 중량',
                      'price_tiers': '요청 수량에 적용되는 단가', 'currency': '원화 기준 단가',
                      'tax_terms': '단가의 부가세 포함·별도·면세 여부'}
 
