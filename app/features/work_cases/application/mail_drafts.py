@@ -30,6 +30,7 @@ SUBMIT_ERROR_MESSAGES = {
     'RESOURCE_NOT_FOUND': '메일 초안을 찾을 수 없습니다.',
     'REVISION_CONFLICT': '업무 내용이 바뀌었습니다. 최신 초안을 확인해 주세요.',
     'DRAFT_CHANGED': '초안이 바뀌었습니다. 최신 초안을 확인해 주세요.',
+    'CANDIDATES_CHANGED': '후보 정보가 바뀌었습니다. 업무의 최신 후보와 초안을 확인해 주세요.',
     'SETTINGS_CHANGED': '발송 설정이 바뀌었습니다. 최신 설정을 확인한 뒤 다시 승인해 주세요.',
     'SEND_RESULT_UNKNOWN': '발송 결과를 확인하는 중인 초안입니다. 보낸편지함 대조를 먼저 해 주세요.',
     'ACTION_NOT_ALLOWED': '지금 업무 상태에서는 이 초안을 보낼 수 없습니다.',
@@ -154,7 +155,8 @@ class MailDraftService:
         if isinstance(result, dict) and result.get('kind') == 'ERROR':
             code = result.get('code')
             statuses = {'RESOURCE_NOT_FOUND': 404, 'REVISION_CONFLICT': 409, 'DRAFT_CHANGED': 409,
-                        'SETTINGS_CHANGED': 409, 'SEND_RESULT_UNKNOWN': 409, 'ACTION_NOT_ALLOWED': 409,
+                        'SETTINGS_CHANGED': 409, 'CANDIDATES_CHANGED': 409, 'SEND_RESULT_UNKNOWN': 409,
+                        'ACTION_NOT_ALLOWED': 409,
                         'REQUEST_IN_PROGRESS': 409, 'IDEMPOTENCY_KEY_REUSED': 409,
                         'SEND_SCOPE_REQUIRED': 422, 'PROCESSING_UNAVAILABLE': 503}
             if code in statuses:
