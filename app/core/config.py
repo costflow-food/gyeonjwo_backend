@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     supabase_publishable_key: SecretStr | None = None
     llm_base_url: HttpUrl | None = None
     llm_api_key: SecretStr | None = None
+    stt_url: HttpUrl | None = None
+    stt_model: str = ""
+    stt_api_key: SecretStr | None = None
     # 모델·추론 수준·시간 제한은 env가 아닌 코드 상수다. 모델과 추론 수준은 한 쌍으로 바꾼다
     llm_model: ClassVar[str] = 'gpt-6-luna'
     llm_classification_model: ClassVar[str] = 'gpt-5-nano'
@@ -65,7 +68,7 @@ class Settings(BaseSettings):
     langsmith_workspace_id: str | None = None
 
     @field_validator('supabase_url', 'llm_base_url', 'supabase_secret_key', 'supabase_publishable_key',
-                     'llm_api_key', 'gmail_client_secret', 'google_token_encryption_key', 'langsmith_api_key',
+                     'llm_api_key', 'stt_url', 'stt_api_key', 'gmail_client_secret', 'google_token_encryption_key', 'langsmith_api_key',
                      'langsmith_workspace_id', mode='before')
     @classmethod
     def empty_optional_values(cls, value):
