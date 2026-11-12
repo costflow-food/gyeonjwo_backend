@@ -363,8 +363,9 @@ class RepositoryTests(unittest.TestCase):
     def test_ready_needs_supplier_contract(self):
         health = {'contract_version': CONTRACT_VERSION, 'ready': True, 'bucket': BUCKET, 'max_bytes': MAX_BYTES,
                   'max_per_case': MAX_PER_CASE}
-        self.assertEqual(CONTRACT_VERSION, 2)
+        self.assertEqual(CONTRACT_VERSION, 3)
         self.assertTrue(self.repo(health)[0].ready())
+        self.assertTrue(self.repo({**health, 'contract_version': 2})[0].ready())
         # 거래처 추가분이 적용되기 전의 DB(계약 1)에서는 기능을 켜지 않는다
         self.assertFalse(self.repo({**health, 'contract_version': 1})[0].ready())
 

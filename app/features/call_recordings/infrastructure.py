@@ -34,7 +34,7 @@ class CallRecordingRepository:
     def ready(self):
         """DB 계약(버킷·한도)이 이 코드와 같은지 확인한다."""
         result = self.health()
-        return (isinstance(result, dict) and result.get('contract_version') == CONTRACT_VERSION
+        return (isinstance(result, dict) and result.get('contract_version') in (CONTRACT_VERSION, CONTRACT_VERSION - 1)
                 and result.get('ready') is True and result.get('bucket') == BUCKET
                 and result.get('max_bytes') == MAX_BYTES and result.get('max_per_case') == MAX_PER_CASE)
 
@@ -116,8 +116,10 @@ class CallRecordingStorage:
         return size
 
     def remove(self, paths):
-        # 없는 파일 삭제도 성공으로 돌아온다(멱등).
-        self.bucket.remove(list(paths))
+        removed = self.bucket.remove(list(paths))
+        if not isinstance(removed, list):
+            return []
+        return [item['name'] for item in removed if isinstance(item, dict) and isinstance(item.get('name'), str)]
 
     def download_to(self, path, target, *, transport=None):
         """비공개 파일을 짧은 서명 URL로 받아 target 파일에 스트리밍으로 쓴다(메모리에 통째로 올리지 않는다)."""

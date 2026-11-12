@@ -36,16 +36,29 @@ class CallRecordingCleanupWorker:
         jobs = self.repo.claim_deletions(self.worker_id, 20, 120)
         if not isinstance(jobs, list):
             raise ValueError('Invalid deletion claim')
+        deleted = 0
         if jobs:
+            removed, error = set(), None
             try:
-                self.storage.remove([job['storage_path'] for job in jobs])
-                ok, error = True, None
+                removed = set(self.storage.remove([job['storage_path'] for job in jobs]) or ())
             except Exception as failure:
-                ok, error = False, type(failure).__name__
+                error = type(failure).__name__
                 logger.warning('call_recording file_delete_failed count=%d', len(jobs))
             for job in jobs:
-                self.repo.finish_deletion(job['id'], self.worker_id, ok, error)
-        return {'expired': expired or 0, 'deleted': len(jobs) if jobs else 0}
+                path = job['storage_path']
+                job_error = error
+                if job_error is None and path not in removed:
+                    job_error = self._verify_absence(path)
+                self.repo.finish_deletion(job['id'], self.worker_id, job_error is None, job_error)
+                deleted += job_error is None
+        return {'expired': expired or 0, 'deleted': deleted}
+
+    def _verify_absence(self, path):
+        try:
+            return None if self.storage.object_size(path) is None else 'FILE_STILL_EXISTS'
+        except Exception as failure:
+            logger.warning('call_recording file_delete_unverified')
+            return type(failure).__name__
 
     def loop(self):
         while not self.stop.is_set():
