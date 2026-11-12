@@ -6,8 +6,8 @@ from app.core.errors import ServiceError
 from app.core.idempotency import request_identity
 from app.features.call_recordings.domain import CONTENT_TYPES, ERRORS, MAX_BYTES
 
-PUBLIC_FIELDS = ('recording_id', 'case_id', 'file_name', 'extension', 'content_type', 'size_bytes', 'status',
-                 'failure_reason', 'created_at', 'uploaded_at')
+PUBLIC_FIELDS = ('recording_id', 'case_id', 'supplier_id', 'file_name', 'extension', 'content_type', 'size_bytes',
+                 'status', 'failure_reason', 'created_at', 'uploaded_at')
 
 
 def recording_error(code):
@@ -15,6 +15,13 @@ def recording_error(code):
     if code not in ERRORS:
         code = 'CALL_RECORDING_UNAVAILABLE'
     return ServiceError(code, message, status, retryable=retryable, next_action=next_action)
+
+
+def _with_supplier(recording):
+    """거래처가 없는 응답은 DB 가 아직 계약 2(거래처 추가분) 이전이라는 뜻이다: 기능 미준비로 닫는다."""
+    if not isinstance(recording, dict) or not recording.get('supplier_id'):
+        raise recording_error('CALL_RECORDING_UNAVAILABLE')
+    return recording
 
 
 def _public(recording):
@@ -64,8 +71,8 @@ class CallRecordingService:
         body = payload.model_dump(mode='json')
         identity = request_identity(str(owner), 'POST', collection_path(case_id), key, body)
         name, extension, size = self.validate(payload)
-        result = self.repo.create(owner, case_id, self.new_id(), name, extension, size, identity.key,
-                                  identity.body_hash, request_id)
+        result = self.repo.create(owner, case_id, self.new_id(), payload.supplier_id, name, extension, size,
+                                  identity.key, identity.body_hash, request_id)
         kind = result.get('kind') if isinstance(result, dict) else None
         if kind == 'ERROR':
             raise recording_error(result.get('code'))
@@ -74,9 +81,9 @@ class CallRecordingService:
         recording = result.get('recording')
         if recording is None:
             # 같은 키의 녹음이 이미 업무 삭제로 사라졌다: 저장된 첫 응답만 돌려준다.
-            data = dict(result['response']['data'], upload=None)
+            data = dict(_with_supplier(result['response']['data']), upload=None)
         else:
-            data = dict(_public(recording), upload=self.upload_target(recording))
+            data = dict(_public(_with_supplier(recording)), upload=self.upload_target(recording))
         return int(result.get('http_status') or 201), data
 
     def complete(self, owner, case_id, recording_id):
@@ -89,7 +96,7 @@ class CallRecordingService:
             raise ServiceError('PROCESSING_UNAVAILABLE', '녹음 업로드 완료를 확인하지 못했습니다.', 503)
         if result['kind'] == 'ERROR':
             raise recording_error(result.get('code'))
-        return result['recording']
+        return _with_supplier(result['recording'])
 
     def list(self, owner, case_id):
         result = self.repo.list(owner, case_id)
@@ -97,4 +104,4 @@ class CallRecordingService:
             raise ServiceError('PROCESSING_UNAVAILABLE', '녹음 목록을 불러오지 못했습니다.', 503)
         if result['kind'] == 'ERROR':
             raise recording_error(result.get('code'))
-        return {'items': result['items'], 'limits': result['limits']}
+        return {'items': [_with_supplier(item) for item in result['items']], 'limits': result['limits']}

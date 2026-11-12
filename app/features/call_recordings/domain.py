@@ -5,7 +5,9 @@
 - 업무를 수용(삭제)하면 녹음 행은 DB 에서 함께 지워지고 Storage 파일은 삭제 대기열이 지운다
 - 업무가 남아 있는 동안 보관한다(별도 보관 기한 없음)
 - 오류 코드는 통화 녹음 전용 `CALL_RECORDING_*` 를 쓴다(멱등 공통 코드만 예외)
-DB(sql 3.24.0, call_recording_health contract_version 1)와 값을 맞춘다.
+- 녹음은 견적 요청에 대한 거래처 회신이다: 이 업무에서 견적 요청(RFQ)을 보낸 거래처(supplier_id)가 필수다.
+  보낸 거래처인지는 DB 가 업무 잠금 안에서 판단한다(CALL_RECORDING_SUPPLIER_NOT_ALLOWED)
+DB(call_recording_health contract_version 2 = sql 3.24.0 + 거래처 추가분)와 값을 맞춘다.
 """
 from datetime import datetime
 from typing import Literal
@@ -18,7 +20,7 @@ from app.shared.domain.schemas import StrictModel
 BUCKET = 'call-recordings'
 MAX_BYTES = 52_428_800
 MAX_PER_CASE = 10
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 # 확장자 → 업로드할 때 보낼 Content-Type. 버킷 허용 MIME 과 같은 목록(DB internal.call_recording_content_type).
 CONTENT_TYPES = {
     'm4a': 'audio/mp4', 'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'aac': 'audio/aac', 'amr': 'audio/amr',
@@ -32,6 +34,7 @@ ERRORS = {
     'CALL_RECORDING_TOO_LARGE': (413, '녹음 파일은 50MB까지 올릴 수 있습니다.', False, None),
     'CALL_RECORDING_CASE_NOT_FOUND': (404, '업무를 찾을 수 없습니다.', False, 'REFRESH_CASE'),
     'CALL_RECORDING_NOT_FOUND': (404, '녹음을 찾을 수 없습니다.', False, 'REFRESH_RECORDINGS'),
+    'CALL_RECORDING_SUPPLIER_NOT_ALLOWED': (422, '견적을 요청한 거래처만 고를 수 있습니다.', False, 'REFRESH_CASE'),
     'CALL_RECORDING_LIMIT_EXCEEDED': (409, '업무 하나에 녹음은 10개까지 올릴 수 있습니다.', False, None),
     'CALL_RECORDING_UPLOAD_INCOMPLETE': (409, '파일 업로드가 아직 끝나지 않았습니다.', False, 'UPLOAD_FILE'),
     'CALL_RECORDING_UPLOAD_EXPIRED': (410, '업로드 가능 시간이 지났습니다. 다시 추가해 주세요.', False, 'CREATE_RECORDING'),
@@ -47,6 +50,7 @@ Status = Literal['UPLOADING', 'UPLOADED', 'FAILED']
 
 
 class CreateRecordingRequest(StrictModel):
+    supplier_id: UUID
     file_name: str
     extension: str
     size_bytes: int
@@ -64,6 +68,7 @@ class UploadTarget(BaseModel):
 class CallRecording(BaseModel):
     recording_id: UUID
     case_id: UUID
+    supplier_id: UUID
     file_name: str
     extension: str
     content_type: str

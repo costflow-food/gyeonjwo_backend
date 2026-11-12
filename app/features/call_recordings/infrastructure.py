@@ -35,10 +35,12 @@ class CallRecordingRepository:
                 and result.get('ready') is True and result.get('bucket') == BUCKET
                 and result.get('max_bytes') == MAX_BYTES and result.get('max_per_case') == MAX_PER_CASE)
 
-    def create(self, owner, case_id, recording_id, file_name, extension, size_bytes, key, body_hash, request_id):
+    def create(self, owner, case_id, recording_id, supplier_id, file_name, extension, size_bytes, key, body_hash,
+               request_id):
+        """p_supplier 는 필수 인자다. DB 가 같은 트랜잭션에서 이 업무로 견적 요청(RFQ)을 보낸(SENT) 거래처인지 확인한다."""
         return self.rpc('create_call_recording', p_owner=str(owner), p_case=str(case_id), p_recording=str(recording_id),
-                        p_file_name=file_name, p_extension=extension, p_size_bytes=size_bytes,
-                        p_key=key, p_hash=body_hash, p_request_id=request_id)
+                        p_supplier=str(supplier_id), p_file_name=file_name, p_extension=extension,
+                        p_size_bytes=size_bytes, p_key=key, p_hash=body_hash, p_request_id=request_id)
 
     def find(self, owner, case_id, recording_id):
         """완료 처리 전 Storage 경로·상태를 읽는다. 없으면 None."""
