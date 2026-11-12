@@ -49,10 +49,15 @@ def create_call_recording(case_id: UUID, payload: CreateRecordingRequest,
 
 @router.post('/{case_id}/call-recordings/{recording_id}/complete', response_model=Envelope[CallRecording],
              summary='통화 녹음 업로드 완료: Storage 의 실제 파일·크기를 확인')
-def complete_call_recording(case_id: UUID, recording_id: UUID,
+def complete_call_recording(case_id: UUID, recording_id: UUID, request: Request,
                             principal=Depends(require_google_user), service=Depends(get_call_recording_service)):
-    """반복 호출해도 결과가 같다. 파일이 아직 없으면 CALL_RECORDING_UPLOAD_INCOMPLETE."""
+    """반복 호출해도 결과가 같다. 파일이 아직 없으면 CALL_RECORDING_UPLOAD_INCOMPLETE.
+    업로드가 끝나면 전사 워커를 깨운다(전사는 백그라운드에서 하고 이 응답은 기다리지 않는다)."""
     data = service.complete(principal.user_id, case_id, recording_id)
+    if data.get('status') == 'UPLOADED':
+        worker = getattr(request.app.state, 'transcription_worker', None)
+        if worker is not None:
+            worker.wake()
     return api_json(data, model=CallRecording, headers=NO_STORE)
 
 
