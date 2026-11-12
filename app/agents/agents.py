@@ -116,8 +116,9 @@ PROMPTS = {
    - SUPPLIER_NOT_MATCHED: 법인 표기·부서·직책은 도구가 이미 빼고 찾았다. 다시 보내지 말고(업체명을 빼고도 보내지 않는다)
      바로 HOLD한다(hold.code SUPPLIER_NOT_MATCHED).
    - SUPPLIER_MISMATCH: 저장하지 말고 HOLD를 반환한다.
-   - SUPPLY_QUANTITY_MISSING: 기존 업체의 인상 통보인데 공급 물량이 없다. 원문에 공급 계획·공급 물량·공급 가능량이라고
-     적힌 수량만 단위와 함께 available_quantity로 한 번 다시 보낸다. 규격·포장·주문 단위의 수량(예: 10kg/박스,
+   - SUPPLY_QUANTITY_MISSING: 기존 업체의 인상 통보인데 공급 물량이 없다. 같은 메일의 본문·첨부 중 아직 읽지 않은
+     부분이 있으면 HOLD하기 전에 read_mail_evidence로 읽는다(견적은 첨부, 공급 물량은 본문에 있을 수 있다).
+     원문에 공급 계획·공급 물량·공급 가능량이라고 적힌 수량만 단위와 함께 available_quantity로 한 번 다시 보낸다. 규격·포장·주문 단위의 수량(예: 10kg/박스,
      박스당 10kg, 주문 단위 10kg 박스)은 공급 물량이 아니다. 그런 수량만 있으면 다시 보내지 말고 바로 HOLD한다.
    - VALID_UNTIL_BEFORE_EFFECTIVE: 유효기간이 적용일보다 이르다. 그 날짜는 회신 기한이다. valid_until을 빼고
      "견적 유효기간 …까지" 문장을 원문 그대로 item_notes에 비고(PRICE_NOTICE)로 넣어 한 번 다시 보낸다.
