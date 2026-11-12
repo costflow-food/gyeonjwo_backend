@@ -115,6 +115,31 @@ def start_call_recording_worker(state, settings):
     return state.call_recording_worker
 
 
+def transcription_configured(settings):
+    return bool(getattr(settings, 'stt_url', None) and getattr(settings, 'stt_model', '').strip())
+
+
+def start_transcription_worker(state, settings):
+    if not transcription_configured(settings):
+        return None
+
+    from app.features.call_recordings.infrastructure import CallRecordingRepository, CallRecordingStorage
+    from app.features.call_recordings.transcription import HttpTranscriber, TranscriptionWorker
+
+    try:
+        client = make_server_client(settings)
+        repo = CallRecordingRepository(client)
+        repo.require_transcription_schema()
+        key = settings.stt_api_key.get_secret_value() if settings.stt_api_key else None
+        transcriber = HttpTranscriber(str(settings.stt_url), settings.stt_model.strip(), key)
+        worker = TranscriptionWorker(repo, CallRecordingStorage(client), transcriber)
+        worker.start()
+        state.transcription_worker = worker
+    except Exception:
+        logger.warning('call recording transcription worker unavailable; API remains available')
+    return getattr(state, 'transcription_worker', None)
+
+
 def revive_workers(state, settings):
     """부팅 때 못 뜬 RFQ·그래프 워커를 다시 띄운다. 이미 떠 있는 워커는 건드리지 않는다."""
     for worker in create_missing_rfq_workers(state, settings):
@@ -124,6 +149,8 @@ def revive_workers(state, settings):
         logger.info('worker recovered name=GraphWorker')
     if getattr(state, 'call_recording_worker', None) is None and start_call_recording_worker(state, settings) is not None:
         logger.info('worker recovered name=CallRecordingCleanupWorker')
+    if getattr(state, 'transcription_worker', None) is None and start_transcription_worker(state, settings):
+        logger.info('worker recovered name=TranscriptionWorker')
 
 
 async def retry_unavailable_workers(state, settings, interval=WORKER_RETRY_SECONDS):
@@ -133,6 +160,7 @@ async def retry_unavailable_workers(state, settings, interval=WORKER_RETRY_SECON
         missing = state.extraction_worker is None or getattr(state, 'call_recording_worker', None) is None or (
             state.connected_mailbox_worker is not None and (
             state.rfq_metadata_worker is None or state.rfq_workflow_worker is None))
+        missing = missing or (transcription_configured(settings) and getattr(state, 'transcription_worker', None) is None)
         if not missing:
             continue
         try:
