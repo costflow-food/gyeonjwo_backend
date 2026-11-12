@@ -32,7 +32,7 @@ class CallRecordingRepository:
     def ready(self):
         """DB 계약(버킷·한도)이 이 코드와 같은지 확인한다."""
         result = self.health()
-        return (isinstance(result, dict) and result.get('contract_version') == CONTRACT_VERSION
+        return (isinstance(result, dict) and result.get('contract_version') in (CONTRACT_VERSION, CONTRACT_VERSION - 1)
                 and result.get('ready') is True and result.get('bucket') == BUCKET
                 and result.get('max_bytes') == MAX_BYTES and result.get('max_per_case') == MAX_PER_CASE)
 
@@ -72,22 +72,22 @@ class CallRecordingRepository:
                         p_ok=ok, p_error=error)
 
     def require_transcription_schema(self):
-        if self.claim_transcription(None, 300) != [] or self.finish_transcription(None, None, None) is not False:
+        if self.claim_transcription(None, 300, 'readiness') != [] or self.finish_transcription(None, None, None) is not False:
             raise RuntimeError('Unexpected transcription DB contract')
 
     def transcription_candidates(self, limit):
         now = datetime.now(timezone.utc).isoformat()
-        rows = (self.client.table('call_recording_stt').select('recording_id')
-                .or_(f'status.eq.rec-pending,and(status.eq.rec-processing,lease_until.lte.{now})')
-                .order('lease_until').order('recording_id').limit(limit).execute().data)
-        return [row['recording_id'] for row in rows]
+        rows = (self.client.table('call_recordings').select('id')
+                .or_(f'stt_status.eq.rec-pending,and(stt_status.eq.rec-processing,stt_lease_until.lte.{now})')
+                .order('stt_lease_until').order('id').limit(limit).execute().data)
+        return [row['id'] for row in rows]
 
-    def claim_transcription(self, recording_id, lease_seconds):
-        return self.rpc('claim_call_recording_stt', p_recording_id=recording_id, p_lease_seconds=lease_seconds)
+    def claim_transcription(self, recording_id, lease_seconds, worker):
+        return self.rpc('claim_call_recording_stt', p_recording_id=recording_id, p_lease_seconds=lease_seconds, p_worker=worker)
 
-    def finish_transcription(self, recording_id, lease_token, transcript):
+    def finish_transcription(self, recording_id, lease_token, transcript, *, language=None, model=None, error=None):
         return self.rpc('finish_call_recording_stt', p_recording_id=recording_id, p_lease_token=lease_token,
-                        p_transcript=transcript)
+                        p_transcript=transcript, p_language=language, p_model=model, p_error=error)
 
 
 def _storage_failure():
@@ -135,5 +135,7 @@ class CallRecordingStorage:
         return self.bucket.download(path)
 
     def remove(self, paths):
-        # 없는 파일 삭제도 성공으로 돌아온다(멱등).
-        self.bucket.remove(list(paths))
+        removed = self.bucket.remove(list(paths))
+        if not isinstance(removed, list):
+            return []
+        return [item['name'] for item in removed if isinstance(item, dict) and isinstance(item.get('name'), str)]

@@ -7,7 +7,7 @@ from app.core.idempotency import request_identity
 from app.features.call_recordings.domain import CONTENT_TYPES, ERRORS, MAX_BYTES
 
 PUBLIC_FIELDS = ('recording_id', 'case_id', 'supplier_id', 'file_name', 'extension', 'content_type', 'size_bytes',
-                 'status', 'failure_reason', 'created_at', 'uploaded_at')
+                 'status', 'failure_reason', 'created_at', 'uploaded_at', 'stt_status')
 
 
 def recording_error(code):
