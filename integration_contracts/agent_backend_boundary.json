@@ -72,7 +72,7 @@
       "INFO_EXTRACTOR": 8,
       "CANDIDATE": 8,
       "INFO_PRIORITY": 10,
-      "RESPONSE_PLAN": 10,
+      "RESPONSE_PLAN": 14,
       "COUNTER_OFFER": 8
     },
     "note": "Agent sources remain identical to PR base. Agent team merges its TOOL_CALL_LIMITS implementation separately; backend adds no role-limit override."
