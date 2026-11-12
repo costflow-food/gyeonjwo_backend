@@ -63,7 +63,14 @@ class CallRecordingService:
         expires_at = _parse_time(recording['upload_expires_at'])
         if self.clock() >= expires_at:
             return None
-        signed = self.storage.signed_upload(recording['storage_path'])
+        try:
+            signed = self.storage.signed_upload(recording['storage_path'])
+        except ServiceError:
+            # 파일이 이미 올라가 있으면 Storage 가 서명을 거절한다(덮어쓰기 불가). 그때는 업로드 자리 없이 돌려줘
+            # 앱이 바로 완료 요청으로 넘어가게 한다. 파일이 없으면 저장소 장애이므로 그대로 올린다.
+            if self.storage.object_size(recording['storage_path']) is None:
+                raise
+            return None
         return {'method': 'PUT', 'url': signed['signed_url'], 'token': signed['token'], 'path': signed['path'],
                 'content_type': recording['content_type'], 'expires_at': recording['upload_expires_at']}
 

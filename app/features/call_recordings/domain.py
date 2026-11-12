@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 
 from app.shared.domain.schemas import StrictModel
 
@@ -54,7 +54,7 @@ class CreateRecordingRequest(StrictModel):
     supplier_id: UUID
     file_name: str
     extension: str
-    size_bytes: int
+    size_bytes: StrictInt
 
 
 class UploadTarget(BaseModel):

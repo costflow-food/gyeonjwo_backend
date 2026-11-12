@@ -90,9 +90,13 @@ class FakeRepo:
 
 class FakeStorage:
     def __init__(self):
-        self.objects, self.signed, self.removed, self.fail_remove = {}, [], [], False
+        self.objects, self.signed, self.removed, self.fail_remove, self.fail_sign = {}, [], [], False, False
 
     def signed_upload(self, path):
+        if path in self.objects or self.fail_sign:
+            # 실제 Storage 처럼: 이미 있는 경로는 서명을 거절한다(덮어쓰기 불가).
+            raise ServiceError('CALL_RECORDING_STORAGE_UNAVAILABLE', '녹음 저장소에 연결할 수 없습니다.', 503,
+                               retryable=True)
         self.signed.append(path)
         return {'signed_url': f'https://storage.example/upload/sign/call-recordings/{path}?token=t{len(self.signed)}',
                 'token': f't{len(self.signed)}', 'path': path}
@@ -138,6 +142,26 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual((status, second['recording_id']), (201, first['recording_id']))
         self.assertEqual(len(self.repo.rows), 1)
         self.assertNotEqual(first['upload']['token'], second['upload']['token'])
+
+    def test_same_key_after_file_uploaded_returns_no_upload(self):
+        # 파일은 올라갔지만 완료 요청 전에 끊긴 뒤 재시도: 503 대신 업로드 자리 없이 돌려줘 완료로 넘어가게 한다.
+        _, first = self.service.create(OWNER, CASE, request(), 'key-1', 'req')
+        self.storage.objects[first['upload']['path']] = 1234
+        status, second = self.service.create(OWNER, CASE, request(), 'key-1', 'req2')
+        self.assertEqual((status, second['recording_id'], second['status'], second['upload']),
+                         (201, first['recording_id'], 'UPLOADING', None))
+        done = self.service.complete(OWNER, CASE, UUID(first['recording_id']))
+        self.assertEqual(done['status'], 'UPLOADED')
+
+    def test_sign_failure_without_file_stays_storage_unavailable(self):
+        self.storage.fail_sign = True
+        self.assertEqual(self.code(lambda: self.service.create(OWNER, CASE, request(), 'key-1', 'req')),
+                         ('CALL_RECORDING_STORAGE_UNAVAILABLE', 503))
+
+    def test_size_bytes_must_be_integer(self):
+        for bad in ('12', 12.0, True):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                request(size_bytes=bad)
 
     def test_same_key_other_body_rejected(self):
         self.service.create(OWNER, CASE, request(), 'key-1', 'req')
