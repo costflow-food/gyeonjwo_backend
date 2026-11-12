@@ -113,5 +113,8 @@ class CallRecordingStorage:
         return size
 
     def remove(self, paths):
-        # 없는 파일 삭제도 성공으로 돌아온다(멱등).
-        self.bucket.remove(list(paths))
+        """실제로 지워진 경로 목록. 없는 파일·지우지 못한 파일은 오류 없이 목록에서 빠진다(200 [])."""
+        removed = self.bucket.remove(list(paths))
+        if not isinstance(removed, list):
+            return []
+        return [item['name'] for item in removed if isinstance(item, dict) and isinstance(item.get('name'), str)]
