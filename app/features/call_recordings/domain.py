@@ -6,6 +6,8 @@
 - 음성 파일은 견적 추출(①)이 끝나면 지운다. 전사문은 업무가 남아 있는 동안 보관한다(2026-11-12 결정)
 - 업로드에 실패한(기한 만료·크기 불일치) 녹음은 실패 2시간 뒤 파일만 지우고 행은 남긴다(2026-11-12 결정)
 - 오류 코드는 통화 녹음 전용 `CALL_RECORDING_*` 를 쓴다(멱등 공통 코드만 예외)
+- 올린 녹음은 사용자가 지울 수 있다(2026-11-12 결정). 행은 DB 가 지우고 Storage 파일은 삭제 대기열이 지운다.
+  올리다 만(UPLOADING)·실패한(FAILED) 녹음도 같은 방법으로 지운다. 이미 없는 녹음을 지워도 성공이다
 - 녹음은 견적 요청에 대한 거래처 회신이다: 이 업무에서 견적 요청(RFQ)을 보낸 거래처(supplier_id)가 필수다.
   보낸 거래처인지는 DB 가 업무 잠금 안에서 판단한다(CALL_RECORDING_SUPPLIER_NOT_ALLOWED)
 DB call_recording_health 계약 버전과 값을 맞춘다.
@@ -39,6 +41,7 @@ ERRORS = {
     'CALL_RECORDING_LIMIT_EXCEEDED': (409, '업무 하나에 녹음은 10개까지 올릴 수 있습니다.', False, None),
     'CALL_RECORDING_UPLOAD_INCOMPLETE': (409, '파일 업로드가 아직 끝나지 않았습니다.', False, 'UPLOAD_FILE'),
     'CALL_RECORDING_UPLOAD_EXPIRED': (410, '업로드 가능 시간이 지났습니다. 다시 추가해 주세요.', False, 'CREATE_RECORDING'),
+    'CALL_RECORDING_DELETE_NOT_ALLOWED': (409, '지금은 이 녹음을 삭제할 수 없습니다.', False, 'REFRESH_RECORDINGS'),
     'CALL_RECORDING_SIZE_MISMATCH': (409, '올린 파일 크기가 신청한 크기와 다릅니다. 다시 추가해 주세요.', False, 'CREATE_RECORDING'),
     'CALL_RECORDING_STORAGE_UNAVAILABLE': (503, '녹음 저장소에 연결할 수 없습니다.', True, None),
     'CALL_RECORDING_UNAVAILABLE': (503, '통화 녹음 기능을 사용할 수 없습니다.', False, 'CONTACT_SERVER_ADMIN'),
@@ -93,3 +96,5 @@ class RecordingLimits(BaseModel):
 class RecordingList(BaseModel):
     items: list[CallRecording]
     limits: RecordingLimits
+    # DB 가 삭제(delete_call_recording)를 제공할 때만 True. 앱은 이 값으로 삭제 버튼을 보여 준다.
+    deletable: bool = False
