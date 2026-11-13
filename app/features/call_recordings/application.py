@@ -111,4 +111,14 @@ class CallRecordingService:
             raise ServiceError('PROCESSING_UNAVAILABLE', '녹음 목록을 불러오지 못했습니다.', 503)
         if result['kind'] == 'ERROR':
             raise recording_error(result.get('code'))
-        return {'items': [_with_supplier(item) for item in result['items']], 'limits': result['limits']}
+        return {'items': [_with_supplier(item) for item in result['items']], 'limits': result['limits'],
+                'deletable': result.get('deletable') is True}
+
+    def delete(self, owner, case_id, recording_id):
+        """녹음을 지운다. 이미 없는 녹음이면 DB 가 OK 를 돌려주므로 반복 호출해도 결과가 같다.
+        파일은 여기서 지우지 않는다: DB 가 넣은 삭제 대기열을 정리 워커가 비운다."""
+        result = self.repo.delete(owner, case_id, recording_id)
+        if not isinstance(result, dict) or result.get('kind') not in {'OK', 'ERROR'}:
+            raise ServiceError('PROCESSING_UNAVAILABLE', '녹음을 삭제하지 못했습니다.', 503)
+        if result['kind'] == 'ERROR':
+            raise recording_error(result.get('code'))

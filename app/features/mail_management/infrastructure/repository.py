@@ -1,6 +1,7 @@
 """Owner-scoped reads and single-transaction mutation adapters."""
 import re
 from datetime import datetime, timezone
+from uuid import UUID
 from app.core.errors import ServiceError
 from app.features.work_cases.infrastructure.list_repository import WorkCaseListRepository
 
@@ -52,24 +53,38 @@ class MailManagementRepository:
         return rows[0]
 
     def candidates(self, owner, mail):
-        """Only actual outbound RFC evidence; never sender/subject guessing."""
+        """Find manual candidates from outbound or supplier initial RFC evidence."""
         references = sorted(set(re.findall(r'<[^<>\s]{1,998}>',
                                 (mail.get('rfc_in_reply_to') or '') + ' ' + (mail.get('rfc_references') or ''))))
         if not references:
             return []
         if len(references) > 100:
             raise ServiceError('PROCESSING_UNAVAILABLE', '회신 연결 근거 범위를 확인해야 합니다.', 503)
-        messages = self.rows(self.client.table('mail_messages').select('work_case_id')
+        messages = self.rows(self.client.table('mail_messages').select('id,work_case_id,direction,sender')
                              .eq('owner_user_id', str(owner)).eq('mailbox_ref', mail['mailbox_ref'])
-                             .eq('direction', 'OUT').in_('rfc_message_id', references).limit(101))
+                             .or_('direction.eq.OUT,and(direction.eq.IN,message_role.eq.INITIAL)')
+                             .in_('rfc_message_id', references).limit(101))
         if len(messages) > 100:
             raise ServiceError('PROCESSING_UNAVAILABLE', '회신 연결 후보 범위를 확인해야 합니다.', 503)
-        ids = sorted({row['work_case_id'] for row in messages if row.get('work_case_id')})
-        if not ids:
+        outbound_cases = sorted({str(UUID(row['work_case_id'])) for row in messages
+                                 if row['direction'] == 'OUT' and row.get('work_case_id')})
+        sender = (mail.get('sender') or '').strip().lower()
+        initial_mails = sorted({str(UUID(row['id'])) for row in messages
+                                if row['direction'] == 'IN' and sender
+                                and (row.get('sender') or '').strip().lower() == sender})
+        membership = []
+        if outbound_cases:
+            membership.append(f"id.in.({','.join(outbound_cases)})")
+        if initial_mails:
+            membership.append(f"initial_mail_id.in.({','.join(initial_mails)})")
+        if not membership:
             return []
-        return self.rows(self.client.table('work_cases').select('id,status,item_name,requester_name,initial_mail_id')
-                         .eq('owner_user_id', str(owner)).eq('mailbox_ref', mail['mailbox_ref']).in_('id', ids)
-                         .is_('archived_at', 'null').limit(101))
+        cases = self.rows(self.client.table('work_cases').select('id,status,item_name,requester_name,initial_mail_id')
+                          .eq('owner_user_id', str(owner)).eq('mailbox_ref', mail['mailbox_ref'])
+                          .or_(','.join(membership)).is_('archived_at', 'null').limit(101))
+        if len(cases) > 100:
+            raise ServiceError('PROCESSING_UNAVAILABLE', '회신 연결 후보 범위를 확인해야 합니다.', 503)
+        return cases
 
     def scope(self, owner, mailbox_ref=None, case_id=None):
         case = None

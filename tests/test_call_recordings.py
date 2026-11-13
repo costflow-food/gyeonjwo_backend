@@ -39,6 +39,7 @@ class FakeRepo:
 
     def __init__(self):
         self.created, self.by_key, self.rows, self.completed, self.suppliers = [], {}, {}, [], []
+        self.deleted, self.deletable, self.locked = [], True, set()  # locked: DB 가 삭제를 거절하는 녹음
         self.next_error = None
         self.sent_suppliers = {str(SUPPLIER), str(OTHER_SUPPLIER)}
         self.without_supplier = False  # DB 가 계약 2 이전일 때의 응답(거래처 없음)을 흉내 낸다
@@ -85,7 +86,18 @@ class FakeRepo:
         if str(case_id) != str(CASE):
             return {'kind': 'ERROR', 'code': 'CALL_RECORDING_CASE_NOT_FOUND'}
         items = [{k: v for k, v in r.items() if k not in ('storage_path', 'upload_expires_at')} for r in self.rows.values()]
-        return {'kind': 'OK', 'items': items, 'limits': {'max_per_case': 10, 'max_bytes': 52428800}}
+        result = {'kind': 'OK', 'items': items, 'limits': {'max_per_case': 10, 'max_bytes': 52428800}}
+        if self.deletable:
+            result['deletable'] = True
+        return result
+
+    def delete(self, owner, case_id, recording_id):
+        self.deleted.append(recording_id)
+        if str(case_id) != str(CASE):
+            return {'kind': 'ERROR', 'code': 'CALL_RECORDING_CASE_NOT_FOUND'}
+        if recording_id in self.locked:
+            return {'kind': 'ERROR', 'code': 'CALL_RECORDING_DELETE_NOT_ALLOWED'}
+        return {'kind': 'OK', 'deleted': self.rows.pop(recording_id, None) is not None}
 
 
 class FakeStorage:
@@ -297,6 +309,72 @@ class ServiceTests(unittest.TestCase):
                             if code not in {'IDEMPOTENCY_KEY_REUSED', 'REQUEST_IN_PROGRESS'}))
 
 
+class DeleteTests(unittest.TestCase):
+    def setUp(self):
+        self.repo, self.storage = FakeRepo(), FakeStorage()
+        self.service = CallRecordingService(self.repo, self.storage, clock=lambda: NOW)
+
+    def created(self, key='key-1'):
+        _, data = self.service.create(OWNER, CASE, request(), key, 'req')
+        return UUID(data['recording_id'])
+
+    def code(self, call):
+        with self.assertRaises(ServiceError) as raised:
+            call()
+        return raised.exception.code, raised.exception.status
+
+    def test_delete_removes_row_and_leaves_file_to_the_queue(self):
+        recording = self.created()
+        self.assertIsNone(self.service.delete(OWNER, CASE, recording))
+        self.assertEqual(self.service.list(OWNER, CASE)['items'], [])
+        self.assertEqual(self.storage.removed, [])  # 파일은 DB 삭제 대기열과 정리 워커가 지운다
+
+    def test_delete_is_repeat_safe(self):
+        recording = self.created()
+        self.service.delete(OWNER, CASE, recording)
+        self.assertIsNone(self.service.delete(OWNER, CASE, recording))
+        self.assertIsNone(self.service.delete(OWNER, CASE, uuid4()))
+
+    def test_unfinished_and_failed_recordings_can_be_deleted(self):
+        unfinished, failed = self.created('key-1'), self.created('key-2')
+        self.repo.rows[failed]['status'] = 'FAILED'
+        self.service.delete(OWNER, CASE, unfinished)
+        self.service.delete(OWNER, CASE, failed)
+        self.assertEqual(self.repo.rows, {})
+
+    def test_db_errors_keep_their_codes(self):
+        recording = self.created()
+        self.repo.locked.add(recording)
+        self.assertEqual(self.code(lambda: self.service.delete(OWNER, CASE, recording)),
+                         ('CALL_RECORDING_DELETE_NOT_ALLOWED', 409))
+        self.assertEqual(self.code(lambda: self.service.delete(OWNER, uuid4(), recording)),
+                         ('CALL_RECORDING_CASE_NOT_FOUND', 404))
+        self.assertIn(recording, self.repo.rows)
+
+    def test_unexpected_db_answer_is_not_success(self):
+        self.repo.delete = lambda *args: None
+        self.assertEqual(self.code(lambda: self.service.delete(OWNER, CASE, uuid4())),
+                         ('PROCESSING_UNAVAILABLE', 503))
+
+    def test_list_says_whether_delete_is_available(self):
+        self.assertIs(self.service.list(OWNER, CASE)['deletable'], True)
+        self.repo.deletable = False  # 삭제 함수가 아직 없는 DB
+        self.assertIs(self.service.list(OWNER, CASE)['deletable'], False)
+
+    def test_db_without_delete_function_is_unavailable(self):
+        client = MagicMock()
+        missing = Exception('missing')
+        missing.code = 'PGRST202'
+        client.rpc.return_value.execute.side_effect = missing
+        service = CallRecordingService(CallRecordingRepository(client), self.storage)
+        recording = uuid4()
+        self.assertEqual(self.code(lambda: service.delete(OWNER, CASE, recording)),
+                         ('CALL_RECORDING_UNAVAILABLE', 503))
+        name, params = client.rpc.call_args.args
+        self.assertEqual(name, 'delete_call_recording')
+        self.assertEqual(params, {'p_owner': OWNER, 'p_case': str(CASE), 'p_recording': str(recording)})
+
+
 class RouterTests(unittest.TestCase):
     def setUp(self):
         self.repo, self.storage = FakeRepo(), FakeStorage()
@@ -329,6 +407,34 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(listed.json()['data']['items'][0]['status'], 'UPLOADED')
         self.assertEqual(listed.json()['data']['items'][0]['supplier_id'], str(SUPPLIER))
         self.assertNotIn('storage_path', listed.json()['data']['items'][0])
+
+    def test_delete_204_repeat_safe_and_listed(self):
+        body = {'supplier_id': str(SUPPLIER), 'file_name': '통화.m4a', 'extension': 'm4a', 'size_bytes': 1234}
+        created = self.client.post(self.base, json=body, headers={'Idempotency-Key': 'k-1'}).json()['data']
+        self.assertIs(self.client.get(self.base).json()['data']['deletable'], True)
+        url = f"{self.base}/{created['recording_id']}"
+        for _ in range(2):
+            deleted = self.client.delete(url)
+            self.assertEqual((deleted.status_code, deleted.content), (204, b''))
+            self.assertEqual(deleted.headers['cache-control'], 'private, no-store')
+        self.assertEqual(self.client.get(self.base).json()['data']['items'], [])
+
+    def test_delete_refused_by_db_409(self):
+        body = {'supplier_id': str(SUPPLIER), 'file_name': '통화.m4a', 'extension': 'm4a', 'size_bytes': 1234}
+        created = self.client.post(self.base, json=body, headers={'Idempotency-Key': 'k-1'}).json()['data']
+        self.repo.locked.add(UUID(created['recording_id']))
+        refused = self.client.delete(f"{self.base}/{created['recording_id']}")
+        self.assertEqual(refused.status_code, 409)
+        self.assertEqual(refused.json()['error']['code'], 'CALL_RECORDING_DELETE_NOT_ALLOWED')
+        self.assertEqual(refused.json()['error']['next_action'], 'REFRESH_RECORDINGS')
+        self.assertEqual(len(self.client.get(self.base).json()['data']['items']), 1)
+
+    def test_delete_needs_uuid_ids(self):
+        self.assertEqual(self.client.delete(f'{self.base}/not-a-uuid').status_code, 422)
+
+    def test_list_without_db_delete_support(self):
+        self.repo.deletable = False
+        self.assertIs(self.client.get(self.base).json()['data']['deletable'], False)
 
     def test_unsupported_type_415(self):
         response = self.client.post(self.base, json={'supplier_id': str(SUPPLIER), 'file_name': 'a.exe',

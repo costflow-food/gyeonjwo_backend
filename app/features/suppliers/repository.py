@@ -1,6 +1,8 @@
-"""Read-only supplier catalogue and separate reference/transaction histories."""
+"""Supplier catalogue and separate reference/transaction histories."""
 from datetime import datetime, timezone
 from decimal import Decimal
+
+from postgrest.exceptions import APIError
 
 from app.core.errors import ServiceError
 from app.features.work_cases.application.cursor import iso_z
@@ -71,6 +73,23 @@ def price_record(row, date_key):
 class SupplierRepository:
     def __init__(self, client, owner):
         self.client, self.owner = client, str(owner)
+
+    def register(self, body):
+        try:
+            row = self.client.rpc('register_supplier', {
+                'p_owner': self.owner, 'p_body': body,
+            }).execute().data
+            if not isinstance(row, dict) or not row.get('id') or not isinstance(row.get('item_names'), list):
+                raise ValueError('Invalid supplier registration response')
+            return supplier_summary(row, row['item_names'])
+        except APIError as error:
+            if error.code == '23505':
+                raise ServiceError('SUPPLIER_ALREADY_REGISTERED', '이미 등록된 거래처입니다.', 409) from None
+            if error.code == '22023':
+                raise ServiceError('VALIDATION_ERROR', '거래처 입력값을 확인해 주세요.', 422) from None
+        except Exception:
+            pass
+        raise ServiceError('PROCESSING_UNAVAILABLE', '거래처를 등록할 수 없습니다.', 503) from None
 
     def query(self, table, columns):
         return self.client.table(table).select(columns).eq('owner_user_id', self.owner)

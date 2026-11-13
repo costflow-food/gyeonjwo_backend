@@ -24,12 +24,17 @@ SEND_STATE_MESSAGES = {
     'SEND_SNAPSHOT_CHANGED': '보내기 직전에 초안 내용이 바뀌어 보내지 않았습니다.',
     'SEND_SETTINGS_CHANGED': '보내기 직전에 발송 설정이 바뀌어 보내지 않았습니다.',
     'SEND_FAILED': '보내지 못했습니다.',
+    'DRAFT_WITHDRAWN': '보내지 않기로 닫은 초안입니다.',
 }
+# 철회(WITHDRAW_DRAFT)한 초안은 DB 상태값이 5개뿐이라 FAILED로 남는다. error_jsonb.code가 이 값이면
+# 발송 실패가 아니라 철회로 내려 준다.
+WITHDRAWN_ERROR_CODE = 'DRAFT_WITHDRAWN'
 # 승인·대조 요청 오류 코드별 문구
 SUBMIT_ERROR_MESSAGES = {
     'RESOURCE_NOT_FOUND': '메일 초안을 찾을 수 없습니다.',
     'REVISION_CONFLICT': '업무 내용이 바뀌었습니다. 최신 초안을 확인해 주세요.',
     'DRAFT_CHANGED': '초안이 바뀌었습니다. 최신 초안을 확인해 주세요.',
+    'CANDIDATES_CHANGED': '후보 정보가 바뀌었습니다. 업무의 최신 후보와 초안을 확인해 주세요.',
     'SETTINGS_CHANGED': '발송 설정이 바뀌었습니다. 최신 설정을 확인한 뒤 다시 승인해 주세요.',
     'SEND_RESULT_UNKNOWN': '발송 결과를 확인하는 중인 초안입니다. 보낸편지함 대조를 먼저 해 주세요.',
     'ACTION_NOT_ALLOWED': '지금 업무 상태에서는 이 초안을 보낼 수 없습니다.',
@@ -58,10 +63,12 @@ def dispatch_state(draft, case, policy):
 
 def send_state(owner, draft, case, policy, auto_eligible):
     """초안의 지금 발송 상태 {code, message}. 보내지 않은 초안은 발송 워커가 왜 보내지 않는지를,
-    실패·불확실 초안은 저장된 실패 코드를 알려 준다."""
+    실패·불확실 초안은 저장된 실패 코드를, 철회한 초안은 DRAFT_WITHDRAWN을 알려 준다."""
     status = draft['status']
     if status in {'SENT', 'SENDING'}:
         code = status
+    elif status == 'FAILED' and (draft.get('error_jsonb') or {}).get('code') == WITHDRAWN_ERROR_CODE:
+        code = 'DRAFT_WITHDRAWN'
     elif status in {'FAILED', 'UNKNOWN'}:
         stored = (draft.get('error_jsonb') or {}).get('code')
         code = {'SETTINGS_CHANGED': 'SEND_SETTINGS_CHANGED', 'SEND_SNAPSHOT_CHANGED': 'SEND_SNAPSHOT_CHANGED',
@@ -154,7 +161,8 @@ class MailDraftService:
         if isinstance(result, dict) and result.get('kind') == 'ERROR':
             code = result.get('code')
             statuses = {'RESOURCE_NOT_FOUND': 404, 'REVISION_CONFLICT': 409, 'DRAFT_CHANGED': 409,
-                        'SETTINGS_CHANGED': 409, 'SEND_RESULT_UNKNOWN': 409, 'ACTION_NOT_ALLOWED': 409,
+                        'SETTINGS_CHANGED': 409, 'CANDIDATES_CHANGED': 409, 'SEND_RESULT_UNKNOWN': 409,
+                        'ACTION_NOT_ALLOWED': 409,
                         'REQUEST_IN_PROGRESS': 409, 'IDEMPOTENCY_KEY_REUSED': 409,
                         'SEND_SCOPE_REQUIRED': 422, 'PROCESSING_UNAVAILABLE': 503}
             if code in statuses:

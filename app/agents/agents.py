@@ -116,8 +116,9 @@ PROMPTS = {
    - SUPPLIER_NOT_MATCHED: 법인 표기·부서·직책은 도구가 이미 빼고 찾았다. 다시 보내지 말고(업체명을 빼고도 보내지 않는다)
      바로 HOLD한다(hold.code SUPPLIER_NOT_MATCHED).
    - SUPPLIER_MISMATCH: 저장하지 말고 HOLD를 반환한다.
-   - SUPPLY_QUANTITY_MISSING: 기존 업체의 인상 통보인데 공급 물량이 없다. 원문에 공급 계획·공급 물량·공급 가능량이라고
-     적힌 수량만 단위와 함께 available_quantity로 한 번 다시 보낸다. 규격·포장·주문 단위의 수량(예: 10kg/박스,
+   - SUPPLY_QUANTITY_MISSING: 기존 업체의 인상 통보인데 공급 물량이 없다. 같은 메일의 본문·첨부 중 아직 읽지 않은
+     부분이 있으면 HOLD하기 전에 read_mail_evidence로 읽는다(견적은 첨부, 공급 물량은 본문에 있을 수 있다).
+     원문에 공급 계획·공급 물량·공급 가능량이라고 적힌 수량만 단위와 함께 available_quantity로 한 번 다시 보낸다. 규격·포장·주문 단위의 수량(예: 10kg/박스,
      박스당 10kg, 주문 단위 10kg 박스)은 공급 물량이 아니다. 그런 수량만 있으면 다시 보내지 말고 바로 HOLD한다.
    - VALID_UNTIL_BEFORE_EFFECTIVE: 유효기간이 적용일보다 이르다. 그 날짜는 회신 기한이다. valid_until을 빼고
      "견적 유효기간 …까지" 문장을 원문 그대로 item_notes에 비고(PRICE_NOTICE)로 넣어 한 번 다시 보낸다.
@@ -200,9 +201,11 @@ PROMPTS = {
       "내년 1분기 추가 인상 예정" → PRICE_NOTICE, "12월 중순 포장재 변경 예정" → PACKING
   어느 category에도 맞지 않는 문장은 비고가 아니다. 인사말·서명·회사 소개·"…단가표입니다"·"검토 부탁드립니다" 같은
   안내 문장, 이미 필드로 보낸 적용일·유효기간·단가 문장은 넣지 않는다.
-  다만 물량별 단가·최소 주문량에 기한("…까지")이나 기준 기간("월", "주", "1회")이 붙어 있으면, 값을 보냈더라도
-  그 문장을 비고(PRICE_NOTICE, 최소 주문량은 SUPPLY)로 함께 남긴다. 숫자만으로는 그 조건이 사라지기 때문이다.
+  다만 물량별 단가·최소 주문량·공급 물량에 기한("…까지")이나 기준 기간("월", "주", "1회")이 붙어 있으면, 값을
+  보냈더라도 그 문장을 비고(PRICE_NOTICE, 최소 주문량·공급 물량은 SUPPLY)로 함께 남긴다. 숫자만으로는 그 조건이
+  사라지기 때문이다. 같은 메일을 다시 읽어도 늘 같은 비고를 보낸다(비고가 달라지면 견적 버전이 새로 생긴다).
   예) "최소 주문량: 월 30박스" → moq "월 30박스" + 비고 {text "최소 주문량: 월 30박스", category SUPPLY}
+      "월 공급 가능 물량: 1,000kg" → available_quantity "1,000kg" + 비고 {text 그 문장, category SUPPLY}
       "최소 20박스" → moq "최소 20박스"만 (기준 기간이 없으므로 비고 없음)
   비고가 여러 개면 하나씩 따로 넣는다. 비고를 이유로 업체를 제외하거나 비용을 판단하지 않는다.
 - tax_terms를 보낼 때 tax_basis도 붙인다: 단가에 부가세가 포함이면 INCLUDED, 별도면 EXCLUDED, 면세면 EXEMPT.
@@ -402,6 +405,8 @@ next_action:
      넣고 RECHECK_SOURCE를 반환한다. source_text는 그 답이 적힌 원문 구절을 그대로 옮긴다(예: "월 1,000kg 공급 가능",
      "운송비 박스당 1,500원"). 원문 구절을 옮길 수 없으면 원문에 답이 없는 것이다.
      비용은 금액이나 "무료"·"없음"이 적힌 구절만 답이다. "운송비 별도"처럼 금액이 없으면 원문에 답이 없는 것이다.
+     금액이 있으면 "별도"가 붙어도 답이다(예: "운송비: 회당 10,000원 별도" → 답, "운송비 별도" → 답 아님).
+     recheck에는 missing_required·unknown_costs에 있는 field만 넣는다. 이미 견적에 있는 값은 원문에 있어도 다시 넣지 않는다.
      quantity_per_order_unit은 "박스당 10kg"처럼 중량이 적힌 구절만 답이다. "박스당 54,000원"처럼 단가만 있으면 답이 없는 것이다.
    - 원문에도 답이 없는 필수 누락은 그 field를 MUST_CONFIRM으로 묻는다. 원문에도 금액이 없는 비용은 5번으로 판단한다.
    - 재추출할 항목이 있으면 질문·초안보다 먼저 RECHECK_SOURCE로 끝낸다. 다시 추출된 뒤 이 역할이 다시 실행되어 질문을 보낸다.
@@ -1280,6 +1285,7 @@ pending_call이 있으면 create_clarification_draft를 실행하기 직전이�
 확인 항목(code):
 - ANSWER_IN_SOURCE: 업체에 묻는 field의 답이 이번 실행에서 읽은 그 업체 메일 원문(read_mail_evidence 결과)에 있다.
   묻지 말고 recheck로 재추출해야 한다. 비용은 금액이나 "무료"·"없음"이 적힌 구절만 답이다("운송비 별도"는 답이 아니다).
+  금액이 있으면 "별도"가 붙어도 답이다("운송비: 회당 10,000원 별도"는 답이다).
 - WRONG_REQUIREMENT: requirements에서 state가 CHECK인 항목을 잘못 판단했다. stated가 required를 분명히 충족하는데 묻거나
   (예: 업무 "HACCP"·견적 "식품안전관리인증(HACCP)"), 분명히 충족하지 않는데 묻지 않았다(예: 업무 "10kg 박스"·견적 "5kg 박스").
 - WRONG_RECHECK: recheck의 source_text가 그 field의 답이 아니다(다른 항목·다른 품목의 구절이거나 금액 없는 비용 구절).
@@ -1687,16 +1693,27 @@ def _plan_final_rules(answer, messages: list) -> list[str]:
 _COUNTER_ACTIONS = {'PROPOSABLE': {'COUNTER_OFFER_PROPOSED'}, 'NOT_NEEDED': {'COUNTER_OFFER_SKIPPED'},
                     'WITHIN_POLICY': {'COUNTER_OFFER_SKIPPED'}, 'NO_POLICY': {'HOLD'}, 'NOT_COMPUTABLE': {'HOLD'},
                     'COSTS_UNKNOWN': {'NEEDS_EVIDENCE'}, 'PREVIOUS_UNKNOWN': {'RECHECK_SOURCE', 'HOLD'}}
+# 원문 구절의 원화 금액 ("5,500원" → 5500). shortcut: "5천원"·"₩5,500"은 못 읽는다, 실제 메일에서 놓치면 넓힌다
+_WON_AMOUNT = re.compile(r'(\d[\d,]*(?:\.\d+)?)\s*원')
 
 
 def _counter_final_rules(answer, messages: list) -> list[str]:
     """⑤ next_action은 마지막 calculate_counter_offer의 counter_status에 맞아야 한다.
-    PROPOSABLE이어도 초안 도구가 거절했거나(연락처 없음 등) 코드 규칙 위반으로 실행되지 않았으면 HOLD를 받는다."""
-    status = _last_ok(messages, 'calculate_counter_offer').get('counter_status')
+    PROPOSABLE이어도 초안 도구가 거절했거나(연락처 없음 등) 코드 규칙 위반으로 실행되지 않았으면 HOLD를 받는다.
+    PREVIOUS_UNKNOWN의 RECHECK_SOURCE는 인용 구절에 요청 단가 말고 다른 금액이 있어야 한다(KAN-262)."""
+    numbers = _last_ok(messages, 'calculate_counter_offer')
+    status = numbers.get('counter_status')
     allowed = set(_COUNTER_ACTIONS.get(status, ()))
     if status == 'PROPOSABLE' and any(r.get('status') == 'REJECTED' or r.get('code') == 'DRAFT_RULE'
                                       for r in _tool_results(messages, 'create_counter_offer_draft')):
         allowed.add('HOLD')
+    if status == 'PREVIOUS_UNKNOWN' and answer.next_action == 'RECHECK_SOURCE' and numbers.get('requested_unit_price'):
+        requested = Decimal(numbers['requested_unit_price'])
+        if any(item.field == 'previous_unit_price'
+               and not {Decimal(n.replace(',', '')) for n in _WON_AMOUNT.findall(item.source_text)} - {requested}
+               for item in answer.recheck):
+            return ['recheck에 인용한 구절에는 요청 단가만 있고 인상 전 단가가 없다. 원문에 인상 전 단가가 적힌 구절이 '
+                    '있으면 그 구절을 그대로 인용하고, 없으면 HOLD로 최종 응답을 다시 낸다.']
     if not allowed or answer.next_action in allowed:
         return []
     return [f"calculate_counter_offer 결과(counter_status {status})로는 next_action이 {'·'.join(sorted(allowed))}여야 한다. "
