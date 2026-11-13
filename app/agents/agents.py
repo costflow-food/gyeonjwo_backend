@@ -1693,16 +1693,27 @@ def _plan_final_rules(answer, messages: list) -> list[str]:
 _COUNTER_ACTIONS = {'PROPOSABLE': {'COUNTER_OFFER_PROPOSED'}, 'NOT_NEEDED': {'COUNTER_OFFER_SKIPPED'},
                     'WITHIN_POLICY': {'COUNTER_OFFER_SKIPPED'}, 'NO_POLICY': {'HOLD'}, 'NOT_COMPUTABLE': {'HOLD'},
                     'COSTS_UNKNOWN': {'NEEDS_EVIDENCE'}, 'PREVIOUS_UNKNOWN': {'RECHECK_SOURCE', 'HOLD'}}
+# 원문 구절의 원화 금액 ("5,500원" → 5500). shortcut: "5천원"·"₩5,500"은 못 읽는다, 실제 메일에서 놓치면 넓힌다
+_WON_AMOUNT = re.compile(r'(\d[\d,]*(?:\.\d+)?)\s*원')
 
 
 def _counter_final_rules(answer, messages: list) -> list[str]:
     """⑤ next_action은 마지막 calculate_counter_offer의 counter_status에 맞아야 한다.
-    PROPOSABLE이어도 초안 도구가 거절했거나(연락처 없음 등) 코드 규칙 위반으로 실행되지 않았으면 HOLD를 받는다."""
-    status = _last_ok(messages, 'calculate_counter_offer').get('counter_status')
+    PROPOSABLE이어도 초안 도구가 거절했거나(연락처 없음 등) 코드 규칙 위반으로 실행되지 않았으면 HOLD를 받는다.
+    PREVIOUS_UNKNOWN의 RECHECK_SOURCE는 인용 구절에 요청 단가 말고 다른 금액이 있어야 한다(KAN-262)."""
+    numbers = _last_ok(messages, 'calculate_counter_offer')
+    status = numbers.get('counter_status')
     allowed = set(_COUNTER_ACTIONS.get(status, ()))
     if status == 'PROPOSABLE' and any(r.get('status') == 'REJECTED' or r.get('code') == 'DRAFT_RULE'
                                       for r in _tool_results(messages, 'create_counter_offer_draft')):
         allowed.add('HOLD')
+    if status == 'PREVIOUS_UNKNOWN' and answer.next_action == 'RECHECK_SOURCE' and numbers.get('requested_unit_price'):
+        requested = Decimal(numbers['requested_unit_price'])
+        if any(item.field == 'previous_unit_price'
+               and not {Decimal(n.replace(',', '')) for n in _WON_AMOUNT.findall(item.source_text)} - {requested}
+               for item in answer.recheck):
+            return ['recheck에 인용한 구절에는 요청 단가만 있고 인상 전 단가가 없다. 원문에 인상 전 단가가 적힌 구절이 '
+                    '있으면 그 구절을 그대로 인용하고, 없으면 HOLD로 최종 응답을 다시 낸다.']
     if not allowed or answer.next_action in allowed:
         return []
     return [f"calculate_counter_offer 결과(counter_status {status})로는 next_action이 {'·'.join(sorted(allowed))}여야 한다. "
