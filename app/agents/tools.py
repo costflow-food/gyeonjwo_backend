@@ -42,11 +42,13 @@
 | create_counter_offer_draft| ⑤     | 목표 단가·조건·비교한 대안 → 다시 검증 후 역제안 초안 ID          | 내부 저장만, 발송은 백엔드        |
 """
 import dataclasses
+import calendar
 import hashlib
 import json
+import logging
 import re
 import unicodedata
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Literal, Protocol
 
@@ -58,6 +60,8 @@ from pydantic import Field, StrictBool
 from app.agents.schemas import READ_RETRY_LIMIT, AgentRole, DecimalStr, RunContext
 from app.core.errors import ReviewRequired, ServiceError
 from app.features.review.domain.validation import decimal_value, explicit_date, unit_name
+
+logger = logging.getLogger('gyeonjwo')
 from app.shared.domain.schemas import StrictModel
 
 # 역할 결과는 AgentRunner가 최종 응답으로 agent_runs에 저장한다. 저장 도구는 없다
@@ -136,6 +140,23 @@ _case_store: CaseStore | None = None
 def use_case_store(store: CaseStore | None) -> None:
     global _case_store
     _case_store = store
+
+
+def run_channels(role: AgentRole, data) -> frozenset[str]:
+    """이번 역할 호출이 읽을 원문의 종류(MAIL·CALL). 시스템 프롬프트를 고르는 데 쓴다.
+    ①은 이번에 읽을 메일(mail_ids), ③은 업무의 모든 메일(여러 업체 회신을 함께 본다)의 채널이다. 다른 역할과
+    저장소가 없거나 읽지 못하면 MAIL로 본다(메일 프롬프트는 통화 문장이 없을 뿐 그대로 동작한다)."""
+    if _case_store is None or role not in (AgentRole.INFO_EXTRACTOR, AgentRole.INFO_PRIORITY):
+        return frozenset({'MAIL'})
+    try:
+        mails = _read(lambda: _case_store.list_case_mails(str(data.case_id)))
+    except Exception as error:
+        logger.warning('mail channel lookup failed role=%s error=%s', role, type(error).__name__)
+        return frozenset({'MAIL'})
+    wanted = {str(mail_id) for mail_id in data.mail_ids} if role == AgentRole.INFO_EXTRACTOR else None
+    channels = frozenset(mail.get('channel') or 'MAIL' for mail in mails
+                         if wanted is None or str(mail['mail_id']) in wanted)
+    return channels or frozenset({'MAIL'})
 
 
 def _run_context(store, runtime: ToolRuntime) -> RunContext:
@@ -384,6 +405,8 @@ _HINTS = {
     'INVALID_NUMBER': '숫자와 단위·통화만 옮긴다 (예: "54,500원", "300kg", "3.20 USD"). 앞뒤의 설명 낱말은 빼고 '
                       '다시 보낸다 (예: "박스당 중량은 10kg" → "10kg"). 그래도 안 되면 그 항목만 null로 보낸다.',
     'INVALID_DATE': '연도가 있는 날짜만 옮긴다. 연도가 없으면 그 항목만 null로 보낸다.',
+    'CALL_DATE_UNKNOWN': '통화에서 말한 날짜 표현을 날짜로 바꾸지 못했다. 그 항목만 빼고 다시 보내고, 그 날짜가 나온 업체 발화는 '
+                         '비고로 남긴다.',
     'VALID_UNTIL_BEFORE_EFFECTIVE': '유효기간이 적용일보다 이르면 단가 종료일이 아니라 회신 기한이다. valid_until은 빼고 '
                                     '그 문장을 item_notes(PRICE_NOTICE)로 다시 보낸다.',
     'INVALID_UNIT': 'kg·g·톤·박스·개·팩·봉·포대 중 원문 단위를 옮긴다. 원문 표기가 이 이름과 다르면(예: "킬로", "봉지") '
@@ -560,6 +583,102 @@ def _date(raw: str, field_name: str) -> str:
         return date(*map(int, match.groups())).isoformat()
     except ValueError:
         raise ReviewRequired('INVALID_DATE', f'{field_name}의 날짜를 확인할 수 없습니다.', field_name)
+
+
+# 통화에서 말한 날짜 표현 → 통화 시작 시각(한국 시각) 기준 날짜. 통화에서는 "내일", "이번 주 금요일", "이달 말",
+# "12월 1일"처럼 연도 없이 말한다. ①은 원문 표현을 그대로 보내고 저장 도구가 call_date로 날짜를 정한다.
+# 읽지 못하는 표현은 None이다(짐작하지 않는다). 기간("사흘 뒤", "일주일 안에")은 날짜가 아니라 납기(lead_time)다.
+_KST = timezone(timedelta(hours=9))
+_CALL_WEEKDAYS = '월화수목금토일'
+# 날짜 표현 뒤에 붙는 말: 시각대·대상·조사 ("금요일 오전 도착으로", "월요일쯤", "이달 말까지", "12월 1일 출고분부터")
+_CALL_DATE_TRAILING = re.compile(r'(?:\s*(?:오전|오후|아침|저녁|낮|밤|중|쯤|경|께|이내|안|정도)'
+                                 r'|\s*(?:(?:출고|입고|납품|도착|배송|주문|발주)\s*(?:확정\s*)?(?:분|예정|으로|로)?)'
+                                 r'|\s*(?:까지|부터|에|으로|로|는|은|이|가|요|이요|예요|이에요|입니다)'
+                                 r'|\s*[.,!?~])+$')
+_CALL_DAY_WORDS = {'오늘': 0, '금일': 0, '내일': 1, '명일': 1, '모레': 2, '내일모레': 2, '글피': 3}
+_CALL_WEEK_PREFIX = {'': None, '이번주': 0, '금주': 0, '이번': 0, '이주': 0, '다음주': 1, '차주': 1, '담주': 1, '다음': 1,
+                     '다다음주': 2}
+
+
+def _call_day(started_at: datetime | str) -> date:
+    """통화 시작 시각의 한국 날짜."""
+    if isinstance(started_at, str):
+        started_at = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    return started_at.astimezone(_KST).date()
+
+
+def _month_end(year: int, month: int) -> date:
+    """그 달의 마지막 날."""
+    return date(year, month, calendar.monthrange(year, month)[1])
+
+
+def _add_months(day: date, months: int) -> tuple[int, int]:
+    """day가 속한 달에서 months만큼 옮긴 (연, 월)."""
+    index = day.year * 12 + day.month - 1 + months
+    return index // 12, index % 12 + 1
+
+
+def call_date(raw: str, started_at: datetime | str) -> date | None:
+    """통화에서 말한 날짜 표현(raw)을 통화 시작 시각(started_at) 기준의 날짜로 바꾼다. 읽지 못하면 None.
+    - 오늘·내일·모레·글피
+    - (이번 주·다음 주·다다음 주) ○요일. 주는 월요일에 시작한다. 주 표현 없이 "금요일"만 말하면 통화 날부터 앞으로 오는 그 요일
+      (통화 날 자신 포함). "이번 주 ○요일"이 이미 지난 요일이면 None(지난 날을 말했을 리 없어 잘못 들었을 수 있다)
+    - 이달 말·다음 달 말, 이달 ○일·다음 달 ○일
+    - 연도 없는 ○월 ○일: 지난해·올해·내년 중 통화 날에 가장 가까운 날
+    - ○일만: 통화 날 이후면 이번 달, 이미 지났으면 다음 달"""
+    base = _call_day(started_at)
+    text = unicodedata.normalize('NFKC', raw).strip()
+    text = _CALL_DATE_TRAILING.sub('', text)
+    compact = re.sub(r'\s+', '', text)
+    if compact in _CALL_DAY_WORDS:
+        return base + timedelta(days=_CALL_DAY_WORDS[compact])
+
+    match = re.fullmatch(r'(이번주|금주|이주|다다음주|다음주|차주|담주|이번|다음)?([월화수목금토일])요일?', compact)
+    if match:
+        weekday = _CALL_WEEKDAYS.index(match[2])
+        weeks = _CALL_WEEK_PREFIX[match[1] or '']
+        if weeks is None:
+            return base + timedelta(days=(weekday - base.weekday()) % 7)
+        day = base - timedelta(days=base.weekday()) + timedelta(weeks=weeks, days=weekday)
+        return day if day >= base else None
+
+    match = re.fullmatch(r'(이달|이번달|금월|다음달|익월|차월)말', compact)
+    if match:
+        year, month = _add_months(base, 0 if match[1] in ('이달', '이번달', '금월') else 1)
+        return _month_end(year, month)
+    if compact in ('월말',):
+        return _month_end(base.year, base.month)
+
+    match = re.fullmatch(r'(이달|이번달|금월|다음달|익월|차월)(\d{1,2})일', compact)
+    if match:
+        year, month = _add_months(base, 0 if match[1] in ('이달', '이번달', '금월') else 1)
+        return _safe_date(year, month, int(match[2]))
+
+    match = re.fullmatch(r'(\d{1,2})(?:월|/|\.)(\d{1,2})일?', compact)
+    if match:
+        month, day_of_month = int(match[1]), int(match[2])
+        # 지난해·올해·내년 중 통화 날에 가장 가까운 날 (11월 통화의 "1월 5일"은 내년, "11월 1일"은 올해의 지난 날)
+        days = [d for d in (_safe_date(base.year + k, month, day_of_month) for k in (-1, 0, 1)) if d is not None]
+        return min(days, key=lambda d: abs((d - base).days)) if days else None
+
+    match = re.fullmatch(r'(\d{1,2})일', compact)
+    if match:
+        day = _safe_date(base.year, base.month, int(match[1]))
+        if day is None or day < base:
+            year, month = _add_months(base, 1)
+            day = _safe_date(year, month, int(match[1]))
+        return day
+    return None
+
+
+def _safe_date(year: int, month: int, day: int) -> date | None:
+    """없는 날짜(2월 30일 등)는 None."""
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
 
 
 def _unit(raw: str, field_name: str, code: str | None = None) -> str:
@@ -1193,6 +1312,14 @@ def _supply_quantity_missing(case: dict, source_mail: dict, values: dict) -> boo
     return any(_contains(_normalized(spec, True), raw, True) for spec in specs)
 
 
+def _call_time(case_mails: dict, evidence) -> str | None:
+    """근거가 통화 전사문이면 그 통화의 시작 시각(mail_messages.sent_or_received_at), 아니면 None."""
+    mail = case_mails.get(evidence.mail_id) if evidence is not None else None
+    if mail and mail.get('channel') == 'CALL' and mail.get('received_at'):
+        return str(mail['received_at'])
+    return None
+
+
 def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[QuoteField],
                           price_tiers: list[PriceTier], cost_terms: list[CostTerm], item_notes: list[ItemNote]) -> dict:
     """store_structured_mail의 본체. 업무·revision은 실행 정보(context)에서만 받는다."""
@@ -1205,6 +1332,7 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
 
     check, rejected, review, adjusted = _SourceCheck(store, case_id), [], [], []
     values, sent_null, seen, refs, scale_texts = {}, [], set(), {}, {}
+    case_mails = {mail['mail_id']: mail for mail in _read(lambda: store.list_case_mails(case_id))}
     for field in fields:
         if field.field_name not in QUOTE_FIELDS:
             rejected.append({'field': field.field_name, 'code': 'UNKNOWN_FIELD'})
@@ -1228,17 +1356,24 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
             continue
         kind = QUOTE_FIELDS[field.field_name][0]
         issue, source = check(field.evidence, field.raw_value, numeric=kind in ('number', 'price'))
+        call_time = None
         if issue is None:
             try:
                 value = _parse(kind, field.field_name, field.raw_value, field.unit_code)
             except ReviewRequired as error:
                 issue = error.issue['code']
+            if issue == 'INVALID_DATE' and (call_time := _call_time(case_mails, field.evidence)):
+                # 통화에서 말한 날짜("이번 주 금요일")는 통화 시각 기준으로 정한다. 원문 표현은 raw_value로 남는다
+                resolved = call_date(field.raw_value, call_time)
+                value, issue = (resolved.isoformat(), None) if resolved else (None, 'CALL_DATE_UNKNOWN')
         if issue is None and len(value) > TEXT_FIELD_LIMITS.get(field.field_name, len(value)):
             issue = 'TOO_LONG'
         if issue:
             rejected.append({'field': field.field_name, 'code': issue})
             continue
         entry = values[field.field_name] = {'raw_value': field.raw_value, 'value': value, **source}
+        if call_time and kind == 'date':
+            entry['relative_to'] = call_time        # 통화 시작 시각 기준으로 정한 날짜
         refs[field.field_name] = field.evidence
         if field.field_name in _QUANTITY_FIELDS and (
                 unit := _quantity(field.raw_value, field.field_name, field.unit_code)[1]):
@@ -1293,7 +1428,6 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
             values['valid_until']['value'] < values['effective_from']['value']:     # ISO 날짜 문자열
         rejected.append({'field': 'valid_until', 'code': 'VALID_UNTIL_BEFORE_EFFECTIVE'})
     # 이번 호출의 모든 근거는 한 업체의 메일이어야 한다
-    case_mails = {mail['mail_id']: mail for mail in _read(lambda: store.list_case_mails(case_id))}
     evidence_mails = {entry['mail_id'] for entry in [*values.values(), *tiers, *costs, *notes]}
     supplier_name = values['supplier_name']['value'] if 'supplier_name' in values else None
     supplier_id, issue, matched_name = _quote_supplier(store, case_id, case_mails, evidence_mails, supplier_name)
@@ -1359,8 +1493,9 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
                       if values.get(name, {}).get('quantity_unit')}
     item = _registered_item(_read(lambda: store.list_supplier_items(case_id, supplier_id)) or [], current, case)
     # 같은 품목인지는 LLM이 판단한다(업무 품목의 견적만 보낸다). 이름 표기가 업무와도, 그 업체의 등록 품목명과도 다르면
-    # 담당자 확인만 남긴다 (우리가 보낸 메일의 등록 품목명으로 회신한 경우는 확인하지 않는다)
-    if 'item_name' in values and _item_name_variant(values['item_name']['value'], case.get('item_name'), item):
+    # 담당자 확인만 남긴다 (우리가 보낸 메일의 등록 품목명으로 회신한 경우는 확인하지 않는다).
+    # 통화는 업무·업체에 묶인 녹음이고 품목을 줄여 부르는 일이 흔해("블루베리") 표기 차이를 확인하지 않는다
+    if 'item_name' in values and not _call_time(case_mails, refs.get('item_name')) and             _item_name_variant(values['item_name']['value'], case.get('item_name'), item):
         review.append({'field': 'item_name', 'code': 'ITEM_NAME_VARIANT'})
     initial_mails = {mail_id for mail_id, mail in case_mails.items() if mail.get('message_role') == 'INITIAL'}
     conditions = _case_conditions(case, current, item, initial_mails)
