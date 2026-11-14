@@ -3,6 +3,7 @@
 Do not use request user IDs, decoded-but-unverified JWTs or editable user_metadata.
 Allowed-user (app_members) check runs right after this in require_google_user (membership.py).
 """
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from uuid import UUID
 
 import httpx
@@ -11,15 +12,30 @@ from app.core.errors import ServiceError
 from app.features.mailboxes.domain.schemas import GooglePrincipal
 
 
-def google_principal(token, settings, *, transport=None):
+class RejectAuthCookies(DefaultCookiePolicy):
+    def set_ok(self, cookie, request):
+        return False
+
+
+def create_auth_client(*, transport=None):
+    return httpx.Client(timeout=15, transport=transport, follow_redirects=False,
+                        cookies=CookieJar(policy=RejectAuthCookies()))
+
+
+def google_principal(token, settings, *, transport=None, client=None):
     if not settings.supabase_url or not settings.supabase_publishable_key:
         raise ServiceError('CONFIGURATION_REQUIRED', '사용자 인증 설정이 필요합니다.', 503)
     if not token or any(char.isspace() for char in token):
         raise ServiceError('AUTH_REQUIRED', '다시 로그인해 주세요.', 401)
     try:
-        with httpx.Client(timeout=15, transport=transport, follow_redirects=False) as client:
-            response = client.get(str(settings.supabase_url).rstrip('/') + '/auth/v1/user', headers={
-                'apikey': settings.supabase_publishable_key.get_secret_value(), 'Authorization': 'Bearer ' + token})
+        url = str(settings.supabase_url).rstrip('/') + '/auth/v1/user'
+        headers = {'apikey': settings.supabase_publishable_key.get_secret_value(),
+                   'Authorization': 'Bearer ' + token}
+        if client is None:
+            with create_auth_client(transport=transport) as temporary:
+                response = temporary.get(url, headers=headers)
+        else:
+            response = client.get(url, headers=headers)
         if response.status_code in (401, 403):
             raise ServiceError('AUTH_REQUIRED', '다시 로그인해 주세요.', 401)
         if response.status_code != 200:
