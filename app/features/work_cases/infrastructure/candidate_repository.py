@@ -1,23 +1,19 @@
 """Immutable candidate sets in agent_runs; selection audit in workflow_logs."""
 from uuid import UUID
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
-from threading import Lock
-from time import monotonic
+from app.shared.infrastructure.db.health_probe import HealthProbe
 from app.core.errors import ServiceError
 from app.features.work_cases.domain.candidates import CandidateSnapshot, CandidateSelectionResponse, POLICY_MODE
 from app.features.work_cases.application.start_readiness import StartReadiness
 
 CASE_COLUMNS = 'id,status,processing_step,input_revision,current_batch_id,archived_at,decision,mailbox_ref'
 RUN_COLUMNS = 'id,owner_user_id,work_case_id,input_revision,review_batch_id,output_jsonb,finished_at'
-_READINESS_PROBES = ThreadPoolExecutor(max_workers=2, thread_name_prefix='candidate-readiness')
 
 
 class CandidateRepository:
-    def __init__(self, client):
+    def __init__(self, client, *, readiness_probe=None, graph_health=None):
         self.client = client
-        self._readiness_lock = Lock()
-        self._readiness_cache = None
-        self._readiness_probe = None
+        self.graph_health = graph_health
+        self.readiness_probe = readiness_probe or HealthProbe(self._check_readiness, lambda result: result.available)
 
     def rows(self, query):
         try:
@@ -99,7 +95,7 @@ class CandidateRepository:
         except Exception:
             raise ServiceError('PROCESSING_UNAVAILABLE', '후보 선택 이력을 확인할 수 없습니다.', 503) from None
 
-    def ready(self):
+    def _check_readiness(self):
         try:
             result = self.client.rpc('candidate_selection_health', {}).execute().data
             if (not isinstance(result, dict) or type(result.get('contract_version')) is not int
@@ -112,22 +108,20 @@ class CandidateRepository:
         except Exception:
             return StartReadiness('CANDIDATE_SELECTION_INTEGRATION_REQUIRED', '후보 선택·발송 저장 기능이 아직 연결되지 않았습니다.')
 
-    def listing_readiness(self):
-        with self._readiness_lock:
-            if self._readiness_cache is not None and monotonic() < self._readiness_cache[0]:
-                return self._readiness_cache[1]
-            if self._readiness_probe is None:
-                self._readiness_probe = _READINESS_PROBES.submit(self.ready)
-            probe = self._readiness_probe
-        try:
-            readiness = probe.result(timeout=0.025)
-        except TimeoutError:
-            return StartReadiness('CANDIDATE_SELECTION_INTEGRATION_REQUIRED', '후보 선택 준비 상태를 확인 중입니다.')
-        with self._readiness_lock:
-            if self._readiness_probe is probe:
-                self._readiness_cache = (monotonic() + (60 if readiness.available else 5), readiness)
-                self._readiness_probe = None
-        return readiness
+    def ready(self):
+        return self.listing_readiness(timeout=None)
+
+    def listing_readiness(self, timeout=0.025):
+        if self.graph_health is not None:
+            # The graph RPC fingerprints candidate_selection_health itself.
+            # Its audited body derives readiness solely from graph ready.
+            result = self.graph_health(timeout=timeout)
+            if isinstance(result, dict) and result.get('ready') is True:
+                return StartReadiness()
+            return StartReadiness('CANDIDATE_SELECTION_INTEGRATION_REQUIRED',
+                                  '후보 선택·발송 저장 기능이 아직 연결되지 않았습니다.')
+        return self.readiness_probe.read(timeout=timeout) or StartReadiness(
+            'CANDIDATE_SELECTION_INTEGRATION_REQUIRED', '후보 선택 준비 상태를 확인 중입니다.')
 
     def blocks(self, owner, cases):
         from app.features.work_cases.application.candidates import candidate_block

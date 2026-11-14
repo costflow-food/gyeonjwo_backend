@@ -20,9 +20,9 @@ MAX_CASES = 10000
 
 
 class WorkCaseListRepository:
-    def __init__(self, client, *, extraction_fields=True, column_missing=None):
+    def __init__(self, client, *, extraction_fields=True, column_missing=None, graph_health=None):
         self.client, self.extraction_fields = client, extraction_fields
-        self.candidates = CandidateRepository(client)
+        self.candidates = CandidateRepository(client, graph_health=graph_health)
         self._sender_name_retry_at = 0
         self._round_column_retry_at = 0
         self.column_missing = column_missing

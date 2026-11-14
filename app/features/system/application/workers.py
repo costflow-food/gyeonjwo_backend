@@ -69,14 +69,14 @@ def start_graph_worker(state, settings):
     """그래프 워커를 만들고 시작해 state에 건다. 준비가 안 됐으면 None으로 두고 사유 코드를 남긴다."""
     # Graph readiness is optional for receiving mail and serving APIs.
     # No feature toggle: attempt the existing START contract each boot and on every retry.
-    from app.features.work_cases.infrastructure.graph_repository import runtime_repository
+    from app.features.work_cases.api.router import get_case_runtime
     from app.features.work_cases.application.graph_worker import GraphWorker
     from app.features.work_cases.application.start_readiness import configuration_readiness, agent_readiness
     worker = None
     try:
         configuration_readiness(settings).require()
         agent_readiness().require()
-        repo = runtime_repository(make_server_client(settings), settings)
+        repo = get_case_runtime(state)
         if not repo.available():
             raise RuntimeError('Graph START contract unavailable')
         if state.mailbox_service is None:

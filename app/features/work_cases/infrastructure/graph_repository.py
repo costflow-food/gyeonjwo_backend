@@ -1,9 +1,8 @@
 """Graph START's isolated durable queue and service-only transaction boundaries."""
 import logging
-from threading import Lock
-from time import monotonic
 
 from app.core.errors import ServiceError
+from app.shared.infrastructure.db.health_probe import HealthProbe
 from app.features.work_cases.infrastructure.runtime_repository import CaseRuntimeRepository
 
 
@@ -18,19 +17,10 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
         super().__init__(client)
         self.review_ready = False
         self.prefer_review = True
-        self._health_lock = Lock()
-        self._health_cache = None
+        self._health_probe = HealthProbe(lambda: self.call('case_graph_health'), self.health_ready)
 
-    def read_health(self):
-        with self._health_lock:
-            if self._health_cache is None or monotonic() >= self._health_cache[0]:
-                try:
-                    result = self.call('case_graph_health')
-                except ServiceError:
-                    self._health_cache = (monotonic() + 5, None)
-                else:
-                    self._health_cache = (monotonic() + (60 if self.health_ready(result) else 5), result)
-            return self._health_cache[1]
+    def read_health(self, timeout=None):
+        return self._health_probe.read(timeout=timeout)
 
     def available(self):
         result = self.read_health()
@@ -129,10 +119,7 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
         if type(scheduled) is not int or not 0 <= scheduled <= 25:
             raise ServiceError('PROCESSING_UNAVAILABLE', '추출 완료 업무의 그래프 연결을 확인할 수 없습니다.', 503)
         self.review_ready = False
-        try:
-            health = self.call('case_graph_health')
-        except ServiceError:
-            return result
+        health = self.read_health()
         if self.health_ready(health) and 'ORPHAN_RECOVERY' in health['capabilities']:
             try:
                 count = self.call('recover_orphaned_case_graph_runs', p_limit=25)
