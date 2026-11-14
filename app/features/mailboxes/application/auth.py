@@ -4,11 +4,13 @@ Do not use request user IDs, decoded-but-unverified JWTs or editable user_metada
 Allowed-user (app_members) check runs right after this in require_google_user (membership.py).
 """
 from http.cookiejar import CookieJar, DefaultCookiePolicy
+from time import monotonic
 from uuid import UUID
 
 import httpx
 
 from app.core.errors import ServiceError
+from app.core.upstream_logs import log_upstream_failure
 from app.features.mailboxes.domain.schemas import GooglePrincipal
 
 
@@ -27,6 +29,8 @@ def google_principal(token, settings, *, transport=None, client=None):
         raise ServiceError('CONFIGURATION_REQUIRED', '사용자 인증 설정이 필요합니다.', 503)
     if not token or any(char.isspace() for char in token):
         raise ServiceError('AUTH_REQUIRED', '다시 로그인해 주세요.', 401)
+    started = monotonic()
+    response = None
     try:
         url = str(settings.supabase_url).rstrip('/') + '/auth/v1/user'
         headers = {'apikey': settings.supabase_publishable_key.get_secret_value(),
@@ -39,6 +43,7 @@ def google_principal(token, settings, *, transport=None, client=None):
         if response.status_code in (401, 403):
             raise ServiceError('AUTH_REQUIRED', '다시 로그인해 주세요.', 401)
         if response.status_code != 200:
+            log_upstream_failure('auth', response.status_code, started)
             raise ServiceError('AUTH_UNAVAILABLE', '인증 서비스에 연결할 수 없습니다.', 503)
         user = response.json()
         user_id = str(UUID(user['id']))
@@ -53,4 +58,5 @@ def google_principal(token, settings, *, transport=None, client=None):
     except ServiceError:
         raise
     except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
+        log_upstream_failure('auth', response.status_code if response is not None else None, started)
         raise ServiceError('AUTH_UNAVAILABLE', '인증 응답을 확인할 수 없습니다.', 503) from None
