@@ -6,7 +6,8 @@ from app.shared.domain.schemas import StrictModel
 
 HoldCode = Literal['SUPPLIER_NOT_MATCHED', 'SUPPLIER_MISMATCH', 'MISSING_FIELD',
     'MISSING_EVIDENCE', 'SOURCE_READ_FAILED', 'NO_QUOTE_DATA', 'CONDITIONS_MISSING',
-    'NO_SUITABLE_CANDIDATES', 'SEND_POLICY_REQUIRED', 'HOLD_REASON_UNAVAILABLE']
+    'NO_SUITABLE_CANDIDATES', 'SEND_POLICY_REQUIRED', 'COUNTER_OFFER_POLICY_MISSING',
+    'COUNTER_OFFER_NOT_COMPUTABLE', 'HOLD_REASON_UNAVAILABLE']
 MESSAGES = {
     'SUPPLIER_NOT_MATCHED': '등록된 거래처와 연결되지 않아 견적을 저장하지 못했어요.',
     'SUPPLIER_MISMATCH': '메일에 연결된 거래처와 견적의 업체가 달라 확인이 필요해요.',
@@ -17,8 +18,13 @@ MESSAGES = {
     'CONDITIONS_MISSING': '검토에 필요한 요청 조건이 부족해 확인이 필요해요.',
     'NO_SUITABLE_CANDIDATES': '요청 조건에 맞는 거래처 후보를 찾지 못했어요.',
     'SEND_POLICY_REQUIRED': '견적 요청에 필요한 발송 설정을 확인해야 해요.',
+    'COUNTER_OFFER_POLICY_MISSING': '회사 정책이 정해지지 않아 역제안을 보류했어요.',
+    'COUNTER_OFFER_NOT_COMPUTABLE': '역제안 단가를 계산할 근거가 부족해 역제안을 보류했어요.',
     'HOLD_REASON_UNAVAILABLE': '보류 사유를 확인할 수 없어 담당자 확인이 필요해요.',
 }
+# ⑤ COUNTER_OFFER reference.status → hold code (HOLD only for these two).
+COUNTER_OFFER_HOLDS = {'NO_POLICY': 'COUNTER_OFFER_POLICY_MISSING',
+                       'NOT_COMPUTABLE': 'COUNTER_OFFER_NOT_COMPUTABLE'}
 MISSING_MESSAGES = {
     'supplier_name': '업체명이 확인되지 않아 견적을 저장하지 못했어요.',
     'item_name': '품목명이 확인되지 않아 검토를 보류했어요.',
@@ -84,6 +90,12 @@ def from_agent_output(output, *, rejection_codes=()):
     if (isinstance(structured, dict) and isinstance(structured.get('code'), str)
             and structured['code'] in MESSAGES):
         return hold_info(structured['code'], structured.get('field'))
+    # ⑤ has no hold field; its reference.status says why. Its reason ("단가 범위를
+    # 정할 근거가 없습니다") must not be read as a missing unit_price.
+    reference = output.get('reference')
+    status = reference.get('status') if isinstance(reference, dict) else None
+    if status in COUNTER_OFFER_HOLDS:
+        return hold_info(COUNTER_OFFER_HOLDS[status])
     for key in ('hold_code', 'reason_code'):
         code = output.get(key)
         if isinstance(code, str) and code in MESSAGES:

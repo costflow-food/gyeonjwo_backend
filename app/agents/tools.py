@@ -2643,6 +2643,8 @@ def _supplier_comparison(case: dict, quote_id: str, record: QuoteVersionRecord, 
             'is_incumbent': record.supplier_id in incumbents,
             'known_total': _amount_text(sheet.known_total) if sheet.known_total is not None else None,
             'blocked': sheet.blocked, 'warnings': sheet.warnings, 'tax_basis': sheet.tax_basis,
+            # 세금 문구는 읽었는데 포함·별도·면세를 정하지 못한 경우: 다시 읽어도 바뀌지 않는다(업체에 묻는다)
+            'tax_terms_text': stated('tax_terms') if sheet.tax_basis is None else None,
             'unknown_costs': [{'field': _cost_field(cost['cost_type']), **cost} for cost in sheet.unknown_costs],
             'missing_required': missing, 'requirements': requirements}
 
@@ -2696,7 +2698,9 @@ def check_comparability(runtime: ToolRuntime[RunContext]) -> dict:
     - OK: suppliers(업체별 supplier_id·quote_version_id·is_incumbent(인상을 요청한 업체)·known_total(확인된 금액만 더한
       총액, 계산 불가면 null)·blocked(총액을 막는 사유)·unknown_costs(금액을 모르는 비용 field·cost_type·code)·
       missing_required(견적에 없는 필수 항목 field)·requirements(견적에 적힌 규격·인증과 업무 조건. state MET이면 충족,
-      CHECK이면 원문을 보고 충족 여부를 판단한다)·tax_basis·warnings), comparable_count, tax_bases,
+      CHECK이면 원문을 보고 충족 여부를 판단한다)·tax_basis·tax_terms_text(세금 문구는 견적에 있는데 포함·별도·면세를
+      정하지 못한 경우 그 문구. 이 tax_terms는 다시 읽어도 바뀌지 않으므로 재추출하지 말고 업체에 묻는다)·warnings),
+      comparable_count, tax_bases,
       break_even_needed·read_source_needed·next_steps(이어서 할 일: 필수 누락·미확인 비용은 원문 확인, 원문에도 없는 비용은 역전 기준)
     - CONDITIONS_MISSING(업무 수량·단위 없음) / REVISION_CHANGED / CASE_NOT_FOUND
     '''

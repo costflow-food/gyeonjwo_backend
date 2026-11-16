@@ -57,6 +57,8 @@ class CaseState(TypedDict, total=False):
     pending_questions: list[str]                      # ④⑤가 ③에 넘긴 미확인
     recheck_fields: list[str]                         # ③④⑤가 ①에 넘긴 재확인 항목
     recheck_mail_ids: list[str]                       # 재확인 근거가 적힌 메일 (①이 이 메일을 다시 읽는다)
+    rechecked: Annotated[list[str], operator.add]     # 이번 실행에서 이미 ①에 넘긴 재확인 '업체:항목' 누적
+    recheck_repeated: bool                            # 같은 재확인을 다시 요청함 → ①로 되돌리지 않는다
     reply_skipped: bool                               # ①이 회신 한 통만의 문제로 HOLD해 그 회신을 비교에서 뺐다
     plans: list[Plan]                                 # ④
     counter_offer: CounterOfferTarget | None          # ⑤
@@ -142,6 +144,17 @@ def waits_after_skipped_reply(output: RunCaseOutput) -> bool:
             and REPLY_SKIPPED_NOTE in output.unresolved)
 
 
+# 같은 재확인을 두 번 요청한 실행에서 담당자에게 남기는 문장
+RECHECK_REPEATED_NOTE = '원문을 다시 읽어도 확인되지 않은 항목이 있어 미확인으로 두고 진행했습니다.'
+
+
+def recheck_keys(output) -> list[str]:
+    """재확인 요청의 '업체:항목' 키. 근거(recheck)가 없으면 unknown_fields 항목 이름만 쓴다."""
+    items = getattr(output, 'recheck', None) or []
+    keys = [f'{item.supplier_id}:{item.field}' for item in items] or [f':{name}' for name in output.unknown_fields]
+    return sorted(set(keys))
+
+
 def _failed(reason, step=ProcessingStep.FAILED):
     return {'status': RunStatus.FAILED, 'processing_step': step, 'unresolved': [reason]}
 
@@ -198,6 +211,14 @@ def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: N
             elif output.next_action == N.NEEDS_EVIDENCE:
                 update['pending_questions'] = output.unknown_fields
             elif output.next_action == N.RECHECK_SOURCE:
+                keys = recheck_keys(output)
+                if keys and set(keys) <= set(state.get('rechecked', [])):
+                    # 이미 한 번 다시 읽은 항목이다. 또 읽어도 같으므로 ①로 보내지 않고 미확인으로 남긴다
+                    update['recheck_repeated'] = True
+                    update['unresolved'] = output.unknown_fields + [RECHECK_REPEATED_NOTE]
+                    return update
+                update['recheck_repeated'] = False
+                update['rechecked'] = keys
                 update['recheck_fields'] = output.unknown_fields
                 # 이번 실행의 새 메일이 아니라 근거를 인용한 메일을 다시 읽어야 한다(예: 기존 업체의 인상 통보 메일)
                 update['recheck_mail_ids'] = list(dict.fromkeys(item.mail_id for item in getattr(output, 'recheck', [])))
@@ -255,10 +276,14 @@ def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: N
         'extraction': {N.STORED: lambda s: 'candidate' if s['start_from'] == StartFrom.START else 'priority',
                        N.HOLD: lambda s: skipped_reply(s) if s.get('reply_skipped') else 'hold'},
         'candidate': {N.SEND_RFQ: 'wait_reply'},
-        'priority': {N.REQUEST_CLARIFICATION: 'wait_reply', N.BUILD_PLANS: 'plan', N.RECHECK_SOURCE: 'extraction'},
-        'plan': {N.PLANS_PROPOSED: 'plan_validation', N.NEEDS_EVIDENCE: 'priority', N.RECHECK_SOURCE: 'extraction'},
+        # 같은 재확인을 다시 요청하면 ①로 되돌리지 않는다: ③은 미확인을 남긴 채 ④로, ④⑤는 보류로 끝낸다
+        'priority': {N.REQUEST_CLARIFICATION: 'wait_reply', N.BUILD_PLANS: 'plan',
+                     N.RECHECK_SOURCE: lambda s: 'plan' if s.get('recheck_repeated') else 'extraction'},
+        'plan': {N.PLANS_PROPOSED: 'plan_validation', N.NEEDS_EVIDENCE: 'priority',
+                 N.RECHECK_SOURCE: lambda s: 'hold' if s.get('recheck_repeated') else 'extraction'},
         'counter_offer': {N.COUNTER_OFFER_PROPOSED: 'price_validation', N.COUNTER_OFFER_SKIPPED: 'price_validation',
-                          N.NEEDS_EVIDENCE: 'priority', N.RECHECK_SOURCE: 'extraction',
+                          N.NEEDS_EVIDENCE: 'priority',
+                          N.RECHECK_SOURCE: lambda s: 'hold' if s.get('recheck_repeated') else 'extraction',
                           N.HOLD: 'review_card'},     # 역제안만 보류: 검증된 구매안과 참고 계산을 카드로 보인다
     }
     for name, table in routes.items():
@@ -279,7 +304,7 @@ def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: N
 def run_case(graph, data: RunCaseInput) -> RunCaseOutput:
     state = graph.invoke({'case_id': str(data.case_id), 'start_from': data.start_from,
                           'input_revision': data.input_revision, 'mail_ids': data.mail_ids,
-                          'role_calls': 0, 'draft_ids': [], 'unresolved': [], 'steps': []},
+                          'role_calls': 0, 'draft_ids': [], 'unresolved': [], 'steps': [], 'rechecked': []},
                          {'recursion_limit': 4 * MAX_ROLE_CALLS_PER_RUN + 4})
     return RunCaseOutput(case_id=data.case_id, status=state['status'],
                          processing_step=state.get('processing_step', ProcessingStep.PENDING_START),
