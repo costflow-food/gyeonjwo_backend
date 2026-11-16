@@ -204,7 +204,7 @@ class Plan(StrictModel):
 
 class CounterOfferReference(StrictModel):
     """⑤ 참고 계산. 정책이 없어 목표를 만들지 않을 때도 검토 카드에 보인다. 값은 최종 검사가 도구 결과로 채운다."""
-    status: str                                # PROPOSABLE·NO_POLICY·NOT_NEEDED·WITHIN_POLICY·NOT_COMPUTABLE 등
+    status: str                                # PROPOSABLE·NOT_NEEDED·NOT_COMPUTABLE·COSTS_UNKNOWN·PREVIOUS_UNKNOWN
     unit: str | None = None
     requested_unit_price: DecimalStr | None = None   # 기존 업체가 요청한 단가
     previous_unit_price: DecimalStr | None = None    # 인상 전 단가 (인상 통보 메일 근거)
