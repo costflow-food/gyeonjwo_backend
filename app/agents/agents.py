@@ -1766,9 +1766,23 @@ def _candidate_final_rules(answer, messages: list) -> list[str]:
     return []
 
 
+def _useless_rechecks(answer, compared: dict) -> list[str]:
+    """③ recheck 중 다시 읽어도 바뀌지 않는 항목: 세금 문구가 이미 견적에 저장됐는데 포함·별도·면세를 정하지 못한 tax_terms.
+    ①은 같은 문구를 다시 읽어도 같은 결과를 낸다(2026-11-16 블루베리 업무: ③↔① 반복으로 GRAPH_TIME_LIMIT)."""
+    return [f'{item.supplier_id}.tax_terms' for item in answer.recheck
+            if item.field == 'tax_terms' and (compared.get(item.supplier_id) or {}).get('tax_terms_text')]
+
+
 def _priority_final_rules(answer, messages: list) -> list[str]:
     """③ 초안 없이 BUILD_PLANS로 끝낼 때: 필수 누락이 남았거나 선택이 바뀔 수 있는 미확인 비용이 남으면 안 된다.
-    초안을 만든 실행은 초안 규칙에서 이미 확인했다."""
+    초안을 만든 실행은 초안 규칙에서 이미 확인했다. RECHECK_SOURCE는 다시 읽어도 바뀌지 않는 항목을 넣으면 안 된다."""
+    if answer.next_action == 'RECHECK_SOURCE':
+        useless = _useless_rechecks(answer, _priority_open_items(messages)[0])
+        if not useless:
+            return []
+        return [f"{', '.join(useless)}는 세금 문구가 이미 견적에 있는데 부가세 포함·별도·면세를 정하지 못한 것이라 "
+                '다시 읽어도 바뀌지 않는다. recheck에서 빼고, 기준이 비교에 필요하면 create_clarification_draft로 업체에 '
+                '묻는다. 남은 recheck이 없으면 다른 next_action으로 최종 응답을 다시 낸다.']
     drafted = any(r.get('status') == 'DRAFTED' for r in _tool_results(messages, 'create_clarification_draft'))
     if answer.next_action != 'BUILD_PLANS' or answer.recheck or drafted:
         return []
