@@ -4,6 +4,10 @@ from time import monotonic
 
 from app.core.errors import ServiceError
 
+# 회신 검토 초안 저장(stage_case_graph_review_draft)이 업체 단위로 거절할 때의 DB 예외 코드.
+# 다른 RPC 오류처럼 PROCESSING_UNAVAILABLE로 뭉개면 도구가 그 업체만 건너뛰지 못하고 역할 전체가 실패한다
+DRAFT_REJECTIONS = frozenset({'REVIEW_SUPPLIER_NOT_AUTHORIZED'})
+
 
 class CaseRuntimeRepository:
     def __init__(self, client):
@@ -18,6 +22,9 @@ class CaseRuntimeRepository:
             if getattr(error, 'code', None) == 'PGRST202':
                 raise ServiceError('EXTRACTION_SCHEMA_REQUIRED', 'Supabase의 업무 실행·저장 함수 구성을 확인해야 합니다.', 503,
                                    retryable=False, next_action='CONTACT_SERVER_ADMIN') from None
+            if getattr(error, 'message', None) in DRAFT_REJECTIONS:
+                raise ServiceError(error.message, '이 거래처에는 회신 검토 초안을 만들 수 없습니다.', 409,
+                                   retryable=False) from None
             raise ServiceError('PROCESSING_UNAVAILABLE', '업무 실행 저장소를 확인할 수 없습니다.', 503) from None
         if isinstance(result, dict) and result.get('kind') == 'ERROR':
             codes = {'RESOURCE_NOT_FOUND': 404, 'WORK_ALREADY_STARTED': 409, 'REVISION_CONFLICT': 409,

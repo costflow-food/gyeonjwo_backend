@@ -2765,6 +2765,8 @@ _CLARIFY_HINTS = {
     'NOT_IN_COMPARISON': 'check_comparability의 supplier_id에만 보완 요청을 만든다.',
     'FIELD_NOT_OPEN': 'fields는 그 업체의 missing_required·unknown_costs·requirements의 field만 쓴다.',
     'NO_CONTACT': '연락처가 없는 업체다. 이 업체는 건너뛴다.',
+    'NOT_AUTHORIZED': '이 업체의 회신을 RFQ 회신으로 확인하지 못해(예: 등록 연락처와 다른 주소에서 온 회신) 보완 요청을 '
+                      '보낼 수 없다. 이 업체는 건너뛰고, 확인하지 못한 항목은 미확인으로 둔다.',
 }
 
 
@@ -2807,7 +2809,14 @@ def save_clarification_drafts(store: PriorityStore, context: RunContext, request
             evidence_refs_jsonb=[f"quote_versions:{supplier['quote_version_id']}"] + (
                 [f'agent_runs:{context.agent_run_id}'] if context.agent_run_id else []),
             input_revision=context.input_revision, style_snapshot_jsonb=style, idempotency_key=key)
-        saved = store.insert_mail_draft(record, context.input_revision)
+        try:
+            saved = store.insert_mail_draft(record, context.input_revision)
+        except ServiceError as error:
+            # DB가 이 업체만 거절했다(회신 연결 근거 없음). 역할 전체를 실패시키지 않고 이 업체만 건너뛴다
+            if error.code != 'REVIEW_SUPPLIER_NOT_AUTHORIZED':
+                raise
+            rejected.append({'supplier_id': request.supplier_id, 'code': 'NOT_AUTHORIZED'})
+            continue
         if saved is None:
             return {'status': 'REVISION_CHANGED'}
         drafts.append({'supplier_id': request.supplier_id, 'draft_id': saved[0], 'fields': fields})
