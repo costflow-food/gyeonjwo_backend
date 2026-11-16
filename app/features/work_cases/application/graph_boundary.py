@@ -1,7 +1,9 @@
+import time
 import inspect
 import logging
 from contextlib import ExitStack
 import httpx
+from app.core.graph_timing import measure_graph_stage
 from app.core.errors import ServiceError
 from app.features.work_cases.infrastructure.agent_store import ScopedStore
 from app.features.work_cases.infrastructure.graph_store import GraphStore
@@ -62,6 +64,14 @@ def run_graph(*, settings, scope, runner_factory=None, store_factory=GraphStore)
             runner = runner_factory(store)
         else:
             client = stack.enter_context(httpx.Client(event_hooks={'request': [bounded_request]}))
+            send = client.send
+
+            def timed_send(request, *args, **kwargs):
+                with measure_graph_stage('llm'):
+                    return send(request, *args, **kwargs)
+
+            client.send = timed_send
+
             def model(role=None, verifier=False):
                 result = agents.chat_model(settings, role, verifier=verifier)
                 original = result.root_client
@@ -78,6 +88,7 @@ def run_graph(*, settings, scope, runner_factory=None, store_factory=GraphStore)
                                                    if str(role) in settings.llm_verifier_reasoning_efforts})
 
         def run_role(role, data):
+            started = time.monotonic()
             try:
                 scope.check(str(data.case_id), data.input_revision)
                 result = runner(role, data)
@@ -101,6 +112,9 @@ def run_graph(*, settings, scope, runner_factory=None, store_factory=GraphStore)
                 }.get(type(error).__name__, 'GRAPH_ROLE_FAILED')
                 logger.warning('graph role_failed start_from=%s role=%s code=%s', mode, str(role), safe)
                 raise RuntimeError(safe) from None
+            finally:
+                logger.info('graph role ended job_id=%s role=%s role_ms=%.1f',
+                            scope.job['job_id'], str(role), (time.monotonic() - started) * 1000)
 
         app_graph = graph.build_graph(run_agent=run_role, current_revision=store.current_input_revision,
                                       latest_quotes=store.latest_ids)
