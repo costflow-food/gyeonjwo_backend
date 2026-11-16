@@ -85,7 +85,8 @@ def get_list_service(state):
             settings = state.settings
             client = make_server_client(settings, http1_only=True)
             service = WorkCaseListService(WorkCaseListRepository(client,
-                                         extraction_fields=True, column_missing=runtime.cached_column_missing),
+                                         extraction_fields=True, column_missing=runtime.cached_column_missing,
+                                         graph_health=runtime.read_health),
                                          CursorCodec(settings.google_token_encryption_key.get_secret_value()))
             state.work_case_list_service = service
     return service
@@ -475,9 +476,9 @@ def get_case(case_id: UUID, request: Request, principal=Depends(require_google_u
             actions.remove('PROCEED')
             disabled.append({'action': 'PROCEED', 'reason_code': block[0], 'message': block[1]})
     if row.get('processing_step') in {'CANDIDATES', 'SELECTING_CANDIDATES'}:
-        from app.features.work_cases.infrastructure.candidate_repository import CandidateRepository
+        from app.features.work_cases.api.candidates import get_candidate_service
         from app.features.work_cases.application.candidates import apply_candidate_action
-        block = CandidateRepository(repo.client).blocks(principal.user_id, [row]).get(str(case_id))
+        block = get_candidate_service(request).repo.blocks(principal.user_id, [row]).get(str(case_id))
         apply_candidate_action(row, actions, disabled, block)
     batch_id = row.pop('current_batch_id')
     # API-02 carries the stored goal conditions and policy (08 §5).

@@ -14,11 +14,18 @@ PRIVATE = {'Cache-Control': 'private, no-store'}
 
 
 def get_candidate_service(request: Request):
-    with request.app.state.service_lock:
-        service = getattr(request.app.state, 'candidate_service', None)
+    return get_case_candidate_service(request.app.state)
+
+
+def get_case_candidate_service(state):
+    from app.features.work_cases.api.router import get_case_runtime
+
+    runtime = get_case_runtime(state)
+    with state.service_lock:
+        service = getattr(state, 'candidate_service', None)
         if service is None:
-            service = CandidateService(CandidateRepository(make_server_client(request.app.state.settings)))
-            request.app.state.candidate_service = service
+            service = CandidateService(CandidateRepository(make_server_client(state.settings), graph_health=runtime.read_health))
+            state.candidate_service = service
         return service
 
 

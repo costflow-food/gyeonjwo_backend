@@ -2,6 +2,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from app.features.mailboxes.api.router import get_mailbox_service
 from app.features.system.application.diagnostics import configuration_report
+from app.shared.infrastructure.db.health_probe import HealthProbe
 
 router = APIRouter(tags=['system'])
 
@@ -16,6 +17,28 @@ def _not_ready(checks, revision):
                          'build_revision': revision}, status_code=503)
 
 
+def _readiness_probes(request):
+    state = request.app.state
+    with state.service_lock:
+        probes = getattr(state, 'readiness_probes', None)
+        if probes is None:
+            from app.features.work_cases.api.router import get_case_runtime
+            from app.features.work_cases.api.decisions import case_changes_ready
+
+            def mailbox():
+                return get_mailbox_service(request).repo.call('connected_google_mailbox_health')
+
+            def decisions():
+                return case_changes_ready(get_case_runtime(state))
+
+            probes = (
+                HealthProbe(mailbox, lambda result: result == 'google-mailbox-v1'),
+                HealthProbe(decisions, bool),
+            )
+            state.readiness_probes = probes
+        return probes
+
+
 @router.get('/ready')
 def ready(request: Request):
     settings=request.app.state.settings
@@ -26,14 +49,12 @@ def ready(request: Request):
     if report['status']!='ready':
         return _not_ready(checks, revision)
     checks['configuration']='ready'
-    try:
-        service = get_mailbox_service(request)
-        if service.repo.call('connected_google_mailbox_health') != 'google-mailbox-v1':
-            raise RuntimeError('Connected mailbox schema mismatch')
-        checks['database']='ready'
-    except Exception:
-        checks['database']='rpc_missing_or_unavailable'
+    mailbox_probe, decision_probe = _readiness_probes(request)
+    mailbox_status, _ = mailbox_probe.readiness()
+    if mailbox_status in {'checking', 'failed'}:
+        checks['database'] = ('checking' if mailbox_status == 'checking' else 'rpc_missing_or_unavailable')
         return _not_ready(checks, revision)
+    checks['database'] = 'refreshing' if mailbox_status == 'refreshing' else 'ready'
     worker=request.app.state.connected_mailbox_worker
     if not worker or not worker.running:
         return _not_ready(checks, revision)
@@ -45,18 +66,13 @@ def ready(request: Request):
     checks['rfq_dispatch'] = 'running' if dispatch_worker and dispatch_worker.running else 'not_running'
     checks['review_execution_mode'] = 'GRAPH_START'
     checks['review_claim'] = 'awaiting_db_contract'
-    from app.features.work_cases.api.router import get_runtime_repository
-    from app.features.work_cases.api.decisions import case_changes_ready
-    checks['final_decision'] = 'not_ready'
+    checks['final_decision'] = 'ready' if decision_probe.read(timeout=0.05) else 'not_ready'
     degraded = []
     try:
         worker = request.app.state.extraction_worker
-        repo = get_runtime_repository(request)
-        if case_changes_ready(repo):
-            checks['final_decision'] = 'ready'
         if not worker or not worker.running:
             raise RuntimeError('Graph worker unavailable')
-        if not repo.available():
+        if not worker.repo.health_ready(worker.repo.read_health(timeout=0.05)):
             raise RuntimeError('Graph contract unavailable')
         checks['extraction'] = 'running'
         if getattr(worker.repo, 'review_ready', False):

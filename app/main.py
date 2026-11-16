@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.responses import ErrorEnvelope, api_error, service_error_response
 from app.core.config import get_settings
+from app.features.mailboxes.application.auth import create_auth_client
 from app.core.logs import configure_logging, error_origin, stack_summary
 from app.core.request_context import current_request_id, new_request_id
 from app.shared.infrastructure.db.contracts import OwnershipLost
@@ -95,7 +96,7 @@ def create_app(settings=None, push_verifier=verify_push, mailbox_service=None):
     require_startup_configuration(settings)
 
     @asynccontextmanager
-    async def lifespan(app):
+    async def worker_lifespan(app):
         connected_worker = None
         retry_task = None
         # Workers start by default; a missing secret only keeps that worker off (names were logged at startup).
@@ -133,6 +134,13 @@ def create_app(settings=None, push_verifier=verify_push, mailbox_service=None):
                 worker = getattr(app.state, name, None)
                 if worker:
                     worker.close()
+
+    @asynccontextmanager
+    async def lifespan(app):
+        with create_auth_client() as client:
+            app.state.auth_http_client = client
+            async with worker_lifespan(app):
+                yield
 
     # Explicitly override FastAPI's default HTTPValidationError schema: runtime uses ErrorEnvelope.
     common_errors = {status: {'model': ErrorEnvelope} for status in
