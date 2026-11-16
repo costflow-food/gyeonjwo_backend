@@ -3175,7 +3175,9 @@ def counter_offer_numbers(store: CounterOfferStore, context: RunContext, alterna
     else:
         status = 'PROPOSABLE'
         low, high, above = counter_range(sheet.unit_price, previous, top)
-        result |= {'allowed_range': [_amount_text(low), _amount_text(high)], 'above_alternative': above}
+        # 목표 단가는 범위의 하한이다(2026-11-16 팀 결정). LLM은 이 값을 그대로 쓴다
+        result |= {'allowed_range': [_amount_text(low), _amount_text(high)], 'target_unit_price': _amount_text(low),
+                   'above_alternative': above}
     return {'status': 'OK', 'counter_status': status, 'skip_allowed': status in COUNTER_SKIP_STATUSES} | result
 
 
@@ -3186,12 +3188,13 @@ def calculate_counter_offer(alternative: list[AlternativeAllocation], runtime: T
     alternative: 비교할 대안의 배정량 [{supplier_id, quote_version_id, quantity}]. input의 validated_plans 중
       가장 싼 비유지 안(VALID)을 그대로 보낸다.
 
-    반환 status OK: counter_status(PROPOSABLE: allowed_range 안에서 목표를 정한다 / NOT_NEEDED: 요청 단가로도
+    반환 status OK: counter_status(PROPOSABLE: 목표 단가는 target_unit_price(allowed_range의 최소)다 / NOT_NEEDED: 요청 단가로도
       대안보다 싸거나 같다 / NOT_COMPUTABLE / COSTS_UNKNOWN: 기존 업체의 단가 외 비용(incumbent_unknown_costs)을 모른다 /
       PREVIOUS_UNKNOWN: 인상 전 단가 근거가 없다), skip_allowed(true면 역제안 없이 인상 수용을 추천한다),
       requested_unit_price, previous_unit_price(previous_source 메일), ceiling_unit_price(이 단가 이하면 대안보다 싸다),
       alternative_total, allowed_range([최소, 최대]: 최소는 ceiling_unit_price와 인상 전 단가 중 높은 값, 최대는 요청 단가),
-      above_alternative(true면 범위 안의 목표가 받아들여져도 대안보다 비싸다), unit, increase_reason
+      target_unit_price(역제안할 목표 단가 = allowed_range의 최소),
+      above_alternative(true면 목표가 받아들여져도 대안보다 비싸다), unit, increase_reason
     / REJECTED(code·hint) / CONDITIONS_MISSING / REVISION_CHANGED / CASE_NOT_FOUND
     '''
     return counter_offer_numbers(_priority_store, _run_context(_priority_store, runtime), alternative)
@@ -3199,7 +3202,7 @@ def calculate_counter_offer(alternative: list[AlternativeAllocation], runtime: T
 
 def check_counter_target(store: CounterOfferStore, context: RunContext, target_unit_price: str,
                          alternative: list[AlternativeAllocation]) -> dict:
-    """validate_counter_offer의 본체. 목표 단가가 허용 범위(유지 상한·인상 전 단가 ~ 요청 단가) 안인지 확인한다."""
+    """validate_counter_offer의 본체. 목표 단가가 허용 범위의 하한(유지 상한과 인상 전 단가 중 높은 값)과 같은지 확인한다."""
     numbers = counter_offer_numbers(store, context, alternative)
     if numbers.get('status') != 'OK':
         return numbers
@@ -3207,8 +3210,9 @@ def check_counter_target(store: CounterOfferStore, context: RunContext, target_u
     violations = []
     if numbers['counter_status'] != 'PROPOSABLE':
         violations.append({'code': numbers['counter_status']})
-    elif target is None or not Decimal(numbers['allowed_range'][0]) <= target <= Decimal(numbers['allowed_range'][1]):
-        violations.append({'code': 'OUT_OF_RANGE', 'allowed_range': numbers['allowed_range']})
+    elif target is None or target != Decimal(numbers['target_unit_price']):
+        violations.append({'code': 'NOT_LOWER_BOUND', 'target_unit_price': numbers['target_unit_price'],
+                           'allowed_range': numbers['allowed_range']})
     return {'status': 'INVALID' if violations else 'VALID', 'target_unit_price': _won(target),
             'violations': violations, 'numbers': numbers}
 
@@ -3217,8 +3221,9 @@ def check_counter_target(store: CounterOfferStore, context: RunContext, target_u
 @tool
 def validate_counter_offer(target_unit_price: str, alternative: list[AlternativeAllocation],
                            runtime: ToolRuntime[RunContext]) -> dict:
-    '''목표 단가가 허용 범위(allowed_range) 안인지 검증한다. alternative는 calculate_counter_offer에 보낸 것과 같다.
-    반환: status VALID / INVALID(violations: OUT_OF_RANGE(allowed_range)·NOT_NEEDED 등), target_unit_price, numbers
+    '''목표 단가가 calculate_counter_offer의 target_unit_price(allowed_range의 최소)와 같은지 검증한다.
+    alternative는 calculate_counter_offer에 보낸 것과 같다.
+    반환: status VALID / INVALID(violations: NOT_LOWER_BOUND(target_unit_price·allowed_range)·NOT_NEEDED 등), target_unit_price, numbers
     '''
     return check_counter_target(_priority_store, _run_context(_priority_store, runtime), target_unit_price, alternative)
 

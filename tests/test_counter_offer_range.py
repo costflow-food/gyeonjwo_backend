@@ -1,4 +1,4 @@
-"""⑤ 역제안 범위: 회사 정책 없이 [max(유지 상한, 인상 전 단가), 요청 단가] (2026-11-16 팀 결정).
+"""⑤ 역제안 범위: 회사 정책 없이 [max(유지 상한, 인상 전 단가), 요청 단가], 목표 단가는 그 하한 (2026-11-16 팀 결정).
 
 정책값이 없는 업무(policy_jsonb {"source": "DEFAULT_UNCONFIRMED"})에서 ⑤가 유지 상한까지 계산하고도
 NO_POLICY로 보류하던 문제. 수치는 dev 업무의 최신 견적 그대로다.
@@ -75,6 +75,7 @@ class CounterRangeTests(unittest.TestCase):
         self.assertEqual(numbers['alternative_total'], '2508000')
         self.assertEqual(Decimal(numbers['ceiling_unit_price']).quantize(Decimal('0.01')), Decimal('4138.33'))
         self.assertEqual(numbers['allowed_range'], ['4139', '4400'])
+        self.assertEqual(numbers['target_unit_price'], '4139')
         self.assertFalse(numbers['above_alternative'])
         self.assertFalse(numbers['skip_allowed'])
 
@@ -84,6 +85,7 @@ class CounterRangeTests(unittest.TestCase):
         self.assertEqual(numbers['alternative_total'], '3560000')
         self.assertEqual(numbers['ceiling_unit_price'], '4425')
         self.assertEqual(numbers['allowed_range'], ['4500', '4950'])
+        self.assertEqual(numbers['target_unit_price'], '4500')
         self.assertTrue(numbers['above_alternative'])
 
     def test_no_policy_status_is_gone(self):
@@ -91,15 +93,16 @@ class CounterRangeTests(unittest.TestCase):
             numbers = counter_offer_numbers(store, CONTEXT, alternative(quantity))
             self.assertNotIn(numbers['counter_status'], ('NO_POLICY', 'WITHIN_POLICY'))
 
-    def test_target_inside_range_is_valid(self):
+    def test_lower_bound_target_is_valid(self):
         self.assertEqual(check_counter_target(broccoli(), CONTEXT, '4139', alternative(600))['status'], 'VALID')
-        self.assertEqual(check_counter_target(strawberry(), CONTEXT, '4700', alternative(800))['status'], 'VALID')
+        self.assertEqual(check_counter_target(strawberry(), CONTEXT, '4500', alternative(800))['status'], 'VALID')
 
-    def test_target_below_range_is_rejected(self):
-        checked = check_counter_target(broccoli(), CONTEXT, '4138', alternative(600))
-        self.assertEqual(checked['violations'], [{'code': 'OUT_OF_RANGE', 'allowed_range': ['4139', '4400']}])
-        checked = check_counter_target(strawberry(), CONTEXT, '4425', alternative(800))
-        self.assertEqual(checked['status'], 'INVALID')
+    def test_any_other_target_is_rejected(self):
+        for price in ('4138', '4200', '4400'):
+            checked = check_counter_target(broccoli(), CONTEXT, price, alternative(600))
+            self.assertEqual(checked['violations'], [{'code': 'NOT_LOWER_BOUND', 'target_unit_price': '4139',
+                                                      'allowed_range': ['4139', '4400']}])
+        self.assertEqual(check_counter_target(strawberry(), CONTEXT, '4700', alternative(800))['status'], 'INVALID')
 
     def test_request_cheaper_than_alternative_is_accepted(self):
         store = broccoli()
