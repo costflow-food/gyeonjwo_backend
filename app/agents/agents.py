@@ -1821,8 +1821,15 @@ _WON_AMOUNT = re.compile(r'(\d[\d,]*(?:\.\d+)?)\s*원')
 def _counter_final_rules(answer, messages: list) -> list[str]:
     """⑤ next_action은 마지막 calculate_counter_offer의 counter_status에 맞아야 한다.
     PROPOSABLE이어도 초안 도구가 거절했거나(연락처 없음 등) 코드 규칙 위반으로 실행되지 않았으면 HOLD를 받는다.
-    PREVIOUS_UNKNOWN의 RECHECK_SOURCE는 인용 구절에 요청 단가 말고 다른 금액이 있어야 한다(KAN-262)."""
+    PREVIOUS_UNKNOWN의 RECHECK_SOURCE는 인용 구절에 요청 단가 말고 다른 금액이 있어야 한다(KAN-262).
+    계산에 쓴 대안은 입력 VALID 비유지 안의 배정 그대로여야 한다. 초안을 만들지 않는 SKIPPED·HOLD도 확인한다(KAN-277)."""
     numbers = _last_ok(messages, 'calculate_counter_offer')
+    has_alternative = any(p.get('plan_type') != 'KEEP' and p.get('validation_status') == 'VALID'
+                          for p in _role_input(messages).get('validated_plans') or [])
+    # attempt=2: 배정 일치만 본다. 가장 싼 안이 아닌 선택은 초안 경로처럼 이유가 있으면 허용한다
+    if numbers and has_alternative and _counter_offer_rules({'alternative': numbers.get('alternative') or []}, messages, 2):
+        return ['calculate_counter_offer에 보낸 alternative가 입력 validated_plans의 비유지 안(SWITCH·SPLIT) 배정과 다르다. '
+                '기존 업체 배정분까지 포함해 고른 안의 allocations를 그대로 보내 다시 계산하고 최종 응답을 다시 낸다.']
     status = numbers.get('counter_status')
     allowed = set(_COUNTER_ACTIONS.get(status, ()))
     if status == 'PROPOSABLE' and any(r.get('status') == 'REJECTED' or r.get('code') == 'DRAFT_RULE'
