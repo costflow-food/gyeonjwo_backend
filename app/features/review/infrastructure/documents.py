@@ -6,6 +6,8 @@ import time
 from html.parser import HTMLParser
 from pathlib import Path
 
+from app.core.graph_timing import timed_document
+
 
 class HtmlText(HTMLParser):
     def __init__(self):
@@ -165,6 +167,7 @@ def _with_retry(read) -> tuple[object, dict]:
     return None, {'attempts': PDF_MAX_ATTEMPTS, 'error_kind': 'TECHNICAL', 'retry_exhausted': True}
 
 
+@timed_document
 def read_pdf_document(content: bytes) -> dict:
     """PDF의 텍스트 레이어를 쪽 단위로 읽는다(OCR 없음). 기술 오류는 다시 시도한다.
     반환: {status: READ(글자가 있는 쪽이 하나라도 있음)·NO_TEXT(쪽은 있지만 모두 글자 없음)·FAILED, pages,
@@ -176,6 +179,7 @@ def read_pdf_document(content: bytes) -> dict:
     return {'status': 'READ' if any(text.strip() for text in pages) else 'NO_TEXT', 'pages': pages, **log}
 
 
+@timed_document
 def ocr_pdf_page(content: bytes, page: int, *, remaining_seconds=None) -> dict:
     """PDF의 page쪽(1부터) 하나를 그림으로 렌더링해 OCR한다. 사진(jpg·png)이면 page=1로 그 사진을 OCR한다.
     기술 오류는 다시 시도한다. 사진이 깨졌거나 픽셀 상한(pdf_worker.MAX_IMAGE_PIXELS)을 넘으면 내용 문제(CONTENT)다.

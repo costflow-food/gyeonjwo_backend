@@ -1,5 +1,6 @@
 """Graph START's isolated durable queue and service-only transaction boundaries."""
 import logging
+from time import monotonic
 
 from app.core.errors import ServiceError
 from app.shared.infrastructure.db.health_probe import HealthProbe
@@ -17,6 +18,7 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
         super().__init__(client)
         self.review_ready = False
         self.prefer_review = True
+        self._next_queue_observation = 0.0
         self._health_probe = HealthProbe(lambda: self.call('case_graph_health'), self.health_ready)
 
     def read_health(self, timeout=None, *, stale_for=0):
@@ -136,7 +138,23 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
                 self.review_ready = True
             except ServiceError:
                 logger.warning('review queue unavailable code=REVIEW_RPC_UNAVAILABLE')
+        self.observe_queue()
         return result
+
+    def observe_queue(self):
+        now = monotonic()
+        if now < self._next_queue_observation:
+            return
+        self._next_queue_observation = now + 60
+        try:
+            snapshot = self.call('case_graph_queue_observation')
+        except ServiceError:
+            logger.warning('graph queue observation unavailable')
+            return
+        if isinstance(snapshot, dict):
+            count, age = snapshot.get('pending_count'), snapshot.get('oldest_pending_ms')
+            if type(count) is int and count >= 0 and type(age) is int and age >= 0:
+                logger.info('graph queue pending_count=%d oldest_pending_ms=%d', count, age)
 
     def finish_graph(self, job, output):
         name = 'complete_case_graph_review' if job.get('execution_mode') == 'GRAPH_REVIEW_V1' else 'complete_case_graph_run'

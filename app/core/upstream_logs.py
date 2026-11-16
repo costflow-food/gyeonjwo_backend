@@ -5,6 +5,7 @@ from time import monotonic
 
 import httpx
 
+from app.core.graph_timing import measure_graph_stage
 from app.core.request_context import current_request_id
 
 logger = logging.getLogger('gyeonjwo')
@@ -28,7 +29,8 @@ def observe_data_api(session):
             return send(request, *args, **kwargs)
         started = monotonic()
         try:
-            response = send(request, *args, **kwargs)
+            with measure_graph_stage('db'):
+                response = send(request, *args, **kwargs)
         except httpx.RequestError:
             log_upstream_failure('data_api', None, started)
             raise
