@@ -2,7 +2,7 @@
 import json
 import unittest
 
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 
 from app.agents.agents import _counter_final_rules
 from app.agents.schemas import CounterOfferOut
@@ -27,6 +27,39 @@ class CounterFinalRulesTests(unittest.TestCase):
 
     def test_hold_passes(self):
         self.assertEqual(_counter_final_rules(answer('HOLD'), [CALC]), [])
+
+
+# KAN-277: 입력·도구 결과 모두 이름표(S1·Q1) 기준. 비유지 안은 기존 업체가 포함된 SPLIT
+SPLIT = [{'supplier_id': 'S1', 'quote_version_id': 'Q1', 'quantity': '400'},
+         {'supplier_id': 'S2', 'quote_version_id': 'Q2', 'quantity': '600'}]
+
+
+def case_input(plans):
+    return HumanMessage(json.dumps({'validated_plans': plans}))
+
+
+def calc(status, alternative):
+    return ToolMessage(name='calculate_counter_offer', tool_call_id='c2', content=json.dumps(
+        {'status': 'OK', 'counter_status': status, 'alternative': alternative}))
+
+
+KEEP = {'plan_type': 'KEEP', 'validation_status': 'VALID', 'total_amount': '5400000',
+        'allocations': [{'supplier_id': 'S1', 'quote_version_id': 'Q1', 'quantity': '1000'}]}
+PLANS = [KEEP, {'plan_type': 'SPLIT', 'validation_status': 'VALID', 'total_amount': '5450000', 'allocations': SPLIT}]
+
+
+class CounterAlternativeRuleTests(unittest.TestCase):
+    def test_incumbent_share_dropped_is_sent_back(self):  # K08 r2·K07 r20 실제 실패
+        messages = [case_input(PLANS), calc('NOT_COMPUTABLE', SPLIT[1:])]
+        self.assertEqual(len(_counter_final_rules(answer('HOLD'), messages)), 1)
+
+    def test_same_allocations_pass(self):  # K08 r1·r3
+        messages = [case_input(PLANS), calc('NOT_NEEDED', SPLIT)]
+        self.assertEqual(_counter_final_rules(answer('COUNTER_OFFER_SKIPPED'), messages), [])
+
+    def test_no_alternative_plan_skips_check(self):  # K09: 유지안만 있으면 대안 검사 안 함
+        messages = [case_input([KEEP]), calc('NOT_COMPUTABLE', SPLIT[1:])]
+        self.assertEqual(_counter_final_rules(answer('HOLD'), messages), [])
 
 
 if __name__ == '__main__':
