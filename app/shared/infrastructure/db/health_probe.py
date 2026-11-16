@@ -16,17 +16,26 @@ class HealthProbe:
         self._value = None
         self._healthy_value = False
 
-    def read(self, timeout=None):
+    def read(self, timeout=None, *, stale_for=0):
+        """Return the cached value, refreshing it once it expires.
+
+        stale_for lets a caller that only needs a hint (list/detail rows) keep
+        the last healthy value for that many seconds past expiry while one
+        refresh runs, instead of reporting "unknown" whenever the refresh is
+        slower than timeout. Failures are never served stale.
+        """
         with self._lock:
-            if monotonic() < self._expires:
+            now = monotonic()
+            if now < self._expires:
                 return self._value
             if self._pending is None:
                 self._pending = _POOL.submit(self._refresh)
             pending = self._pending
+            stale = self._value if self._healthy_value and now < self._expires + stale_for else None
         try:
             return pending.result(timeout=timeout)
         except TimeoutError:
-            return None
+            return stale
 
     def readiness(self):
         """Allow brief stale success while a refresh is in progress."""

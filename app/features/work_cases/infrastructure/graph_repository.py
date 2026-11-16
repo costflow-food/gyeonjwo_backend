@@ -19,8 +19,8 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
         self.prefer_review = True
         self._health_probe = HealthProbe(lambda: self.call('case_graph_health'), self.health_ready)
 
-    def read_health(self, timeout=None):
-        return self._health_probe.read(timeout=timeout)
+    def read_health(self, timeout=None, *, stale_for=0):
+        return self._health_probe.read(timeout=timeout, stale_for=stale_for)
 
     def available(self):
         result = self.read_health()

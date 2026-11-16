@@ -7,6 +7,9 @@ from app.features.work_cases.application.start_readiness import StartReadiness
 
 CASE_COLUMNS = 'id,status,processing_step,input_revision,current_batch_id,archived_at,decision,mailbox_ref'
 RUN_COLUMNS = 'id,owner_user_id,work_case_id,input_revision,review_batch_id,output_jsonb,finished_at'
+CHECKING_MESSAGE = '후보 선택 준비 상태를 확인 중입니다.'
+# How long list/detail rows may reuse the last healthy readiness past its 60s cache.
+LISTING_STALE_SECONDS = 60
 
 
 class CandidateRepository:
@@ -112,16 +115,21 @@ class CandidateRepository:
         return self.listing_readiness(timeout=None)
 
     def listing_readiness(self, timeout=0.025):
+        # Rows (API-01/02) only need a hint: keep the last healthy result while a
+        # refresh runs. Selection itself calls ready() and waits for a fresh check.
+        stale_for = 0 if timeout is None else LISTING_STALE_SECONDS
         if self.graph_health is not None:
             # The graph RPC fingerprints candidate_selection_health itself.
             # Its audited body derives readiness solely from graph ready.
-            result = self.graph_health(timeout=timeout)
+            result = self.graph_health(timeout=timeout, stale_for=stale_for)
+            if result is None:
+                return StartReadiness('CANDIDATE_SELECTION_INTEGRATION_REQUIRED', CHECKING_MESSAGE)
             if isinstance(result, dict) and result.get('ready') is True:
                 return StartReadiness()
             return StartReadiness('CANDIDATE_SELECTION_INTEGRATION_REQUIRED',
                                   '후보 선택·발송 저장 기능이 아직 연결되지 않았습니다.')
-        return self.readiness_probe.read(timeout=timeout) or StartReadiness(
-            'CANDIDATE_SELECTION_INTEGRATION_REQUIRED', '후보 선택 준비 상태를 확인 중입니다.')
+        return self.readiness_probe.read(timeout=timeout, stale_for=stale_for) or StartReadiness(
+            'CANDIDATE_SELECTION_INTEGRATION_REQUIRED', CHECKING_MESSAGE)
 
     def blocks(self, owner, cases):
         from app.features.work_cases.application.candidates import candidate_block
