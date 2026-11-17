@@ -163,7 +163,8 @@ EXTRACTOR_SEGMENTS = (
   붙은 "…까지"는 valid_until이 아니다. 그런 날짜는 어느 필드에도 넣지 않고 그 조건 문장을 품목 비고로 남긴다.
   예) "2027년 2월 28일까지 월 60박스 이상 발주 시 100,000원/박스" → valid_until 보내지 않음,
       price_tiers {min_quantity "월 60박스 이상", unit_price "100,000원"} + 그 문장 전체를 비고(PRICE_NOTICE)로
-  견적 전체에 붙은 "유효기간·견적 유효기간 …까지"는 적용일이 있든 없든 항상 valid_until로 보낸다.
+  견적 전체에 붙은 "유효기간·견적 유효기간·단가 유지(기간) …까지"는 적용일이 있든 없든 항상 valid_until로 보낸다
+  (예: "단가 유지: 2027-01-15", "단가 유지 기간 2026년 12월 31일까지" → valid_until).
   적용일과 비교하는 것은 도구가 한다. 유효기간이 적용일보다 이르면 도구가 VALID_UNTIL_BEFORE_EFFECTIVE로 알려준다.
   적용일은 원문에 적용일·"…부터"로 적힌 날짜만 쓴다(작성일·발행일·견적일은 적용일이 아니다).
   "…까지 회신 부탁드립니다"처럼 날짜가 붙은 회신 요청은 valid_until이 아니다. 그 문장을 비고(PRICE_NOTICE)로 넣는다
@@ -188,7 +189,8 @@ EXTRACTOR_SEGMENTS = (
   예) "변경 단가: 54,500원/박스" → unit_price "54,500원", unit "박스"
       "유효기간 2026년 12월 31일까지입니다" → valid_until "2026년 12월 31일"
       "500kg 이상 ~ 1,000kg 미만: 9,900원/kg" → price_tiers {min_quantity "500kg 이상", max_quantity "1,000kg 미만",
-      unit_price "9,900원"}. 물량별 단가만 있으면 unit_price는 보내지 않는다(구간 단가 중 하나를 고르지 않는다).
+      unit_price "9,900원"}, unit "kg". 물량별 단가만 있으면 unit_price는 보내지 않는다(구간 단가 중 하나를 고르지 않는다).
+      그래도 단가 단위(원/kg·kg당·팩당 등)는 unit으로 보낸다.
       "적용 기간: 2026년 11월 15일 ~ 2027년 2월 28일" → effective_from "2026년 11월 15일", valid_until "2027년 2월 28일"
       "최소 20박스, 5박스 단위" → moq "최소 20박스", pack_multiple "5박스 단위"
       "1kg 당 단가 : 9,850 원" → unit_price "9,850 원", unit "kg"
@@ -196,7 +198,8 @@ EXTRACTOR_SEGMENTS = (
       "kg당 3.20 USD" → unit_price "3.20 USD", unit "kg", currency "USD"
       "Unit price: USD 3.10 per kg" → unit_price "USD 3.10", unit "kg"
         ("per kg"·"Unit price"는 raw_value에 넣지 않는다)
-      "Valid until: December 31, 2026"처럼 영어로 쓴 날짜는 도구가 읽지 못한다. 그 항목만 null로 보내고 reason에 적는다
+      "Valid until: December 31, 2026" → valid_until "December 31, 2026" (영어 날짜는 월 이름·일·연도를 그대로 옮긴다.
+        "12/31/2026"처럼 숫자만 쓴 날짜는 월·일 순서가 모호해 도구가 읽지 못한다. 그 항목만 null로 보내고 reason에 적는다)
       "단가는 kg당 9,500원입니다" → unit_price "9,500원", unit "kg"
       "하차비는 박스당 500원" → cost_terms {amount "500원", basis "박스당", basis_type PER_UNIT, basis_unit box}
       "운송비 1회 배송당 100,000원 별도" → cost_terms {amount "100,000원", basis "1회 배송당", basis_type PER_ORDER}
@@ -465,6 +468,8 @@ next_action:
    (예: 업무 "HACCP" · 견적 "식품안전관리인증(HACCP)" → 충족, 업무 "10kg 박스" · 견적 "5kg 박스" → 미충족)
    충족이 아니거나 판단할 수 없으면 그 field를 MUST_CONFIRM으로 묻는다.
 4. missing_required나 unknown_costs가 있으면 read_mail_evidence로 그 업체의 메일 원문을 다시 읽는다.
+   - ask_supplier에 있는 field는 견적에 값은 있지만 그대로 비교할 수 없는 항목이다(예: 외화 단가 → 원화 단가를 묻는다).
+     원문에 그 값(USD 등)이 적혀 있어도 재추출 대상이 아니다. 원문을 다시 읽지 않고 MUST_CONFIRM으로 묻는다.
    - 원문에 답이 있는데 견적에 빠졌으면 업체에 묻지 않는다. recheck에 {supplier_id, field, mail_id, source_text}를
      넣고 RECHECK_SOURCE를 반환한다. source_text는 그 답이 적힌 원문 구절을 그대로 옮긴다(예: "월 1,000kg 공급 가능",
      "운송비 박스당 1,500원"). 원문 구절을 옮길 수 없으면 원문에 답이 없는 것이다.
@@ -532,6 +537,7 @@ next_action:
 - PLANS_PROPOSED: VALID·CONDITIONAL인 안이 하나 이상 있다.
 - NEEDS_EVIDENCE: 안을 만들려면 업체에 확인할 정보가 있다. unknown_fields에 "<supplier_id>.<field>"로 넣는다.
 - RECHECK_SOURCE: 원문에 답이 있는데 견적에 빠졌다. recheck에 원문 구절을 인용한다(③과 같은 규칙).
+  check_comparability의 ask_supplier 항목(외화 단가 등)은 재추출 대상이 아니다. 그 업체는 빠진 채로 안을 구성한다.
 - HOLD: 가능한 안이 하나도 없다. 이유를 reason에 적는다.
 
 지켜야 할 것:
@@ -1766,10 +1772,16 @@ def _candidate_final_rules(answer, messages: list) -> list[str]:
 
 
 def _useless_rechecks(answer, compared: dict) -> list[str]:
-    """③ recheck 중 다시 읽어도 바뀌지 않는 항목: 세금 문구가 이미 견적에 저장됐는데 포함·별도·면세를 정하지 못한 tax_terms.
-    ①은 같은 문구를 다시 읽어도 같은 결과를 낸다(2026-11-16 블루베리 업무: ③↔① 반복으로 GRAPH_TIME_LIMIT)."""
-    return [f'{item.supplier_id}.tax_terms' for item in answer.recheck
-            if item.field == 'tax_terms' and (compared.get(item.supplier_id) or {}).get('tax_terms_text')]
+    """③④ recheck 중 다시 읽어도 바뀌지 않는 항목(check_comparability의 ask_supplier): 세금 문구가 이미 견적에 저장됐는데
+    포함·별도·면세를 정하지 못한 tax_terms(2026-11-16 블루베리 업무: ③↔① 반복으로 GRAPH_TIME_LIMIT),
+    외화 단가의 currency(2026-11-17 평가: 원문에 USD가 있다고 재추출을 고름)."""
+    useless = []
+    for item in answer.recheck:
+        supplier = compared.get(item.supplier_id) or {}
+        fixed_tax = item.field == 'tax_terms' and supplier.get('tax_terms_text')
+        if item.field in supplier.get('ask_supplier', []) or fixed_tax:
+            useless.append(f'{item.supplier_id}.{item.field}')
+    return useless
 
 
 def _priority_final_rules(answer, messages: list) -> list[str]:
@@ -1779,9 +1791,9 @@ def _priority_final_rules(answer, messages: list) -> list[str]:
         useless = _useless_rechecks(answer, _priority_open_items(messages)[0])
         if not useless:
             return []
-        return [f"{', '.join(useless)}는 세금 문구가 이미 견적에 있는데 부가세 포함·별도·면세를 정하지 못한 것이라 "
-                '다시 읽어도 바뀌지 않는다. recheck에서 빼고, 기준이 비교에 필요하면 create_clarification_draft로 업체에 '
-                '묻는다. 남은 recheck이 없으면 다른 next_action으로 최종 응답을 다시 낸다.']
+        return [f"{', '.join(useless)}는 check_comparability의 ask_supplier 항목이다. 견적에 값은 있지만 그대로 비교할 수 "
+                '없는 것(외화 단가, 포함·별도를 정하지 못한 세금 문구)이라 다시 읽어도 바뀌지 않는다. recheck에서 빼고 '
+                'create_clarification_draft로 업체에 묻는다. 남은 recheck이 없으면 다른 next_action으로 최종 응답을 다시 낸다.']
     drafted = any(r.get('status') == 'DRAFTED' for r in _tool_results(messages, 'create_clarification_draft'))
     if answer.next_action != 'BUILD_PLANS' or answer.recheck or drafted:
         return []
@@ -1808,6 +1820,12 @@ def _plan_final_rules(answer, messages: list) -> list[str]:
     """④ 검증된 안이 있으면 PLANS_PROPOSED여야 하고, 도구가 만든 가장 싼 전환안·분산안은 기본으로 보인다.
     (유지안 누락은 구매안 검증 노드가 KEEP_MISSING으로 잡는다)"""
     validated = [r for r in _tool_results(messages, 'validate_purchase_plan') if r.get('status') in ('VALID', 'CONDITIONAL')]
+    if answer.next_action == 'RECHECK_SOURCE':
+        compared = {s['supplier_id']: s for s in _last_ok(messages, 'check_comparability').get('suppliers', [])}
+        useless = _useless_rechecks(answer, compared)
+        if useless:
+            return [f"{', '.join(useless)}는 check_comparability의 ask_supplier 항목이라 재추출로 바뀌지 않는다. recheck에서 "
+                    '빼고, 그 업체는 빠진 채로 안을 구성한다. 남은 recheck이 없으면 다른 next_action으로 최종 응답을 다시 낸다.']
     if answer.next_action in ('HOLD', 'NEEDS_EVIDENCE') and validated:
         return ['validate_purchase_plan에서 VALID·CONDITIONAL로 확인된 안이 있다. 그 안으로 PLANS_PROPOSED 최종 응답을 낸다.']
     if answer.next_action != 'PLANS_PROPOSED':

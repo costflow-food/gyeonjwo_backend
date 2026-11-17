@@ -381,6 +381,13 @@ _UPPER_BOUND_WORDS = ('미만', '이하', '까지')
 # 날짜 뒤의 시각·'출고분·주문 확정분' 같은 대상 표기와 '까지·부터·자' (예: '2026-12-01 출고분부터', '2026-11-30 18:00까지')
 _DATE_SUFFIX = re.compile(r'(?:\s*\d{1,2}:\d{2})?\s*(?:(?:출고|입고|납품|주문|발주)\s*(?:확정\s*)?분\s*)?(?:까지|부터|자)?\s*$')
 _DOTTED_DATE = re.compile(r'(\d{4})\s*[./]\s*(\d{1,2})\s*[./]\s*(\d{1,2})\s*\.?')   # 2026. 12. 1. / 2026/12/01
+# 영문 월 이름 날짜: 'December 20, 2026', 'Dec. 20th 2026', '20 December 2026'. 숫자만 쓴 12/20/2026은 순서가 모호해 받지 않는다
+_MONTHS = {name: number for number, names in enumerate(
+    (('jan', 'january'), ('feb', 'february'), ('mar', 'march'), ('apr', 'april'), ('may',), ('jun', 'june'),
+     ('jul', 'july'), ('aug', 'august'), ('sep', 'sept', 'september'), ('oct', 'october'), ('nov', 'november'),
+     ('dec', 'december')), 1) for name in names}
+_ENGLISH_DATE = re.compile(r'(?:until|by|from|on)?\s*(?:(?P<m1>[A-Za-z]+)\.?\s+(?P<d1>\d{1,2})(?:st|nd|rd|th)?,?'
+                           r'|(?P<d2>\d{1,2})(?:st|nd|rd|th)?\s+(?P<m2>[A-Za-z]+)\.?,?)\s+(?P<y>\d{4})', re.IGNORECASE)
 # AI·시스템에게 하는 문장으로 보이는 줄. 값을 거절하지 않고, 이런 줄이 있는 메일의 견적만 NEEDS_REVIEW로 둔다
 _INSTRUCTION = re.compile(r'(?i)(?<![a-z])(?:AI|LLM|GPT|assistant|chatbot)(?![a-z])|인공지능|챗봇|어시스턴트'
                           r'|시스템\s*(?:안내|지시|메시지|프롬프트)|system\s*prompt|이\s*메일을\s*처리하는'
@@ -404,7 +411,7 @@ _HINTS = {
     'EVIDENCE_NOT_IN_CASE': 'get_case_context 메일 목록의 mail_id와 part(본문 body, 첨부 att-1 등)를 쓴다.',
     'INVALID_NUMBER': '숫자와 단위·통화만 옮긴다 (예: "54,500원", "300kg", "3.20 USD"). 앞뒤의 설명 낱말은 빼고 '
                       '다시 보낸다 (예: "박스당 중량은 10kg" → "10kg"). 그래도 안 되면 그 항목만 null로 보낸다.',
-    'INVALID_DATE': '연도가 있는 날짜만 옮긴다. 연도가 없으면 그 항목만 null로 보낸다.',
+    'INVALID_DATE': '연도가 있는 날짜만 옮긴다. 연도가 없거나 12/20/2026처럼 숫자만 써서 월·일 순서가 모호하면 그 항목만 null로 보낸다.',
     'CALL_DATE_UNKNOWN': '통화에서 말한 날짜 표현을 날짜로 바꾸지 못했다. 그 항목만 빼고 다시 보내고, 그 날짜가 나온 업체 발화는 '
                          '비고로 남긴다.',
     'VALID_UNTIL_BEFORE_EFFECTIVE': '유효기간이 적용일보다 이르면 단가 종료일이 아니라 회신 기한이다. valid_until은 빼고 '
@@ -574,8 +581,15 @@ def _quantity_text(raw: str) -> str:
 
 
 def _date(raw: str, field_name: str) -> str:
-    """연도가 있는 날짜만 받는다. '2026년 12월 1일', '2026-12-01', '2026. 12. 1.', 뒤의 '까지·부터'는 허용."""
+    """연도가 있는 날짜만 받는다. '2026년 12월 1일', '2026-12-01', '2026. 12. 1.', 'December 20, 2026',
+    뒤의 '까지·부터'는 허용."""
     text = _DATE_SUFFIX.sub('', _nfkc(raw).strip())
+    english = _ENGLISH_DATE.fullmatch(text)
+    if english and (month := _MONTHS.get((english['m1'] or english['m2']).lower())):
+        try:
+            return date(int(english['y']), month, int(english['d1'] or english['d2'])).isoformat()
+        except ValueError:
+            raise ReviewRequired('INVALID_DATE', f'{field_name}의 날짜를 확인할 수 없습니다.', field_name)
     match = _DOTTED_DATE.fullmatch(text)
     if match is None:
         return explicit_date(text, field_name).isoformat()
@@ -1190,6 +1204,14 @@ def _carry(previous: tuple[str, QuoteVersionRecord], values: dict, tiers: list, 
     if not price_given and previous_record.pricing_terms_jsonb.get('price_tiers') and not basis_changed:
         tiers = previous_record.pricing_terms_jsonb['price_tiers']
         carried.append('price_tiers')
+    # 정정 메일처럼 금액만 다시 말해 포함·별도가 빈 비용은 이전 버전의 같은 종류 비용에서 포함·별도를 이어받는다
+    # ("배송 1회당 30,000원이 아니라 25,000원입니다" → 이전의 별도 청구를 유지). OTHER는 서로 다른 비용이 섞여 이어받지 않는다
+    earlier = {c['cost_type']: c['included_in_price'] for c in previous_record.cost_terms_jsonb or []
+               if c['cost_type'] != 'OTHER' and c.get('included_in_price') is not None}
+    if any(cost.get('included_in_price') is None and cost['cost_type'] in earlier for cost in costs):
+        costs = [cost | {'included_in_price': earlier[cost['cost_type']]}
+                 if cost.get('included_in_price') is None and cost['cost_type'] in earlier else cost for cost in costs]
+        carried.append('cost_terms')
     # 비용은 종류 단위로 합친다. 이번 메일이 말한 종류(포함·무료·없음 포함)는 이번 것만 쓰고, 말하지 않은 종류는 이어받는다
     mentioned = {cost['cost_type'] for cost in costs}
     kept = [cost for cost in previous_record.cost_terms_jsonb or [] if cost['cost_type'] not in mentioned]
@@ -1208,7 +1230,7 @@ def _carry(previous: tuple[str, QuoteVersionRecord], values: dict, tiers: list, 
     if 'unit_price' in values and 'unit_price' not in carried and 'unit' in carried \
             and values['unit']['mail_id'] != values['unit_price']['mail_id']:
         review.append({'field': 'unit', 'code': 'UNIT_CARRIED'})     # 새 단가의 단위는 이번 메일에서 확인되지 않았다
-    return tiers, costs, carried
+    return tiers, costs, list(dict.fromkeys(carried))
 
 
 def _letters(text) -> str:
@@ -2639,6 +2661,10 @@ def _supplier_comparison(case: dict, quote_id: str, record: QuoteVersionRecord, 
     missing += list(dict.fromkeys(_PRICE_BLOCK_FIELDS[code] for code in sheet.blocked if code in _PRICE_BLOCK_FIELDS))
     if sheet.tax_basis is None:
         missing.append('tax_terms')
+    # 견적에 값은 있지만 그대로는 비교할 수 없는 항목: 원문을 다시 읽어도 바뀌지 않으니 재추출하지 않고 업체에 묻는다
+    # (외화 단가 → 원화 단가, 읽었지만 포함·별도·면세를 정하지 못한 세금 문구)
+    ask_supplier = (['currency'] if 'FOREIGN_CURRENCY' in sheet.blocked else []) + \
+        (['tax_terms'] if sheet.tax_basis is None and stated('tax_terms') else [])
     return {'supplier_id': record.supplier_id, 'quote_version_id': quote_id,
             'is_incumbent': record.supplier_id in incumbents,
             'known_total': _amount_text(sheet.known_total) if sheet.known_total is not None else None,
@@ -2646,7 +2672,7 @@ def _supplier_comparison(case: dict, quote_id: str, record: QuoteVersionRecord, 
             # 세금 문구는 읽었는데 포함·별도·면세를 정하지 못한 경우: 다시 읽어도 바뀌지 않는다(업체에 묻는다)
             'tax_terms_text': stated('tax_terms') if sheet.tax_basis is None else None,
             'unknown_costs': [{'field': _cost_field(cost['cost_type']), **cost} for cost in sheet.unknown_costs],
-            'missing_required': missing, 'requirements': requirements}
+            'missing_required': missing, 'ask_supplier': ask_supplier, 'requirements': requirements}
 
 
 def _priority_case(store: ComparisonStore, context: RunContext) -> tuple[dict | None, dict | None]:
@@ -2674,12 +2700,16 @@ def compare_quotes(store: ComparisonStore, context: RunContext) -> dict:
     # 다음 할 일: 필수 누락·미확인 비용·판단할 규격·인증은 먼저 원문으로 확인하고, 원문에도 금액이 없는 비용만
     # 역전 기준으로 판단한다(07 ③-2·③-3). 견적에서 빠졌을 뿐 원문에 있는 비용을 업체에 다시 묻지 않기 위해서다.
     break_even_needed = [s['supplier_id'] for s in suppliers if s['unknown_costs']]
-    read_source_needed = [s['supplier_id'] for s in suppliers if s['missing_required'] or s['unknown_costs']
+    read_source_needed = [s['supplier_id'] for s in suppliers
+                          if set(s['missing_required']) - set(s['ask_supplier']) or s['unknown_costs']
                           or any(r['state'] == 'CHECK' for r in s['requirements'])]
     next_steps = [f'read_mail_evidence로 원문을 확인한다: {", ".join(read_source_needed)} (필수 누락·미확인 비용·판단할 조건)'] \
         if read_source_needed else []
     next_steps += [f'원문에도 금액이 없는 비용만 calculate_break_even을 부른다: {", ".join(break_even_needed)}'] \
         if break_even_needed else []
+    asking = [f"{s['supplier_id']}.{name}" for s in suppliers for name in s['ask_supplier']]
+    next_steps += [f'재추출하지 않고 업체에 묻는다(MUST_CONFIRM): {", ".join(asking)} (견적에 값은 있지만 그대로 비교할 수 없음)'] \
+        if asking else []
     next_steps += ['원문에 답이 있는 누락은 recheck에 원문 구절을 인용해 RECHECK_SOURCE로 넘긴다(업체에 묻지 않는다)',
                    '업체에 물을 질문이 있으면 create_clarification_draft를 한 번 부르고 REQUEST_CLARIFICATION으로 끝낸다'] \
         if break_even_needed or read_source_needed else []
@@ -2697,7 +2727,9 @@ def check_comparability(runtime: ToolRuntime[RunContext]) -> dict:
     반환 status:
     - OK: suppliers(업체별 supplier_id·quote_version_id·is_incumbent(인상을 요청한 업체)·known_total(확인된 금액만 더한
       총액, 계산 불가면 null)·blocked(총액을 막는 사유)·unknown_costs(금액을 모르는 비용 field·cost_type·code)·
-      missing_required(견적에 없는 필수 항목 field)·requirements(견적에 적힌 규격·인증과 업무 조건. state MET이면 충족,
+      missing_required(비교에 필요한데 견적에서 확인되지 않은 필수 항목 field)·ask_supplier(missing_required 중
+      견적에 값은 있지만 그대로 비교할 수 없는 항목. 외화 단가(currency → 원화 단가), 포함·별도를 정하지 못한 세금 문구
+      (tax_terms). 원문을 다시 읽어도 바뀌지 않으므로 재추출하지 말고 업체에 묻는다)·requirements(견적에 적힌 규격·인증과 업무 조건. state MET이면 충족,
       CHECK이면 원문을 보고 충족 여부를 판단한다)·tax_basis·tax_terms_text(세금 문구는 견적에 있는데 포함·별도·면세를
       정하지 못한 경우 그 문구. 이 tax_terms는 다시 읽어도 바뀌지 않으므로 재추출하지 말고 업체에 묻는다)·warnings),
       comparable_count, tax_bases,
