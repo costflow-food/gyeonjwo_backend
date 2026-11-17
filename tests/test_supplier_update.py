@@ -99,6 +99,8 @@ class UpdateRepositoryTests(unittest.TestCase):
             (db_error('P0002', 'SUPPLIER_NOT_FOUND'), 'RESOURCE_NOT_FOUND', 404),
             (db_error('23505'), 'SUPPLIER_ALREADY_REGISTERED', 409),
             (db_error('55006', 'SUPPLIER_EMAIL_IN_USE'), 'SUPPLIER_EMAIL_LOCKED', 409),
+            (db_error('55006', 'SUPPLIER_CANDIDATE_IN_USE'), 'SUPPLIER_CANDIDATE_LOCKED', 409),
+            (db_error('55006', 'something else'), 'SUPPLIER_IN_USE', 409),
             (db_error('0A000', 'SUPPLIER_NOT_EDITABLE'), 'SUPPLIER_NOT_EDITABLE', 409),
             (db_error('22023', 'Invalid supplier input'), 'VALIDATION_ERROR', 422),
             (db_error('22023', 'ITEM_RENAME_NOT_ALLOWED'), 'SUPPLIER_ITEM_RENAME_NOT_ALLOWED', 422),
