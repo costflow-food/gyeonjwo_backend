@@ -11,7 +11,10 @@ import unittest
 from decimal import Decimal
 
 from app.agents.tools import (AlternativeAllocation, QuoteVersionRecord, RunContext, check_counter_target,
-                              counter_offer_numbers, counter_range, revalidate_counter_offer)
+                              counter_offer_numbers, counter_range, revalidate_counter_offer, save_counter_offer_draft)
+
+# DB internal.graph_check_refs가 초안 근거로 받는 종류. 이 밖의 종류는 FOREIGN_GRAPH_EVIDENCE로 초안 저장이 거절된다
+GRAPH_EVIDENCE_KINDS = {'supplier_items', 'suppliers', 'purchase_history', 'agent_runs', 'quote_versions', 'work_cases'}
 
 CASE_ID = 'case-counter'
 
@@ -51,6 +54,16 @@ class Store:
         if self.previous is None:
             return None
         return {'previous_unit_price': str(self.previous), 'increase_reason': '원물 수급 악화', 'mail_id': 'mail-in'}
+
+    def get_supplier(self, case_id, supplier_id):
+        return {'id': supplier_id, 'name': '초록들식품', 'contact_email': 'incumbent@example.com'}
+
+    def current_send_settings(self, case_id):
+        return {}
+
+    def insert_mail_draft(self, record, expected_input_revision):
+        self.draft = record
+        return ('draft-1',)
 
 
 def broccoli(previous=4000):
@@ -120,6 +133,19 @@ class CounterRangeTests(unittest.TestCase):
         target = {'target_unit_price': '4139', 'alternative': plans[0]['allocations']}
         self.assertEqual(revalidate_counter_offer(broccoli(), CASE_ID, 1, target, False, plans)['check'], 'PASS')
         self.assertEqual(revalidate_counter_offer(broccoli(), CASE_ID, 1, None, True, plans)['check'], 'FIX')
+
+
+class CounterDraftEvidenceTests(unittest.TestCase):
+    """2026-11-17 운영(업무 08ed48ca): 초안 근거에 mail_messages 참조가 들어가 DB가 FOREIGN_GRAPH_EVIDENCE로 거절했다."""
+
+    def test_draft_evidence_kinds_are_accepted_by_the_db(self):
+        store = broccoli()
+        context = RunContext(CASE_ID, 1, '00000000-0000-4000-8000-000000000001')
+        result = save_counter_offer_draft(store, context, '4139', [], alternative(600))
+        self.assertEqual(result['status'], 'DRAFTED')
+        kinds = {ref.split(':', 1)[0] for ref in store.draft.evidence_refs_jsonb}
+        self.assertLessEqual(kinds, GRAPH_EVIDENCE_KINDS)
+        self.assertIn('quote_versions', kinds)
 
 
 class CounterRangeFunctionTests(unittest.TestCase):
