@@ -9,7 +9,7 @@ from app.features.work_cases.domain.listing import QUEUE_TABS, QueueCounts, Work
 
 from app.features.work_cases.application.case_actions import case_actions
 from app.features.work_cases.application.start_readiness import StartReadiness
-from app.shared.domain.item_names import contains_ignoring_spaces
+from app.shared.domain.item_names import contains_ignoring_spaces, item_name_key
 
 QUEUE_TAB_NAMES = frozenset(QUEUE_TABS.values())
 
@@ -82,39 +82,52 @@ class WorkCaseListService:
         page_cases = {}
         try:
             pending_read = _PAGE_READS.submit(self.repo.intake_pending, owner)
-            rows = self.repo.rows(owner, snapshot, archived)
+            read_page = getattr(self.repo, 'read_page', None)
+            db_page = read_page(owner, snapshot, archived, query, item_name_key(query), status, after, limit) if read_page else None
+            if db_page is None:
+                rows = self.repo.rows(owner, snapshot, archived)
+            else:
+                rows, raw_counts = db_page
+                counts = QueueCounts.model_validate(raw_counts, strict=True)
             for case, mail in rows:
                 if (case['archived_at'] is not None) != archived:
                     continue
                 if utc_time(case['created_at']) > utc_time(snapshot):
                     continue
                 requester = (case.get('registered_requester_name') or case.get('requester_name')) if case['processing_step'] != 'PENDING_START' else None
-                searchable = [mail.get('subject'), mail.get('sender'), mail.get('sender_name'), case.get('item_name'), requester]
-                # 띄어쓰기 무시: '냉동망고'로 검색해도 '냉동 망고' 업무가 나온다
-                if query and not any(contains_ignoring_spaces(value, query) for value in searchable):
-                    continue
-                counts.total += 1
-                tab = QUEUE_TABS.get(case['status'])
-                if tab is not None:
-                    setattr(counts, tab, getattr(counts, tab) + 1)
-                # 탭(Waiting·Running·Complete)은 그 탭에 묶인 상태 전체, Pending·Confirm은 그 상태만
-                if status is not None and (tab != status if status in QUEUE_TAB_NAMES else case['status'] != status):
-                    continue
+                if db_page is None:
+                    searchable = [mail.get('subject'), mail.get('sender'), mail.get('sender_name'), case.get('item_name'), requester]
+                    # 띄어쓰기 무시: '냉동망고'로 검색해도 '냉동 망고' 업무가 나온다
+                    if query and not any(contains_ignoring_spaces(value, query) for value in searchable):
+                        continue
+                    counts.total += 1
+                    tab = QUEUE_TABS.get(case['status'])
+                    if tab is not None:
+                        setattr(counts, tab, getattr(counts, tab) + 1)
+                    # 탭(Waiting·Running·Complete)은 그 탭에 묶인 상태 전체, Pending·Confirm은 그 상태만
+                    if status is not None and (tab != status if status in QUEUE_TAB_NAMES else case['status'] != status):
+                        continue
                 received = iso_z(utc_time(mail['sent_or_received_at']))
                 key = (received, str(UUID(case['id'])))
                 if after is not None and key >= after:
                     continue
                 archived_at = iso_z(utc_time(case['archived_at'])) if case['archived_at'] else None
                 step = case['processing_step']
-                attachments = mail.get('attachments_jsonb') or []
-                if not isinstance(attachments, list):
-                    raise ValueError('Invalid attachment metadata')
+                if db_page is None:
+                    attachments = mail.get('attachments_jsonb') or []
+                    if not isinstance(attachments, list):
+                        raise ValueError('Invalid attachment metadata')
+                    attachment_count = len(attachments)
+                else:
+                    attachment_count = mail['attachment_count']
+                    if type(attachment_count) is not int or attachment_count < 0:
+                        raise ValueError('Invalid attachment count')
                 row = WorkCaseRow(case_id=case['id'], initial_mail_id=case['initial_mail_id'],
                     title=requester or mail['sender'], sender=mail['sender'], sender_name=mail.get('sender_name'),
                     requester_name=case.get('requester_name'),
                     received_at=received, status=case['status'], processing_step=step,
                     input_revision=case['input_revision'], archived_at=archived_at, item_name=case['item_name'],
-                    attachment_count=len(attachments), step_detail={'code': step, 'message': STEP_MESSAGES.get(step, '처리 상태 확인')},
+                    attachment_count=attachment_count, step_detail={'code': step, 'message': STEP_MESSAGES.get(step, '처리 상태 확인')},
                     allowed_actions=[])
                 page_cases[str(row.case_id)] = case
                 filtered.append((key, row))

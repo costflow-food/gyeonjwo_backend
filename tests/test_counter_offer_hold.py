@@ -1,5 +1,8 @@
 """⑤ COUNTER_OFFER HOLD must keep its own reason, not a guessed MISSING_FIELD.
 
+Since 2026-11-16 ⑤ no longer emits NO_POLICY (company policy dropped). The NO_POLICY
+test below covers runs saved before that, which held cases still read their reason from.
+
 E2E 2026-11-16 (case 38aeba1b): ⑤ held with reference.status NO_POLICY and the
 reason "…역제안 단가 범위를 정할 근거가 없습니다…"; the free-text fallback read
 "단가 … 없" and stored MISSING_FIELD/unit_price ("견적 단가가 확인되지 않아…").
@@ -19,7 +22,7 @@ def counter_offer(status, reason=NO_POLICY_REASON):
 
 
 class CounterOfferHoldTests(TestCase):
-    def test_no_policy_is_not_a_missing_unit_price(self):
+    def test_saved_no_policy_run_is_not_a_missing_unit_price(self):
         hold = from_agent_output(counter_offer('NO_POLICY')).for_storage()
         self.assertEqual(hold, {'code': 'COUNTER_OFFER_POLICY_MISSING',
                                 'message': MESSAGES['COUNTER_OFFER_POLICY_MISSING']})

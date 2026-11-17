@@ -43,6 +43,26 @@ class WorkCaseListRepository:
     def candidate_blocks(self, owner, cases):
         return self.candidates.blocks(owner, cases)
 
+    def read_page(self, owner, snapshot, archived, query, needle, status, after, limit):
+        after_time, after_id = after or (None, None)
+        try:
+            result = self.client.rpc('read_work_case_page', {
+                'p_owner': str(owner), 'p_snapshot': snapshot, 'p_archived': archived,
+                'p_query': query, 'p_needle': needle, 'p_status': status,
+                'p_after_time': after_time, 'p_after_id': after_id, 'p_limit': limit,
+            }).execute().data
+            rows, counts = result['rows'], result['counts']
+            if not isinstance(rows, list) or len(rows) > limit + 1:
+                raise ValueError('Invalid page size')
+            if any(not isinstance(row, list) or len(row) != 2 or
+                   any(not isinstance(value, dict) for value in row) for row in rows):
+                raise ValueError('Invalid page rows')
+            return rows, counts
+        except Exception as error:
+            if getattr(error, 'code', None) == 'PGRST202':
+                return None
+            raise ServiceError('PROCESSING_UNAVAILABLE', '업무 목록을 조회할 수 없습니다.', 503) from None
+
     def rows(self, owner, snapshot, archived, *, embed=True):
         cases, after = [], None
         try:

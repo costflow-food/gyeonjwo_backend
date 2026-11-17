@@ -89,4 +89,38 @@ Supabase·Gmail·LLM 실호출 없이 그래프 보류 코드, 로그 커서, �
 python -m unittest scripts.check_graph_hold scripts.check_workflow_logs scripts.check_review_queue scripts.check_env_names
 ```
 
+### 에이전트 실패 원인 찾기
+
+역할 실행이 실패하면 `agent_runs.error_jsonb`에 코드형 원인만 남습니다. 메일 원문·예외 메시지·도구 인자는 저장하지 않습니다.
+
+| 키 | 뜻 |
+|---|---|
+| `code` | 항상 `AGENT_FAILED` |
+| `stage` | `TOOL`(마지막 도구가 예외) / `TOOL_LIMIT`(도구 호출 한도) / `FINAL_CHECK`(최종 검사 불일치) / `OTHER`(모델·그 밖) |
+| `error_type` | 예외 클래스 이름 (예: `ServiceError`, `UngroundedOutputError`) |
+| `error_code` | `ServiceError` 코드 (예: `PROCESSING_UNAVAILABLE`) |
+| `db_code`·`db_sqlstate` | DB 함수가 올린 코드형 예외와 SQLSTATE (예: `REVIEW_SUPPLIER_NOT_AUTHORIZED`, `23514`) |
+| `last_tool`·`tool_calls` | 마지막으로 부른 도구, 도구 호출 수 |
+
+DB 함수 `internal.graph_finish_role`이 이 값을 저장하도록 바뀐 뒤부터 남습니다(gyeonjwo_db `proposals/agent-failure-reason`). 그 전에는 `{"code": "AGENT_FAILED"}`만 남습니다.
+
+```sql
+select agent_role, status, error_jsonb, finished_at from agent_runs
+where work_case_id = '<업무 ID>' order by started_at;
+```
+
+실행 로그 화면(API-28)의 `GRAPH_ROLE_FINISHED` 항목에도 `error_code`·`tool_name`이 함께 보입니다.
+
+예외 메시지 원문까지 봐야 하면 서버 로그를 봅니다. 그래프는 `agent failed role=… error=…` 줄을 남깁니다. Lightsail 컨테이너 서비스 `gyeonjwo-api`(서울, `ap-northeast-2`), 컨테이너 이름 `api`입니다.
+
+- 콘솔: Lightsail → 컨테이너 → `gyeonjwo-api` → 로그(Logs) 탭
+- CLI (Lightsail 읽기 권한이 있는 AWS 자격 증명 필요):
+
+```bash
+aws lightsail get-container-log --region ap-northeast-2 --service-name gyeonjwo-api --container-name api \
+  --filter-pattern "agent failed" --start-time "2026-11-16T00:00:00Z"
+```
+
+로그는 Lightsail이 보관하는 기간만큼만 남습니다. 오래된 실패는 DB의 `error_jsonb`로 봅니다.
+
 VS Code에서는 `gyeonjwo-backend.code-workspace`를 엽니다.

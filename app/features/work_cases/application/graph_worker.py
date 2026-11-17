@@ -2,6 +2,7 @@
 import logging
 import time
 from uuid import UUID
+from app.core.graph_timing import graph_timings
 from app.core.tracing import agent_tracing
 from app.core.errors import ServiceError
 from app.core.leases import LeaseHeartbeat
@@ -23,7 +24,9 @@ class GraphWorker(ExtractionWorker):
         return run_graph
 
     def process_once(self):
+        claim_started = time.monotonic()
         job = self.repo.claim()
+        claimed = time.monotonic()
         if job is None:
             return False
         try:
@@ -55,8 +58,11 @@ class GraphWorker(ExtractionWorker):
         except (ValueError, KeyError, TypeError):
             # Do not fail/release a malformed or another queue's claimed token.
             raise ServiceError('PROCESSING_UNAVAILABLE', '그래프 작업 계약을 확인할 수 없습니다.', 503) from None
-        logger.info('graph started start_from=%s', mode)
+        logger.info('graph claimed job_id=%s start_from=%s claim_ms=%.1f',
+                    job['job_id'], mode, (claimed - claim_started) * 1000)
         scope = None
+        timings = dict(db=0.0, llm=0.0, document=0.0)
+        timing_token = graph_timings.set(timings)
         try:
             with LeaseHeartbeat(lambda: self.repo.heartbeat(job), seconds=10) as lease:
                 def active():
@@ -126,6 +132,11 @@ class GraphWorker(ExtractionWorker):
             logger.warning('graph failed code=%s job_id=%s case_id=%s start_from=%s %s', code, job.get('job_id'),
                            job.get('case_id'), mode, error_origin(error))
         finally:
+            graph_timings.reset(timing_token)
+            logger.info('graph execution ended job_id=%s start_from=%s queue_wait_ms=%s execution_ms=%.1f '
+                        'db_ms=%.1f llm_ms=%.1f document_ms=%.1f', job['job_id'], mode,
+                        job.get('queue_wait_ms', 'unavailable'), (time.monotonic() - claimed) * 1000,
+                        timings['db'], timings['llm'], timings['document'])
             if scope is not None:
                 scope.blocked = True
         return True

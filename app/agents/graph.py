@@ -192,7 +192,8 @@ def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: N
             try:
                 output = run_agent(role, INPUTS[role](state | quote_ids))
             except Exception as error:
-                # 실패 원인(예외 종류와 짧은 메시지)을 서버 로그에 남긴다. DB에는 AGENT_FAILED만 저장된다
+                # 실패 원인(예외 종류와 짧은 메시지)을 서버 로그에 남긴다. DB(agent_runs.error_jsonb)에는 실행기가
+                # 코드형 원인(stage·error_type·error_code·db_code·last_tool)만 남긴다(failure_summary)
                 logger.warning('agent failed role=%s error=%s: %.300s', role, type(error).__name__, error)
                 return _failed(f'{role}: AGENT_FAILED') | {'role_calls': state.get('role_calls', 0) + 1}
             update = {'role_calls': state.get('role_calls', 0) + 1, 'processing_step': ROLE_STEPS[role]} | quote_ids

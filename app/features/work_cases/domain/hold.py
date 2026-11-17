@@ -22,7 +22,8 @@ MESSAGES = {
     'COUNTER_OFFER_NOT_COMPUTABLE': '역제안 단가를 계산할 근거가 부족해 역제안을 보류했어요.',
     'HOLD_REASON_UNAVAILABLE': '보류 사유를 확인할 수 없어 담당자 확인이 필요해요.',
 }
-# ⑤ COUNTER_OFFER reference.status → hold code (HOLD only for these two).
+# ⑤ COUNTER_OFFER reference.status → hold code. ⑤ no longer emits NO_POLICY (company policy
+# dropped 2026-11-16); the entry stays only so runs saved before that keep their real reason.
 COUNTER_OFFER_HOLDS = {'NO_POLICY': 'COUNTER_OFFER_POLICY_MISSING',
                        'NOT_COMPUTABLE': 'COUNTER_OFFER_NOT_COMPUTABLE'}
 MISSING_MESSAGES = {

@@ -3091,17 +3091,15 @@ def _missing_keep(store: ComparisonStore, case_id: str, case: dict, records: dic
 
 # ─────────────────────────────────────────────
 # ⑤ COUNTER_OFFER: calculate_counter_offer, validate_counter_offer, create_counter_offer_draft (+ 가격 검증 노드)
-#   설계: docs/AGENT5_COUNTER_OFFER_DESIGN.md. 회사 정책(policy_jsonb)은 허용 인상률(max_increase_rate)과
-#   기존 업체 선호 폭(incumbent_premium_rate) 두 값이다(4%·4%).
-#   요청 인상률이 허용 인상률 이하이거나 요청 단가로도 대안보다 싸면 수용을 추천한다(역제안 생략).
-#   그 외에는 [인상 전 단가, min(요청 단가, 인상 전 × (1+허용 인상률))] 안에서 역제안한다. 대안과 경쟁할 수 있는 선
-#   (유지 상한 × (1+선호 폭))이 그 범위 안이면 상한을 그 선으로 낮추고, 범위보다 낮으면 그대로 두되 대안보다 비싸다고 알린다.
-#   정책이 없으면 목표를 만들지 않는다(07 ⑤ "정책 없는 합리적 인상률 생성 금지"). 메일에는 다른 공급처 이야기를 넣지 않는다.
+#   설계: docs/AGENT5_COUNTER_OFFER_DESIGN.md. 회사 정책(허용 인상률 등)은 쓰지 않는다(11-16 팀 결정).
+#   요청 단가로도 대안보다 싸거나 같으면 수용을 추천한다(역제안 생략).
+#   그 외에는 [max(유지 상한, 인상 전 단가), 요청 단가] 안에서 역제안한다. 유지 상한은 가장 싼 대안의 총액을 기존 업체
+#   단가로 바꾼 값(이 단가면 대안과 총액이 같다)이다. 인상 전 단가가 유지 상한보다 높으면 하한을 인상 전 단가로 두고
+#   범위 안의 어떤 값도 대안보다 비싸다고 알린다. 메일에는 다른 공급처 이야기를 넣지 않는다.
 # ─────────────────────────────────────────────
 
-COUNTER_STATUSES = ('PROPOSABLE', 'NO_POLICY', 'NOT_NEEDED', 'WITHIN_POLICY', 'NOT_COMPUTABLE', 'COSTS_UNKNOWN',
-                    'PREVIOUS_UNKNOWN')
-COUNTER_SKIP_STATUSES = ('NOT_NEEDED', 'WITHIN_POLICY')          # 역제안 없이 인상 수용을 추천하는 상태
+COUNTER_STATUSES = ('PROPOSABLE', 'NOT_NEEDED', 'NOT_COMPUTABLE', 'COSTS_UNKNOWN', 'PREVIOUS_UNKNOWN')
+COUNTER_SKIP_STATUSES = ('NOT_NEEDED',)          # 역제안 없이 인상 수용을 추천하는 상태
 
 
 class CounterOfferStore(PriorityStore, Protocol):
@@ -3118,23 +3116,20 @@ class AlternativeAllocation(StrictModel):
     quantity: str                      # 구매안 검증을 통과한 ④ 안의 배정량 그대로
 
 
-def _counter_policy(case: dict) -> dict | None:
-    """회사 정책(policy_jsonb)의 {max_increase_rate, incumbent_premium_rate}. 허용 인상률이 없거나 음수면 None이다.
-    선호 폭이 없으면 0(대안보다 비싸면 유지하지 않음)으로 본다."""
-    policy = case.get('policy') or {}
-    rate, premium = _amount(policy.get('max_increase_rate')), _amount(policy.get('incumbent_premium_rate') or '0')
-    if rate is None or rate < 0 or premium is None or premium < 0:
-        return None
-    return {'max_increase_rate': rate, 'incumbent_premium_rate': premium}
+def counter_range(requested: Decimal, previous: Decimal, ceiling: Decimal) -> tuple[Decimal, Decimal, bool]:
+    """역제안 허용 범위 (하한, 상한, 대안보다 비싼지). requested > ceiling일 때만 부른다.
+    하한은 유지 상한과 인상 전 단가 중 높은 값을 원 단위로 올린 값(유지 상한 4,138.33 → 4,139), 상한은 요청 단가다.
+    인상 전 단가가 유지 상한보다 높으면 범위의 어떤 값도 대안보다 비싸다(True). 하한이 요청 단가를 넘으면 요청 단가로 맞춘다."""
+    low = min(max(ceiling, previous).to_integral_value(rounding='ROUND_CEILING'), requested)
+    return low, requested, previous > ceiling
 
 
 def counter_offer_numbers(store: CounterOfferStore, context: RunContext, alternative: list[AlternativeAllocation]) -> dict:
-    """calculate_counter_offer의 본체. 기존 업체 요청·인상 전 단가, 대안 총액, 유지 상한 단가, 정책 범위, 허용 목표 범위.
-    status: PROPOSABLE(허용 범위 있음) / NO_POLICY / NOT_NEEDED(요청 단가로도 대안보다 싸거나 같음) /
-    WITHIN_POLICY(요청 인상률이 허용 인상률 이하) / NOT_COMPUTABLE(총액·세금 기준 비교 불가) /
-    COSTS_UNKNOWN(기존 업체의 단가 외 비용 미확인) / PREVIOUS_UNKNOWN.
-    NOT_NEEDED·WITHIN_POLICY는 수용 추천(skip_allowed). PROPOSABLE에서 above_alternative가 true면
-    허용 범위의 어떤 값도 대안과 경쟁할 수 있는 선보다 비싸다."""
+    """calculate_counter_offer의 본체. 기존 업체 요청·인상 전 단가, 대안 총액, 유지 상한 단가, 허용 목표 범위.
+    status: PROPOSABLE(허용 범위 있음) / NOT_NEEDED(요청 단가로도 대안보다 싸거나 같음) /
+    NOT_COMPUTABLE(총액·세금 기준 비교 불가) / COSTS_UNKNOWN(기존 업체의 단가 외 비용 미확인) / PREVIOUS_UNKNOWN.
+    NOT_NEEDED는 수용 추천(skip_allowed). PROPOSABLE에서 above_alternative가 true면
+    허용 범위의 어떤 값도 대안보다 비싸다."""
     case, stop = _priority_case(store, context)
     if stop:
         return stop
@@ -3173,23 +3168,16 @@ def counter_offer_numbers(store: CounterOfferStore, context: RunContext, alterna
     top = Decimal(ceiling['ceiling_unit_price'])
     result |= {'ceiling_unit_price': ceiling['ceiling_unit_price'], 'ceiling_formula': ceiling['formula'],
                'incumbent_unknown_costs': ceiling['unknown_costs']}
-    policy = _counter_policy(case)
     if sheet.unit_price is not None and sheet.unit_price <= top:
         status = 'NOT_NEEDED'
-    elif policy is None:
-        status = 'NO_POLICY'
     elif previous is None:
         status = 'PREVIOUS_UNKNOWN'
-    elif sheet.unit_price <= previous * (1 + policy['max_increase_rate']):
-        status = 'WITHIN_POLICY'
     else:
         status = 'PROPOSABLE'
-        low, high = previous, min(sheet.unit_price, previous * (1 + policy['max_increase_rate']))
-        competitive = top * (1 + policy['incumbent_premium_rate'])
-        if competitive >= low:
-            high = min(high, competitive)
-        result |= {'allowed_range': [_amount_text(low), _amount_text(high)],
-                   'competitive_unit_price': _amount_text(competitive), 'above_alternative': competitive < low}
+        low, high, above = counter_range(sheet.unit_price, previous, top)
+        # 목표 단가는 범위의 하한이다(2026-11-16 팀 결정). LLM은 이 값을 그대로 쓴다
+        result |= {'allowed_range': [_amount_text(low), _amount_text(high)], 'target_unit_price': _amount_text(low),
+                   'above_alternative': above}
     return {'status': 'OK', 'counter_status': status, 'skip_allowed': status in COUNTER_SKIP_STATUSES} | result
 
 
@@ -3200,13 +3188,13 @@ def calculate_counter_offer(alternative: list[AlternativeAllocation], runtime: T
     alternative: 비교할 대안의 배정량 [{supplier_id, quote_version_id, quantity}]. input의 validated_plans 중
       가장 싼 비유지 안(VALID)을 그대로 보낸다.
 
-    반환 status OK: counter_status(PROPOSABLE: allowed_range 안에서 목표를 정한다 / NO_POLICY: 회사 정책이 없어 목표를
-      만들지 않는다 / NOT_NEEDED: 요청 단가로도 대안보다 싸다 / WITHIN_POLICY: 요청 인상률이 회사 허용 인상률 이하다 /
-      NOT_COMPUTABLE / COSTS_UNKNOWN: 기존 업체의 단가 외 비용(incumbent_unknown_costs)을 모른다 /
+    반환 status OK: counter_status(PROPOSABLE: 목표 단가는 target_unit_price(allowed_range의 최소)다 / NOT_NEEDED: 요청 단가로도
+      대안보다 싸거나 같다 / NOT_COMPUTABLE / COSTS_UNKNOWN: 기존 업체의 단가 외 비용(incumbent_unknown_costs)을 모른다 /
       PREVIOUS_UNKNOWN: 인상 전 단가 근거가 없다), skip_allowed(true면 역제안 없이 인상 수용을 추천한다),
       requested_unit_price, previous_unit_price(previous_source 메일), ceiling_unit_price(이 단가 이하면 대안보다 싸다),
-      alternative_total, allowed_range([최소, 최대]), above_alternative(true면 범위 안의 목표가 받아들여져도
-      대안보다 비싸다), unit, increase_reason
+      alternative_total, allowed_range([최소, 최대]: 최소는 ceiling_unit_price와 인상 전 단가 중 높은 값, 최대는 요청 단가),
+      target_unit_price(역제안할 목표 단가 = allowed_range의 최소),
+      above_alternative(true면 목표가 받아들여져도 대안보다 비싸다), unit, increase_reason
     / REJECTED(code·hint) / CONDITIONS_MISSING / REVISION_CHANGED / CASE_NOT_FOUND
     '''
     return counter_offer_numbers(_priority_store, _run_context(_priority_store, runtime), alternative)
@@ -3214,7 +3202,7 @@ def calculate_counter_offer(alternative: list[AlternativeAllocation], runtime: T
 
 def check_counter_target(store: CounterOfferStore, context: RunContext, target_unit_price: str,
                          alternative: list[AlternativeAllocation]) -> dict:
-    """validate_counter_offer의 본체. 목표 단가가 허용 범위(정책·유지 상한) 안인지 확인한다."""
+    """validate_counter_offer의 본체. 목표 단가가 허용 범위의 하한(유지 상한과 인상 전 단가 중 높은 값)과 같은지 확인한다."""
     numbers = counter_offer_numbers(store, context, alternative)
     if numbers.get('status') != 'OK':
         return numbers
@@ -3222,8 +3210,9 @@ def check_counter_target(store: CounterOfferStore, context: RunContext, target_u
     violations = []
     if numbers['counter_status'] != 'PROPOSABLE':
         violations.append({'code': numbers['counter_status']})
-    elif target is None or not Decimal(numbers['allowed_range'][0]) <= target <= Decimal(numbers['allowed_range'][1]):
-        violations.append({'code': 'OUT_OF_RANGE', 'allowed_range': numbers['allowed_range']})
+    elif target is None or target != Decimal(numbers['target_unit_price']):
+        violations.append({'code': 'NOT_LOWER_BOUND', 'target_unit_price': numbers['target_unit_price'],
+                           'allowed_range': numbers['allowed_range']})
     return {'status': 'INVALID' if violations else 'VALID', 'target_unit_price': _won(target),
             'violations': violations, 'numbers': numbers}
 
@@ -3232,8 +3221,9 @@ def check_counter_target(store: CounterOfferStore, context: RunContext, target_u
 @tool
 def validate_counter_offer(target_unit_price: str, alternative: list[AlternativeAllocation],
                            runtime: ToolRuntime[RunContext]) -> dict:
-    '''목표 단가가 회사 정책과 유지 상한을 만족하는지 검증한다. alternative는 calculate_counter_offer에 보낸 것과 같다.
-    반환: status VALID / INVALID(violations: OUT_OF_RANGE(allowed_range)·NO_POLICY 등), target_unit_price, numbers
+    '''목표 단가가 calculate_counter_offer의 target_unit_price(allowed_range의 최소)와 같은지 검증한다.
+    alternative는 calculate_counter_offer에 보낸 것과 같다.
+    반환: status VALID / INVALID(violations: NOT_LOWER_BOUND(target_unit_price·allowed_range)·NOT_NEEDED 등), target_unit_price, numbers
     '''
     return check_counter_target(_priority_store, _run_context(_priority_store, runtime), target_unit_price, alternative)
 
@@ -3314,7 +3304,7 @@ def _is_validated_alternative(alternative: list[AlternativeAllocation], plans: l
 
 def revalidate_counter_offer(store: CounterOfferStore, case_id: str, input_revision: int, target: dict | None,
                              skipped: bool, plans: list[dict]) -> dict:
-    """가격 검증 노드: 역제안 목표(또는 생략)를 최신 견적·정책으로 다시 확인한다.
+    """가격 검증 노드: 역제안 목표(또는 생략)를 최신 견적으로 다시 확인한다.
     반환: {check: PASS·FIX·NEED_INFO, reason}. 목표가 범위 밖이거나 허용되지 않는 생략이면 FIX(⑤가 고친다),
     대안 견적이 최신이 아니면 NEED_INFO."""
     context = RunContext(case_id, input_revision)
