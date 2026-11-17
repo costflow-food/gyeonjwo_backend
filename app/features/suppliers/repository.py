@@ -14,6 +14,19 @@ SUPPLIER_COLUMNS = ('id,name,source_type,contact_email,location,contact_jsonb,'
                     'business_registration_no,evidence_jsonb')
 ITEM_COLUMNS = ('id,supplier_id,item_name,specification,unit,origin,certifications_jsonb,notes,'
                 'notes_evidence_jsonb,units_per_box::text,weight_per_box::text')
+# update_supplier(DB)가 올리는 SQLSTATE → API 오류
+UPDATE_FAILURES = {
+    'P0002': ('RESOURCE_NOT_FOUND', '거래처 또는 품목을 찾을 수 없습니다.', 404),
+    '23505': ('SUPPLIER_ALREADY_REGISTERED', '같은 업체명과 이메일의 거래처가 이미 있습니다.', 409),
+    '55006': ('SUPPLIER_EMAIL_LOCKED', '진행 중인 업무가 있어 이메일을 바꿀 수 없습니다. 업무가 끝난 뒤 다시 시도해 주세요.', 409),
+    '0A000': ('SUPPLIER_NOT_EDITABLE', '직접 등록한 거래처만 수정할 수 있습니다.', 409),
+    '22023': ('VALIDATION_ERROR', '거래처 입력값을 확인해 주세요.', 422),
+}
+ITEM_FAILURES = {
+    'ITEM_RENAME_NOT_ALLOWED': ('SUPPLIER_ITEM_RENAME_NOT_ALLOWED',
+                                '품목명은 띄어쓰기만 고칠 수 있습니다. 다른 품목은 새로 추가해 주세요.', 422),
+    'ITEM_ALREADY_EXISTS': ('SUPPLIER_ITEM_ALREADY_EXISTS', '이미 등록된 품목입니다.', 422),
+}
 PAGE_SIZE = 200
 MAX_SCAN = 10000
 
@@ -90,6 +103,25 @@ class SupplierRepository:
         except Exception:
             pass
         raise ServiceError('PROCESSING_UNAVAILABLE', '거래처를 등록할 수 없습니다.', 503) from None
+
+    def update(self, supplier_id, body):
+        """거래처 기본 정보와 품목을 고친다. 성공하면 바뀐 상세를 돌려준다."""
+        try:
+            row = self.client.rpc('update_supplier', {
+                'p_owner': self.owner, 'p_supplier_id': supplier_id, 'p_body': body,
+            }).execute().data
+            if not isinstance(row, dict) or row.get('id') != supplier_id:
+                raise ValueError('Invalid supplier update response')
+        except APIError as error:
+            failure = UPDATE_FAILURES.get(error.code)
+            if error.code == '22023':
+                failure = ITEM_FAILURES.get(error.message, failure)
+            if failure:
+                raise ServiceError(*failure) from None
+            raise ServiceError('PROCESSING_UNAVAILABLE', '거래처를 수정할 수 없습니다.', 503) from None
+        except Exception:
+            raise ServiceError('PROCESSING_UNAVAILABLE', '거래처를 수정할 수 없습니다.', 503) from None
+        return self.detail(supplier_id)
 
     def query(self, table, columns):
         return self.client.table(table).select(columns).eq('owner_user_id', self.owner)
