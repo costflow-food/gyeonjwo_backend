@@ -3305,55 +3305,15 @@ def other_supplier_mentions(store: CounterOfferStore, context: RunContext, case:
     for _, record in _read(lambda: store.get_quote_versions(context.case_id, ids)) or []:
         if record.supplier_id == numbers['supplier_id']:
             continue
-        name = ((_read(lambda sid=record.supplier_id: store.get_supplier(context.case_id, sid)) or {}).get('name') or '').strip()
+        supplier = _read(lambda sid=record.supplier_id: store.get_supplier(context.case_id, sid)) or {}
+        name = (supplier.get('name') or '').strip()
         if name and _compact(name) in text:
             found.append(f'업체명 {name}')
-        prices = [record.unit_price] + [tier.get('unit_price') for tier in record.pricing_terms_jsonb.get('price_tiers') or []]
+        tiers = record.pricing_terms_jsonb.get('price_tiers') or []
+        prices = [record.unit_price] + [tier.get('unit_price') for tier in tiers]
         found += [f'{record.supplier_id} 견적 단가 {price}원' for price in prices
                   if price is not None and _amount(price) in amounts]
     return list(dict.fromkeys(found))
-
-
-# 물량 조정 선택지가 있을 때(비교 대안이 기존 업체를 포함한 분산안): 전량 유지 단가와 물량 조정 중 가능한 조건을 묻는다
-COUNTER_BODY_WITH_VOLUME = ('안녕하세요. {업체명} 담당자님\n'
-                            '{회사소개}\n\n'
-                            '보내 주신 {품목} 단가 조정 안내 잘 받았습니다. 검토 결과 아래 두 가지 중 가능한 조건을 '
-                            '회신 부탁드립니다.\n\n'
-                            '<요청 조건 1: 전량 유지>\n'
-                            '- 품목: {품목}\n'
-                            '- 물량: {전체물량} 전량\n'
-                            '- 단가: {목표단가}원/{단위}\n'
-                            '{조건목록}\n\n'
-                            '<요청 조건 2: 물량 조정>\n'
-                            '- 단가: 안내하신 {요청단가}원/{단위}\n'
-                            '- 물량: 이번 발주 {조정물량}\n'
-                            '- 위 물량만 공급 가능하신지 확인 부탁드립니다.\n\n'
-                            '{회신기한}에 회신 부탁드립니다.\n'
-                            '감사합니다.\n'
-                            '{서명}')
-
-
-def _quantity_text_for_mail(quantity, unit) -> str:
-    """메일에 쓰는 물량 ('400', 'kg' → '400kg', 천 단위 쉼표)."""
-    amount = _amount(quantity)
-    text = f'{amount.normalize():,f}' if amount is not None else str(quantity or '')
-    return f"{text}{unit or ''}"
-
-
-def counter_volume_option(store: CounterOfferStore, context: RunContext, case: dict, numbers: dict) -> dict | None:
-    """물량 조정 선택지. 비교 대안이 기존 업체를 포함한 분산안(기존 업체 물량이 0보다 크고 업무 수량보다 작음)일 때만,
-    그 물량과 그 물량에 적용되는 기존 업체 단가(구간 단가면 그 물량의 구간)를 돌려준다. 단가를 정할 수 없으면 None."""
-    own = sum((_amount(a.get('quantity')) or Decimal(0) for a in numbers.get('alternative') or []
-               if a.get('supplier_id') == numbers['supplier_id']), Decimal(0))
-    total = _amount(case.get('quantity'))
-    if total is None or not 0 < own < total:
-        return None
-    quotes = dict(_read(lambda: store.get_quote_versions(context.case_id, [numbers['quote_version_id']])) or [])
-    record = quotes.get(numbers['quote_version_id'])
-    price = cost_sheet(numbers['quote_version_id'], record, own, case.get('unit')).unit_price if record else None
-    if price is None:
-        return None
-    return {'quantity': f'{own.normalize():f}', 'quantity_unit': case.get('unit'), 'unit_price': _won(price), 'unit': numbers['unit']}
 
 
 def save_counter_offer_draft(store: CounterOfferStore, context: RunContext, target_unit_price: str, conditions: list[str],
@@ -3374,15 +3334,10 @@ def save_counter_offer_draft(store: CounterOfferStore, context: RunContext, targ
                 'hint': '조건에 다른 업체의 업체명·단가·물량을 쓰지 않는다. 그 조건을 빼거나 고쳐 같은 목표 단가로 다시 부른다.'}
     style = _read(lambda: store.current_send_settings(context.case_id)) or {}
     lines = '\n'.join(f'- {text}' for text in (mail_value(c, MAIL_VALUE_LIMITS['조건']) for c in conditions) if text)
-    volume = counter_volume_option(store, context, case, numbers)
-    values = {'회신기한': REPLY_DEADLINE, '품목': recipient_item_name(store, case, numbers['supplier_id']),
-              '업체명': contact.get('name') or '담당자', '목표단가': f"{Decimal(checked['target_unit_price']):,}",
-              '단위': numbers['unit'] or '', '조건목록': lines, **_style_values(style)}
-    if volume:
-        values |= {'전체물량': _quantity_text_for_mail(case.get('quantity'), case.get('unit')),
-                   '요청단가': f"{Decimal(volume['unit_price']):,}",
-                   '조정물량': _quantity_text_for_mail(volume['quantity'], volume['quantity_unit'])}
-    subject, body = _mail_text(COUNTER_SUBJECT, COUNTER_BODY_WITH_VOLUME if volume else COUNTER_BODY, values)
+    subject, body = _mail_text(COUNTER_SUBJECT, COUNTER_BODY, {
+        '회신기한': REPLY_DEADLINE, '품목': recipient_item_name(store, case, numbers['supplier_id']),
+        '업체명': contact.get('name') or '담당자', '목표단가': f"{Decimal(checked['target_unit_price']):,}",
+        '단위': numbers['unit'] or '', '조건목록': lines, **_style_values(style)})
     key = hashlib.sha256(f"{context.case_id}|{context.input_revision}|COUNTER_OFFER|{numbers['supplier_id']}|"
                          f"{checked['target_unit_price']}".encode()).hexdigest()
     record = MailDraftRecord(
@@ -3399,8 +3354,7 @@ def save_counter_offer_draft(store: CounterOfferStore, context: RunContext, targ
         return {'status': 'REVISION_CHANGED'}
     return {'status': 'DRAFTED', 'draft_id': saved[0], 'target_unit_price': checked['target_unit_price'],
             'supplier_id': numbers['supplier_id'], 'quote_version_id': numbers['quote_version_id'],
-            'conditions': [text.strip() for text in conditions if text.strip()], 'alternative': numbers['alternative'],
-            'volume_option': volume}
+            'conditions': [text.strip() for text in conditions if text.strip()], 'alternative': numbers['alternative']}
 
 
 @register
@@ -3410,8 +3364,6 @@ def create_counter_offer_draft(target_unit_price: str, alternative: list[Alterna
     '''기존 업체에 보낼 역제안 메일 초안을 저장한다(발송하지 않는다). 목표 단가를 다시 검증하고 통과할 때만 만든다.
     메일에는 목표 단가와 conditions(예: "12월 물량 전량 발주 시")만 들어가고, 다른 공급처 이야기는 넣지 않는다.
     conditions에는 다른 업체의 업체명·단가·물량을 쓰지 않는다(쓰면 OTHER_SUPPLIER_INFO로 거절된다).
-    비교 대안이 기존 업체를 포함한 분산안이면 도구가 '요청 단가 수용 + 그 안의 기존 업체 물량만 공급' 선택지를 함께 넣는다
-    (결과의 volume_option).
     반환: DRAFTED(draft_id·target_unit_price·supplier_id) / REJECTED(code: NOT_VALIDATED·NO_CONTACT·OTHER_SUPPLIER_INFO)
     / REVISION_CHANGED
     '''

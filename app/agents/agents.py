@@ -581,9 +581,7 @@ next_action:
 
 최종 응답:
 - target: COUNTER_OFFER_PROPOSED일 때만 {supplier_id, target_unit_price, conditions}. 초안을 만든 목표 단가 그대로다.
-  비교한 대안·근거 견적·물량 조정 선택지(volume_option)는 도구 결과로 채워진다. volume_option은 적지 않는다.
-  비교 대안이 기존 업체를 포함한 분산안이면 초안에 "전량 유지 시 목표 단가"와 "요청 단가로 그 안의 기존 업체 물량만"
-  두 선택지가 함께 들어간다(도구가 쓴다). reason에 두 선택지를 함께 제안한 이유를 적는다.
+  비교한 대안·근거 견적은 도구 결과로 채워진다.
 - draft_ids: create_counter_offer_draft의 draft_id.
 - reference: 적지 않는다(계산 결과로 채워진다).
 - reason: 담당자가 읽는 한국어 문장. 왜 이 목표 또는 이 결정인지 적는다. 금액은 쓰지 않는다. 영문 코드·필드 이름은 쓰지 않는다.
@@ -1090,7 +1088,7 @@ def check_counter_offer(role: AgentRole, data: AgentInput, context: RunContext, 
     draft = drafted[-1]
     target = {'supplier_id': draft['supplier_id'], 'target_unit_price': draft['target_unit_price'],
               'conditions': draft['conditions'], 'basis_quote_version_ids': [draft['quote_version_id']],
-              'alternative': draft['alternative'], 'volume_option': draft.get('volume_option')}
+              'alternative': draft['alternative']}
     return type(output).model_validate(output.model_dump() | base | {'target': target, 'draft_ids': [draft['draft_id']]})
 
 

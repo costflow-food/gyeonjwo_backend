@@ -213,22 +213,13 @@ class CounterOfferReference(StrictModel):
     allowed_range: list[DecimalStr] = []             # 정책·상한을 만족하는 목표 단가 [최소, 최대]
 
 
-class VolumeOption(StrictModel):
-    """⑤ 역제안의 물량 조정 선택지: 기존 업체의 요청 단가를 받아들이고 비교 대안(분산안)의 기존 업체 물량만 발주한다."""
-    quantity: DecimalStr                  # 기존 업체에 맡길 물량 (업무 단위)
-    quantity_unit: str | None = None      # 업무 단위
-    unit_price: DecimalStr                # 그 물량에 적용되는 기존 업체 단가 (요청 단가)
-    unit: str | None = None               # 단가 단위
-
-
 class CounterOfferTarget(StrictModel):
-    """⑤ 기존 업체 역제안 조건. 근거·대안·상한·물량 조정 선택지는 최종 검사가 도구 결과로 채운다."""
+    """⑤ 기존 업체 역제안 조건. 근거·대안·상한은 최종 검사가 도구 결과로 채운다."""
     supplier_id: str
     target_unit_price: DecimalStr
     conditions: list[str] = []
     basis_quote_version_ids: list[str] = []          # 요청 단가 견적 (최종 검사가 채운다)
     alternative: list[Allocation] = []               # 비교한 대안의 배분
-    volume_option: VolumeOption | None = None        # 대안이 기존 업체 포함 분산안일 때만 (최종 검사가 채운다)
 
 
 class CounterOfferSummary(StrictModel):
