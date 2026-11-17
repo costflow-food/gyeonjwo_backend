@@ -18,9 +18,17 @@ ITEM_COLUMNS = ('id,supplier_id,item_name,specification,unit,origin,certificatio
 UPDATE_FAILURES = {
     'P0002': ('RESOURCE_NOT_FOUND', '거래처 또는 품목을 찾을 수 없습니다.', 404),
     '23505': ('SUPPLIER_ALREADY_REGISTERED', '같은 업체명과 이메일의 거래처가 이미 있습니다.', 409),
-    '55006': ('SUPPLIER_EMAIL_LOCKED', '진행 중인 업무가 있어 이메일을 바꿀 수 없습니다. 업무가 끝난 뒤 다시 시도해 주세요.', 409),
+    '55006': ('SUPPLIER_IN_USE', '진행 중인 업무가 있어 지금은 바꿀 수 없습니다.', 409),
     '0A000': ('SUPPLIER_NOT_EDITABLE', '직접 등록한 거래처만 수정할 수 있습니다.', 409),
     '22023': ('VALIDATION_ERROR', '거래처 입력값을 확인해 주세요.', 422),
+}
+# 55006은 MESSAGE로 이유를 나눈다.
+IN_USE_FAILURES = {
+    'SUPPLIER_EMAIL_IN_USE': ('SUPPLIER_EMAIL_LOCKED',
+                              '진행 중인 업무가 있어 이메일을 바꿀 수 없습니다. 업무가 끝난 뒤 다시 시도해 주세요.', 409),
+    'SUPPLIER_CANDIDATE_IN_USE': ('SUPPLIER_CANDIDATE_LOCKED',
+                                  '진행 중인 업무의 후보에 올라 있어 연락처·지역·품목 정보를 바꿀 수 없습니다. '
+                                  '업체명 변경과 품목 추가는 할 수 있습니다.', 409),
 }
 ITEM_FAILURES = {
     'ITEM_RENAME_NOT_ALLOWED': ('SUPPLIER_ITEM_RENAME_NOT_ALLOWED',
@@ -116,6 +124,8 @@ class SupplierRepository:
             failure = UPDATE_FAILURES.get(error.code)
             if error.code == '22023':
                 failure = ITEM_FAILURES.get(error.message, failure)
+            elif error.code == '55006':
+                failure = IN_USE_FAILURES.get(error.message, failure)
             if failure:
                 raise ServiceError(*failure) from None
             raise ServiceError('PROCESSING_UNAVAILABLE', '거래처를 수정할 수 없습니다.', 503) from None
