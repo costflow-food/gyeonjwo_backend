@@ -3264,8 +3264,10 @@ def save_counter_offer_draft(store: CounterOfferStore, context: RunContext, targ
     record = MailDraftRecord(
         work_case_id=context.case_id, supplier_id=numbers['supplier_id'], purpose='COUNTER_OFFER', recipient=recipient,
         subject=subject, body_text=body,
+        # DB(internal.graph_check_refs)는 초안 근거로 supplier_items·suppliers·purchase_history·agent_runs·
+        # quote_versions·work_cases만 받는다. 인상 전 단가 근거 메일(mail_messages)은 넣으면 FOREIGN_GRAPH_EVIDENCE로
+        # 초안 저장이 거절되므로 넣지 않는다. 인상 전 단가 값은 검토 카드의 역제안 참고 계산(reference)에 남는다
         evidence_refs_jsonb=[f"quote_versions:{numbers['quote_version_id']}"] + (
-            [f"mail_messages:{numbers['previous_source']}.previous_unit_price"] if numbers.get('previous_source') else []) + (
             [f'agent_runs:{context.agent_run_id}'] if context.agent_run_id else []),
         input_revision=context.input_revision, style_snapshot_jsonb=style, idempotency_key=key)
     saved = store.insert_mail_draft(record, context.input_revision)
