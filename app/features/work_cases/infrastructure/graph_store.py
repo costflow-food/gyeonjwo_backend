@@ -2,7 +2,7 @@
 from copy import deepcopy
 from decimal import Decimal
 from uuid import UUID
-from app.core.errors import ServiceError
+from app.core.errors import ServiceError, code_token
 from app.features.work_cases.infrastructure.agent_store import AgentStore, mail_channel
 from app.features.mail.application.attachments import fetch_gmail_attachment
 from app.features.mail.domain.attachment_ids import part_reference
@@ -13,6 +13,18 @@ from app.shared.domain.item_names import contains_ignoring_spaces, item_name_key
 # 띄어쓰기 무시 검색의 1차 조회 상한(검색어 하나당). 걸러낸 뒤 호출자 limit으로 자른다
 ITEM_SCAN_LIMIT = 200
 ITEM_COLUMNS = ('id,supplier_id,item_name,specification,unit,certifications_jsonb,origin,notes,last_purchase_id')
+# 실패 원인으로 DB에 넘기는 키(agent_runs.error_jsonb). DB 함수도 같은 키·모양만 저장한다
+FAILURE_KEYS = ('stage', 'error_type', 'error_code', 'db_code', 'db_sqlstate', 'last_tool')
+
+
+def failure_error(error) -> dict:
+    """실행기가 넘긴 실패 원인 중 정해진 키의 코드형 값만 남긴 사본. 항상 code AGENT_FAILED를 가진다."""
+    error = error if isinstance(error, dict) else {}
+    kept = {key: error[key] for key in FAILURE_KEYS if code_token(error.get(key))}
+    calls = error.get('tool_calls')
+    if type(calls) is int and 0 <= calls <= 10000:
+        kept['tool_calls'] = calls
+    return {'code': 'AGENT_FAILED'} | kept
 
 
 class GraphStore(AgentStore):
@@ -112,7 +124,7 @@ class GraphStore(AgentStore):
                               p_candidate_set=snapshot.model_dump(mode='json'))
         else:
             result = self.rpc('finish_case_graph_agent_run', p_run=str(agent_run_id), p_status=status,
-                              p_output=safe_output, p_error={'code': 'AGENT_FAILED'} if status == 'FAILED' else None)
+                              p_output=safe_output, p_error=failure_error(error) if status == 'FAILED' else None)
         if result is not True:
             raise ServiceError('PROCESSING_UNAVAILABLE', '그래프 역할 결과 저장을 확인할 수 없습니다.', 503)
         if self.active_extraction_run == str(agent_run_id):
