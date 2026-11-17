@@ -446,7 +446,7 @@ _HINTS = {
     'SUPPLIER_MISMATCH': '메일에 연결된 업체와 업체명이 다르다. 저장하지 말고 HOLD한다.',
     'SUPPLIER_EVIDENCE_MIXED': '한 업체의 메일 근거만 남기고 다시 보낸다.',
     'SUPPLY_QUANTITY_MISSING': '인상 통보 메일에는 공급 물량이 있어야 한다. 같은 메일의 본문·첨부 중 아직 읽지 않은 '
-                               '부분이 있으면 먼저 읽는다. 공급 계획·공급 물량·공급 가능량이라고 적힌 '
+                               '부분이 있으면 먼저 읽는다. 공급 계획·공급 물량·공급 가능량·최대 주문(가능)량이라고 적힌 '
                                '수량만 단위와 함께 available_quantity로 다시 보낸다. 규격·포장·주문 단위의 수량'
                                '(예: 10kg/박스, 박스당 10kg, 주문 단위 10kg 박스)은 공급 물량이 아니다. '
                                '그런 수량만 있으면 다시 보내지 말고 HOLD한다.',
@@ -1180,6 +1180,8 @@ def _resolve_supplier_name(store: QuoteStore, case_id: str, supplier_name: str |
 _SUPPLIER_NOT_MATCHED_NEXT = ('등록된 거래처에 없다. 다시 보내지 말고(업체명을 빼고 보내지도 않는다) '
                               '바로 HOLD로 최종 응답한다. hold.code는 SUPPLIER_NOT_MATCHED다.')
 # NO_QUOTE_DATA(이전 견적 없는 업체의 단가 없는 메일) 뒤에 할 일
+# 새 버전에 이어받는 비고 분류 (결제·입고 조건). 가격 예고·공급·품질·포장은 새 메일 기준이다
+_CARRIED_NOTE_CATEGORIES = ('PAYMENT', 'RECEIVING')
 _NO_QUOTE_DATA_NEXT = '이 업체의 이전 견적이 없고 단가도 없다. 다시 보내지 말고 바로 HOLD로 최종 응답한다. hold.code는 NO_QUOTE_DATA다.'
 
 
@@ -1484,6 +1486,14 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
     carried = []
     if previous:
         tiers, costs, carried = _carry(previous, values, tiers, costs, review)
+        # 결제·입고 비고는 정정 회신에 다시 적히지 않아도 거래 조건으로 남는다. 가격 예고·공급 등은 새 메일 기준이라
+        # 이어받지 않는다(낡은 예고가 남지 않게). 이어받은 비고는 원래 근거 메일을 그대로 가진다
+        texts = {note['text'] for note in notes}
+        kept = [note for note in previous[1].item_notes_jsonb or []
+                if note.get('category') in _CARRIED_NOTE_CATEGORIES and note.get('text') not in texts]
+        if kept:
+            notes = notes + [{**note, 'carried_from': note.get('carried_from', previous[0])} for note in kept]
+            carried.append('item_notes')
     elif 'unit_price' not in values and not tiers:
         # 이전 견적이 없는 업체의 단가 없는 메일(비용 조건만 등)은 견적이 아니다. LLM은 업체별 이전 견적을 구분하지 못한다
         missing = {'field': 'unit_price', 'code': 'NO_QUOTE_DATA'}
@@ -1506,6 +1516,8 @@ def save_structured_quote(store: QuoteStore, context: RunContext, fields: list[Q
         mails.setdefault(entry['mail_id'], {'schema_version': SCHEMA_VERSION, 'fields': {}, 'item_notes': []})
         mails[entry['mail_id']]['fields'][name] = entry
     for note in notes:
+        if note.get('carried_from'):      # 이어받은 비고는 원래 메일에 이미 기록돼 있다
+            continue
         mails.setdefault(note['mail_id'], {'schema_version': SCHEMA_VERSION, 'fields': {}, 'item_notes': []})
         mails[note['mail_id']]['item_notes'].append(note)
     shipping = next((cost['amount'] for cost in costs if cost['cost_type'] == 'SHIPPING'
@@ -1995,7 +2007,8 @@ def search_supplier_evidence(supplier_item_ids: list[str], runtime: ToolRuntime[
     result = evaluate_candidates(_candidate_store, _run_context(_candidate_store, runtime), supplier_item_ids)
     result.pop('rfq_facts', None)       # 메일 문안용 값. LLM이 쓸 일이 없다
     if result.get('status') == 'OK' and not result.get('candidates'):
-        result['next'] = ('등록 후보가 없다. create_rfq_draft를 부르지 말고 '
+        result['next'] = ('등록 후보가 없다. 아직 업무 품목명의 원재료 낱말(예: "깐마늘" → "마늘")로 넓혀 찾지 않았으면 '
+                          'search_supplier_items로 한 번 더 찾는다. 그래도 없으면 create_rfq_draft를 부르지 말고 '
                           'crawl_supplier_candidates로 웹 근거를 한 번 수집한 뒤 HOLD한다.')
     return result
 
@@ -3273,6 +3286,36 @@ COUNTER_BODY = ('안녕하세요. {업체명} 담당자님\n'
                 '{서명}')
 
 
+# 조건 문장 속 금액 ("5,150원", "5150 원")
+_CONDITION_AMOUNT = re.compile(r'(\d[\d,]*(?:\.\d+)?)\s*원')
+
+
+def other_supplier_mentions(store: CounterOfferStore, context: RunContext, case: dict, numbers: dict,
+                            conditions: list[str]) -> list[str]:
+    """역제안 조건에 들어간 다른 업체 정보: 그 업체 이름, 그 업체 견적 단가(원). 기존 업체에 다른 업체 견적을 알리지 않는다.
+    목표·요청·인상 전 단가와 같은 금액은 빼고 본다(대안 단가와 목표 단가가 같을 수 있다). 물량은 기존 업체 자신의
+    물량 조건과 구분할 수 없어 지시문으로만 막는다."""
+    text = _compact(' '.join(conditions))
+    if not text:
+        return []
+    own = {_amount(numbers.get(key)) for key in ('target_unit_price', 'requested_unit_price', 'previous_unit_price')}
+    amounts = {_amount(raw.replace(',', '')) for raw in _CONDITION_AMOUNT.findall(' '.join(conditions))} - own - {None}
+    found = []
+    ids = case.get('latest_quote_version_ids') or []
+    for _, record in _read(lambda: store.get_quote_versions(context.case_id, ids)) or []:
+        if record.supplier_id == numbers['supplier_id']:
+            continue
+        supplier = _read(lambda sid=record.supplier_id: store.get_supplier(context.case_id, sid)) or {}
+        name = (supplier.get('name') or '').strip()
+        if name and _compact(name) in text:
+            found.append(f'업체명 {name}')
+        tiers = record.pricing_terms_jsonb.get('price_tiers') or []
+        prices = [record.unit_price] + [tier.get('unit_price') for tier in tiers]
+        found += [f'{record.supplier_id} 견적 단가 {price}원' for price in prices
+                  if price is not None and _amount(price) in amounts]
+    return list(dict.fromkeys(found))
+
+
 def save_counter_offer_draft(store: CounterOfferStore, context: RunContext, target_unit_price: str, conditions: list[str],
                              alternative: list[AlternativeAllocation]) -> dict:
     """create_counter_offer_draft의 본체. 목표를 다시 검증하고, 통과할 때만 기존 업체에 보낼 초안을 저장한다."""
@@ -3285,6 +3328,10 @@ def save_counter_offer_draft(store: CounterOfferStore, context: RunContext, targ
     if not recipient:
         return {'status': 'REJECTED', 'code': 'NO_CONTACT'}
     case = (_read(lambda: store.get_work_case(context.case_id)) or {}) | {'id': context.case_id}
+    leaked = other_supplier_mentions(store, context, case, numbers, conditions)
+    if leaked:
+        return {'status': 'REJECTED', 'code': 'OTHER_SUPPLIER_INFO', 'found': leaked,
+                'hint': '조건에 다른 업체의 업체명·단가·물량을 쓰지 않는다. 그 조건을 빼거나 고쳐 같은 목표 단가로 다시 부른다.'}
     style = _read(lambda: store.current_send_settings(context.case_id)) or {}
     lines = '\n'.join(f'- {text}' for text in (mail_value(c, MAIL_VALUE_LIMITS['조건']) for c in conditions) if text)
     subject, body = _mail_text(COUNTER_SUBJECT, COUNTER_BODY, {
@@ -3316,7 +3363,9 @@ def create_counter_offer_draft(target_unit_price: str, alternative: list[Alterna
                                runtime: ToolRuntime[RunContext], conditions: list[str] | None = None) -> dict:
     '''기존 업체에 보낼 역제안 메일 초안을 저장한다(발송하지 않는다). 목표 단가를 다시 검증하고 통과할 때만 만든다.
     메일에는 목표 단가와 conditions(예: "12월 물량 전량 발주 시")만 들어가고, 다른 공급처 이야기는 넣지 않는다.
-    반환: DRAFTED(draft_id·target_unit_price·supplier_id) / REJECTED(code: NOT_VALIDATED·NO_CONTACT) / REVISION_CHANGED
+    conditions에는 다른 업체의 업체명·단가·물량을 쓰지 않는다(쓰면 OTHER_SUPPLIER_INFO로 거절된다).
+    반환: DRAFTED(draft_id·target_unit_price·supplier_id) / REJECTED(code: NOT_VALIDATED·NO_CONTACT·OTHER_SUPPLIER_INFO)
+    / REVISION_CHANGED
     '''
     return save_counter_offer_draft(_priority_store, _run_context(_priority_store, runtime), target_unit_price,
                                     conditions or [], alternative)
