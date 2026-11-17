@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Query, Request
 
 from app.api.responses import api_json
 from app.features.mailboxes.api.router import require_google_user
-from app.features.suppliers.registration import SupplierRegistrationInput
+from app.features.suppliers.registration import SupplierRegistrationInput, SupplierUpdateInput
 from app.features.suppliers.repository import SupplierRepository
 from app.features.work_cases.application.cursor import CursorCodec
 from app.shared.infrastructure.db.client import make_server_client
@@ -33,6 +33,11 @@ def register_supplier(body: SupplierRegistrationInput, repo=Depends(supplier_rep
 @router.get('/suppliers/{supplier_id}', summary='거래처 상세')
 def supplier(supplier_id: UUID, repo=Depends(supplier_repository)):
     return api_json(repo.detail(str(supplier_id)))
+
+
+@router.patch('/suppliers/{supplier_id}', summary='거래처 수정')
+def update_supplier(supplier_id: UUID, body: SupplierUpdateInput, repo=Depends(supplier_repository)):
+    return api_json(repo.update(str(supplier_id), body.body()))
 
 
 @router.get('/supplier-items/{supplier_item_id}/price-history', summary='품목별 가격 이력')
