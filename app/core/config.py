@@ -22,8 +22,9 @@ class Settings(BaseSettings):
     stt_api_key: SecretStr | None = None
     # 모델·추론 수준·시간 제한은 env가 아닌 코드 상수다. 모델과 추론 수준은 한 쌍으로 바꾼다
     llm_model: ClassVar[str] = 'gpt-6-luna'
-    llm_classification_model: ClassVar[str] = 'gpt-5-nano'
-    llm_classification_reasoning_effort: ClassVar[ReasoningEffort] = 'minimal'
+    # 메일 경량 분류: gpt-5-nano(종료 예정 2026-12-11)에서 에이전트와 같은 gpt-6-luna로 바꿨다(2026-11-17)
+    llm_classification_model: ClassVar[str] = 'gpt-6-luna'
+    llm_classification_reasoning_effort: ClassVar[ReasoningEffort] = 'low'
     # 에이전트 역할별 모델. 없는 역할은 llm_model을 쓴다
     llm_role_models: ClassVar[dict[str, str]] = {}
     # 에이전트 역할별 추론 수준. 없는 역할은 llm_reasoning_effort(None이면 보내지 않음)
