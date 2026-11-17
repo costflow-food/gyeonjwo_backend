@@ -2015,6 +2015,28 @@ class ToolCallLog(BaseCallbackHandler):
             self._open.pop(run_id)['error'] = type(error).__name__
 
 
+def failure_summary(error: Exception, calls: list[dict]) -> dict:
+    """agent_runs.error_jsonb에 남길 실패 원인. 코드형 값만 담는다(메일 원문·예외 메시지·도구 인자는 넣지 않는다).
+    stage: FINAL_CHECK(최종 검사 불일치) / TOOL_LIMIT(도구 호출 한도) / TOOL(마지막 도구가 예외) / OTHER(모델·그 밖)."""
+    from app.core.errors import ServiceError, code_token
+    last = calls[-1] if calls else {}
+    error_type = type(error).__name__
+    if isinstance(error, UngroundedOutputError):
+        stage = 'FINAL_CHECK'
+    elif 'ToolCallLimit' in error_type:
+        stage = 'TOOL_LIMIT'
+    elif 'error' in last:
+        stage = 'TOOL'
+    else:
+        stage = 'OTHER'
+    summary = {'code': 'AGENT_FAILED', 'stage': stage, 'error_type': code_token(error_type),
+               'last_tool': code_token(last.get('tool')), 'tool_calls': len(calls)}
+    if isinstance(error, ServiceError):
+        summary['error_code'] = code_token(error.code)
+        summary |= {key: value for key, value in error.cause.items() if code_token(value)}
+    return {key: value for key, value in summary.items() if value is not None}
+
+
 class AgentRunner:
     """graph.build_graph에 넘기는 run_agent(role, input) 구현. 역할별 에이전트는 처음 호출할 때 만든다.
     runs가 있으면 역할 호출마다 06 agent_runs 행을 시작·종료하고, 그 ID를 RunContext로 도구에 넘긴다.
@@ -2066,7 +2088,7 @@ class AgentRunner:
             if self.runs is not None:      # 부분 결과: 실패하기 전까지 부른 도구와 그 결과 (07 5.2)
                 self.runs.finish_agent_run(context.agent_run_id, 'FAILED',
                                            {'partial_tool_calls': log.calls} if log.calls else None,
-                                           {'type': type(error).__name__})
+                                           failure_summary(error, log.calls))
             raise
         if role != AgentRole.INFO_EXTRACTOR:      # ①은 KAN-259 범위 밖(테스트 진행 중)
             output = with_supplier_names(output, handles, context.case_id)
