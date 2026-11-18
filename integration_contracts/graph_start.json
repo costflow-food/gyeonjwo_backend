@@ -232,7 +232,7 @@
       "RESPONSE_PLAN": 14,
       "COUNTER_OFFER": 8
     },
-    "role_calls_per_run": 6,
+    "role_calls_per_run": 8,
     "unsupported_entry_guard": "START is supported; REPLY/PLAN require GRAPH_REVIEW_V1, AGENT_GRAPH_REVIEW_ENABLED and deployed review storage/queue guards. Unsupported combinations fail closed.",
     "remaining_connection_gaps": [
       "Graph-review backend implemented, but guarded RPC deployment/integration validation is still required; see graph_review.json.",
