@@ -24,6 +24,29 @@ class GraphWorker(ExtractionWorker):
         graph_contract()
         return run_graph
 
+    def record_failure(self, job, error):
+        """실패한 그래프 job을 DB에 기록하고, 기록한 코드를 돌려준다."""
+        code = 'GRAPH_FAILED'
+        if isinstance(error, OwnershipLost):
+            # 임대를 잃어 실행을 멈춘 경우. 에이전트·그래프 오류(GRAPH_FAILED)와 구분해 WORKER_INTERRUPTED로 남긴다
+            code = 'WORKER_INTERRUPTED'
+        elif isinstance(error, ServiceError):
+            code = {'REVISION_CONFLICT': 'INPUT_REVISION_CHANGED', 'EXTRACTION_TIME_LIMIT': 'GRAPH_TIME_LIMIT',
+                    'WORKER_INTERRUPTED': 'WORKER_INTERRUPTED'}.get(error.code, 'GRAPH_FAILED')
+        recorded = self.repo.fail(job, code)
+        if isinstance(error, OwnershipLost) and recorded is not True:
+            # fail_case_graph_run은 DB 임대가 아직 남아 있으면 WORKER_INTERRUPTED를 받지 않는다(false). 상실을 판단한
+            # 시점(갱신 실패 60초·DB가 소유권 변경을 알림)에는 임대가 대개 남아 있어, 그대로 두면 만료 뒤
+            # recover_case_graph_runs가 정리할 때까지 최대 약 2분 job이 PROCESSING으로 남아 같은 업무의 회신 검토 예약이
+            # 막힌다. 바로 닫을 수 있게 GRAPH_FAILED로 다시 기록한다(이미 다른 워커가 가져갔다면 DB가 토큰으로 거절한다).
+            # 그래서 임대 상실은 DB에 대개 GRAPH_FAILED로 남는다. 상실 사유(OWNERSHIP_LOST·RETRY_EXHAUSTED)는
+            # 같은 job_id의 'lease renewal failed' 로그로 구분한다
+            code = 'GRAPH_FAILED'
+            accepted = self.repo.fail(job, code)
+            logger.warning('graph lease lost; WORKER_INTERRUPTED not accepted, retried as GRAPH_FAILED accepted=%s '
+                           'job_id=%s', accepted is True, job.get('job_id'))
+        return code
+
     def process_once(self):
         claim_started = time.monotonic()
         job = self.repo.claim()
@@ -65,7 +88,8 @@ class GraphWorker(ExtractionWorker):
         timings = dict(db=0.0, llm=0.0, document=0.0)
         timing_token = graph_timings.set(timings)
         try:
-            with LeaseHeartbeat(lambda: self.repo.heartbeat(job), seconds=10) as lease:
+            with LeaseHeartbeat(lambda: self.repo.heartbeat(job), seconds=10, worker='graph',
+                                job_id=job['job_id']) as lease:
                 def active():
                     lease.check()
                     if self.stop.is_set():
@@ -125,15 +149,7 @@ class GraphWorker(ExtractionWorker):
                     CURRENT_SCOPE.reset(token)
             logger.info('graph finished start_from=%s', mode)
         except Exception as error:
-            code = 'GRAPH_FAILED'
-            if isinstance(error, OwnershipLost):
-                # 임대를 잃어 실행을 멈춘 경우. 에이전트·그래프 오류(GRAPH_FAILED)와 구분해 남긴다
-                # (fail_case_graph_run이 받는 코드 중 하나). 이미 다른 워커가 가져갔다면 DB가 토큰으로 거절한다
-                code = 'WORKER_INTERRUPTED'
-            elif isinstance(error, ServiceError):
-                code = {'REVISION_CONFLICT': 'INPUT_REVISION_CHANGED', 'EXTRACTION_TIME_LIMIT': 'GRAPH_TIME_LIMIT',
-                        'WORKER_INTERRUPTED': 'WORKER_INTERRUPTED'}.get(error.code, 'GRAPH_FAILED')
-            self.repo.fail(job, code)
+            code = self.record_failure(job, error)
             logger.warning('graph failed code=%s job_id=%s case_id=%s start_from=%s %s', code, job.get('job_id'),
                            job.get('case_id'), mode, error_origin(error))
         finally:
