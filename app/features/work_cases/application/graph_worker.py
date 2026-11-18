@@ -6,6 +6,7 @@ from app.core.graph_timing import graph_timings
 from app.core.tracing import agent_tracing
 from app.core.errors import ServiceError
 from app.core.leases import LeaseHeartbeat
+from app.shared.infrastructure.db.contracts import OwnershipLost
 from app.features.work_cases.application.extraction_scope import CURRENT_SCOPE, ExtractionScope
 from app.features.work_cases.application.extraction_worker import ExtractionWorker
 from app.features.work_cases.application.graph_boundary import graph_contract, run_graph
@@ -125,7 +126,11 @@ class GraphWorker(ExtractionWorker):
             logger.info('graph finished start_from=%s', mode)
         except Exception as error:
             code = 'GRAPH_FAILED'
-            if isinstance(error, ServiceError):
+            if isinstance(error, OwnershipLost):
+                # 임대를 잃어 실행을 멈춘 경우. 에이전트·그래프 오류(GRAPH_FAILED)와 구분해 남긴다
+                # (fail_case_graph_run이 받는 코드 중 하나). 이미 다른 워커가 가져갔다면 DB가 토큰으로 거절한다
+                code = 'WORKER_INTERRUPTED'
+            elif isinstance(error, ServiceError):
                 code = {'REVISION_CONFLICT': 'INPUT_REVISION_CHANGED', 'EXTRACTION_TIME_LIMIT': 'GRAPH_TIME_LIMIT',
                         'WORKER_INTERRUPTED': 'WORKER_INTERRUPTED'}.get(error.code, 'GRAPH_FAILED')
             self.repo.fail(job, code)
