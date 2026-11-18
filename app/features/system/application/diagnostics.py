@@ -34,6 +34,13 @@ def configuration_report(settings):
 
 def require_startup_configuration(settings):
     """Stop only on malformed values or a missing DB server; other missing secrets disable their workers."""
+    try:
+        settings.require_dev_no_auth_allowed()
+    except RuntimeError:
+        # 운영에서 로그인 생략이 켜지는 사고를 막는다. 값은 남기지 않는다
+        raise SystemExit('DEV_NO_AUTH_USER_ID') from None
+    if settings.dev_no_auth:
+        logger.warning('dev_no_auth enabled: every API request runs as the DEV user (development only)')
     report = configuration_report(settings)
     fatal = sorted(set(report['invalid'] + [name.upper() for name in SERVER_FIELDS if not getattr(settings, name)]))
     if fatal:
