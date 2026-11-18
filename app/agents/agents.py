@@ -375,12 +375,10 @@ PROMPTS = {
 순서:
 1. get_case_context로 업무를 확인한다. REVISION_CHANGED·CASE_NOT_FOUND면 다른 도구를 부르지 말고 바로 HOLD를 반환한다.
 2. 업무 품목명(item_name)에서 검색어를 정해 search_supplier_items(keywords)를 부른다.
-   (예: "IQF 딸기 (냉동)" → ["딸기"]) 결과가 없으면 더 넓은 검색어로, truncated면 더 좁은 검색어로 다시 찾는다(최대 3번).
-   검색은 띄어쓰기를 무시하고 품목명에 검색어가 들어 있는 것을 찾는다("냉동딸기"로 "냉동 딸기"도 찾는다).
-   띄어쓰기만 다른 변형은 함께 보내지 않는다. 넓은 검색어와 좁은 검색어(예: "딸기"와 "냉동 딸기")를 한 번에 섞지 않는다.
-   다른 표기는 다시 찾을 때 더한다 (예: truncated 뒤 → ["냉동 딸기", "딸기(냉동)"]). 같은 품목은 여러 검색 결과에서 모두 모아 고른다.
-   찾은 결과에서 기존 업체 말고 고를 품목이 없으면 업무 품목명의 원재료 낱말로 넓혀 한 번 더 찾는다
-   (예: "깐마늘" → ["마늘"]). 넓힌 결과에는 다른 품목(다진마늘·흑마늘 등)도 섞이니 3번 기준으로 고른다.
+   처음 검색은 업무 품목명 그대로 한다 (예: "냉동 브로콜리" → ["냉동 브로콜리"]). 등록 품목명은 등록 단계에서 정리되어 있다.
+   검색은 띄어쓰기를 무시하고 품목명에 검색어가 들어 있는 것을 찾는다. 띄어쓰기만 다른 변형은 보내지 않는다.
+   결과가 없으면 원재료 낱말로 넓혀(예: "냉동 브로콜리" → ["브로콜리"]), truncated면 더 좁혀 다시 찾는다(최대 3번).
+   넓힌 결과에 섞인 다른 품목(브로콜리 분말·생 브로콜리 등)은 3번 기준으로 거른다. 같은 품목은 여러 검색 결과에서 모두 모아 고른다.
    영어 품목명이면 한국어 품목명으로 바꾼 검색어도 함께 보낸다 (예: "IQF Strawberry" → ["딸기", "strawberry"]).
 3. 검색 결과에서 업무 품목과 같은 품목만 고른다. 같은 품목은 원재료와 상태(냉동·생·건조 등)가 같고 다른 제품으로
    가공되지 않은 것이다. 이름 표기·어순·괄호·등급·용도 표시만 다르면 같은 품목이다.
@@ -2140,7 +2138,9 @@ class AgentRunner:
         LLM에게는 ID 대신 이름표만 보인다. 최종 답과 도구 결과는 ID로 되돌려 최종 검사·그래프에 넘긴다."""
         handles = context.handles
         result = agent.invoke({'messages': messages}, context=context, config={'callbacks': [log]})
-        answer = result['structured_response']
+        answer = result.get('structured_response')
+        if answer is None:     # 최종 응답 없이 끝났다(호출 한도 등). 실패 사유를 분명히 남긴다
+            raise UngroundedOutputError(f'{role.value} ended without a final structured answer')
         answer = type(answer).model_validate(handles.reveal(answer.model_dump()))
         return check_final_output(role, data, context, answer, handles.reveal_messages(result['messages'])), result['messages']
 
