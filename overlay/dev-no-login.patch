@@ -1,0 +1,269 @@
+diff --git a/.env.example b/.env.example
+index ff7ffce..7da4b61 100644
+--- a/.env.example
++++ b/.env.example
+@@ -57,3 +57,8 @@ PDF_WORKER_MEMORY_MB=760
+ STT_URL=
+ STT_MODEL=
+ STT_API_KEY=
++
++# DEV 존 전용: 로그인 없이 이 사용자(auth.users id)로 모든 요청을 처리한다. 운영에는 절대 넣지 않는다
++# APP_ENVIRONMENT=development이고 운영 Supabase가 아닐 때만 허용(아니면 서버가 시작하지 않음)
++DEV_NO_AUTH_USER_ID=
++DEV_NO_AUTH_EMAIL=
+diff --git a/app/core/config.py b/app/core/config.py
+index ed26c1a..5a2d751 100644
+--- a/app/core/config.py
++++ b/app/core/config.py
+@@ -1,6 +1,7 @@
+ from functools import lru_cache
+ from pathlib import Path
+ from typing import ClassVar, Literal
++from uuid import UUID
+ 
+ from pydantic import HttpUrl, SecretStr, ValidationError, field_validator, model_validator
+ from pydantic_settings import BaseSettings, SettingsConfigDict
+@@ -8,6 +9,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
+ ROOT = Path(__file__).resolve().parents[2]
+ # OpenAI reasoning effort 값. 모델마다 받는 값이 다르다 (예: gpt-5.4-mini는 minimal·max 없음)
+ ReasoningEffort = Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
++# 운영(PRD) Supabase 프로젝트 ref. DEV 로그인 생략은 이 DB를 가리키면 절대 켜지지 않는다
++PRODUCTION_SUPABASE_REFS: frozenset[str] = frozenset({'qlabhitzpdiawtbdmlgw'})
+ 
+ 
+ class Settings(BaseSettings):
+@@ -68,10 +71,15 @@ class Settings(BaseSettings):
+     app_environment: str = 'development'
+     # 조직 단위 Service Key는 기록할 작업 공간 ID가 있어야 한다(LangSmith Settings 화면에서 확인)
+     langsmith_workspace_id: str | None = None
++    # DEV 존 전용 로그인 생략: 값이 있으면 모든 API 요청을 이 사용자(auth.users에 있어야 함)로 처리한다.
++    # APP_ENVIRONMENT=development이고 운영 Supabase가 아닐 때만 허용한다(아니면 서버가 시작하지 않는다).
++    # 켜지면 메일·LLM 키가 없어도 /ready가 DB 기준으로 200을 준다(DEV 배포 확인용)
++    dev_no_auth_user_id: UUID | None = None
++    dev_no_auth_email: str = 'dev@thoner.local'
+ 
+     @field_validator('supabase_url', 'llm_base_url', 'supabase_secret_key', 'supabase_publishable_key',
+                      'llm_api_key', 'stt_url', 'stt_api_key', 'gmail_client_secret', 'google_token_encryption_key', 'langsmith_api_key',
+-                     'langsmith_workspace_id', mode='before')
++                     'langsmith_workspace_id', 'dev_no_auth_user_id', mode='before')
+     @classmethod
+     def empty_optional_values(cls, value):
+         return None if isinstance(value, str) and not value.strip() else value
+@@ -103,6 +111,20 @@ class Settings(BaseSettings):
+         if not self.gmail_client_id or not self.gmail_client_secret or not self.google_token_encryption_key:
+             raise RuntimeError('Google OAuth client and token encryption key must be configured')
+ 
++    @property
++    def dev_no_auth(self) -> bool:
++        """DEV 존 로그인 생략이 켜져 있는지. 시작 검사(require_dev_no_auth_allowed)를 통과한 설정에서만 의미가 있다."""
++        return self.dev_no_auth_user_id is not None
++
++    def require_dev_no_auth_allowed(self) -> None:
++        """로그인 생략이 켜졌는데 운영 환경이거나 운영 DB를 가리키면 시작을 막는다."""
++        if not self.dev_no_auth:
++            return
++        host = self.supabase_url.host.casefold() if self.supabase_url else ''
++        if (self.app_environment.strip().casefold() != 'development'
++                or any(host.startswith(ref + '.') for ref in PRODUCTION_SUPABASE_REFS)):
++            raise RuntimeError('DEV_NO_AUTH_USER_ID is allowed only in the development environment')
++
+     @property
+     def gmail_push_configured(self):
+         return all((self.gmail_topic,self.gmail_subscription,self.pubsub_audience,self.pubsub_service_account))
+diff --git a/app/features/mailboxes/api/router.py b/app/features/mailboxes/api/router.py
+index 622f504..63e941a 100644
+--- a/app/features/mailboxes/api/router.py
++++ b/app/features/mailboxes/api/router.py
+@@ -13,7 +13,7 @@ from app.core.request_context import current_request_id
+ from app.features.mailboxes.application.auth import google_principal
+ from app.features.mailboxes.application.membership import MembershipChecker
+ from app.features.mailboxes.application.service import GoogleConnectionService
+-from app.features.mailboxes.domain.schemas import GoogleConnection, GoogleConnectRequest
++from app.features.mailboxes.domain.schemas import GoogleConnection, GoogleConnectRequest, GooglePrincipal
+ from app.features.mailboxes.infrastructure.crypto import TokenCipher
+ from app.features.mailboxes.infrastructure.google import GoogleAPI
+ from app.features.mailboxes.infrastructure.repository import MailboxRepository
+@@ -52,9 +52,19 @@ def get_membership_checker(request: Request) -> MembershipChecker:
+         return request.app.state.membership_checker
+ 
+ 
++def dev_principal(settings) -> GooglePrincipal:
++    """DEV 존 로그인 생략용 고정 사용자."""
++    email = (settings.dev_no_auth_email or 'dev@thoner.local').strip().casefold()
++    return GooglePrincipal(str(settings.dev_no_auth_user_id), 'dev-no-auth', email)
++
++
+ def require_google_user(request: Request,
+     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+     secure=Depends(require_secure_transport)):
++    settings = request.app.state.settings
++    if settings.dev_no_auth:
++        # DEV 존: 로그인 없이 고정 DEV 사용자로 처리한다(운영에서는 시작 단계에서 막힘)
++        return dev_principal(settings)
+     if not credentials:
+         raise ServiceError('AUTH_REQUIRED', '로그인이 필요합니다.', 401)
+     principal = google_principal(credentials.credentials, request.app.state.settings,
+diff --git a/app/features/system/api/router.py b/app/features/system/api/router.py
+index e472f2c..8586e1d 100644
+--- a/app/features/system/api/router.py
++++ b/app/features/system/api/router.py
+@@ -39,6 +39,21 @@ def _readiness_probes(request):
+         return probes
+ 
+ 
++def _dev_ready(request, report, revision):
++    """DEV 존(로그인 생략): 메일·LLM 키 없이 DB만 확인한다. 꺼진 기능은 disabled_features로 알린다."""
++    _, decision_probe = _readiness_probes(request)
++    status, _ = decision_probe.readiness()
++    checks = {'configuration': 'development', 'database': 'ready' if status in {'ready', 'refreshing'} else status}
++    if checks['database'] != 'ready':
++        return _not_ready(checks, revision)
++    missing = set(report['missing'])
++    disabled = [name for name, fields in (
++        ('google_oauth', {'GMAIL_CLIENT_ID', 'GMAIL_CLIENT_SECRET', 'GOOGLE_TOKEN_ENCRYPTION_KEY'}),
++        ('llm', {'LLM_BASE_URL', 'LLM_API_KEY'})) if fields & missing]
++    return {'status': 'ready', 'mode': 'dev-no-auth', 'environment': 'development', 'checks': checks,
++            'degraded_features': [], 'disabled_features': disabled, 'build_revision': revision}
++
++
+ @router.get('/ready')
+ def ready(request: Request):
+     settings=request.app.state.settings
+@@ -46,6 +61,8 @@ def ready(request: Request):
+     revision = settings.app_build_revision
+     checks={'configuration':'not_ready','database':'not_checked','gmail_worker':'not_running'}
+     report=configuration_report(settings)
++    if settings.dev_no_auth:
++        return _dev_ready(request, report, revision)
+     if report['status']!='ready':
+         return _not_ready(checks, revision)
+     checks['configuration']='ready'
+diff --git a/app/features/system/application/diagnostics.py b/app/features/system/application/diagnostics.py
+index 18dcf05..bb4e44b 100644
+--- a/app/features/system/application/diagnostics.py
++++ b/app/features/system/application/diagnostics.py
+@@ -34,6 +34,13 @@ def configuration_report(settings):
+ 
+ def require_startup_configuration(settings):
+     """Stop only on malformed values or a missing DB server; other missing secrets disable their workers."""
++    try:
++        settings.require_dev_no_auth_allowed()
++    except RuntimeError:
++        # 운영에서 로그인 생략이 켜지는 사고를 막는다. 값은 남기지 않는다
++        raise SystemExit('DEV_NO_AUTH_USER_ID') from None
++    if settings.dev_no_auth:
++        logger.warning('dev_no_auth enabled: every API request runs as the DEV user (development only)')
+     report = configuration_report(settings)
+     fatal = sorted(set(report['invalid'] + [name.upper() for name in SERVER_FIELDS if not getattr(settings, name)]))
+     if fatal:
+diff --git a/tests/test_dev_no_auth.py b/tests/test_dev_no_auth.py
+new file mode 100644
+index 0000000..33b7573
+--- /dev/null
++++ b/tests/test_dev_no_auth.py
+@@ -0,0 +1,105 @@
++"""DEV 존 로그인 생략(DEV_NO_AUTH_USER_ID): DEV에서만 켜지고 운영에서는 서버가 시작하지 않는다."""
++from types import SimpleNamespace
++from unittest import TestCase
++from unittest.mock import Mock, patch
++from uuid import UUID
++
++from fastapi import Depends, FastAPI
++from fastapi.testclient import TestClient
++
++from app.core.config import Settings
++from app.core.errors import ServiceError
++from app.features.mailboxes.api.router import require_google_user
++from app.features.system.application.diagnostics import require_startup_configuration
++
++DEV_USER = '11111111-2222-4333-8444-555555555555'
++DEV_DB = 'https://mumzaoohsmdiegtmjhha.supabase.co'
++PRD_DB = 'https://qlabhitzpdiawtbdmlgw.supabase.co'
++
++
++def settings(**values):
++    base = {'supabase_url': DEV_DB, 'supabase_secret_key': 'sb_secret_x',
++            'supabase_publishable_key': 'sb_publishable_x', 'app_environment': 'development'}
++    base.update(values)
++    return Settings(_env_file=None, **base)
++
++
++class DevNoAuthStartupTests(TestCase):
++    def test_off_by_default(self):
++        self.assertFalse(settings().dev_no_auth)
++        self.assertFalse(settings(dev_no_auth_user_id='').dev_no_auth)
++
++    def test_allowed_on_dev_database_in_development(self):
++        value = settings(dev_no_auth_user_id=DEV_USER)
++        self.assertTrue(value.dev_no_auth)
++        require_startup_configuration(value)  # 시작 허용
++
++    def test_refused_in_production_environment(self):
++        with self.assertRaises(SystemExit) as raised:
++            require_startup_configuration(settings(dev_no_auth_user_id=DEV_USER, app_environment='production'))
++        self.assertEqual(str(raised.exception), 'DEV_NO_AUTH_USER_ID')
++
++    def test_refused_on_production_database_even_in_development(self):
++        with self.assertRaises(SystemExit):
++            require_startup_configuration(settings(dev_no_auth_user_id=DEV_USER, supabase_url=PRD_DB))
++
++    def test_invalid_user_id_is_rejected(self):
++        with self.assertRaises(Exception):
++            settings(dev_no_auth_user_id='not-a-uuid')
++
++
++class DevNoAuthRequestTests(TestCase):
++    def client(self, value):
++        app = FastAPI()
++        app.state.settings = value
++        app.state.auth_http_client = Mock()
++        app.state.service_lock = Mock(__enter__=Mock(), __exit__=Mock(return_value=False))
++
++        @app.get('/whoami')
++        def whoami(principal=Depends(require_google_user)):
++            return {'user_id': principal.user_id, 'email': principal.email}
++
++        @app.exception_handler(ServiceError)
++        def handle(request, error):
++            from fastapi.responses import JSONResponse
++            return JSONResponse({'code': error.code}, status_code=error.status)
++
++        return TestClient(app, base_url='https://testserver'), app
++
++    def test_dev_no_auth_returns_fixed_user_without_token_or_member_check(self):
++        client, app = self.client(settings(dev_no_auth_user_id=DEV_USER, dev_no_auth_email=' Dev@Thoner.Local '))
++        with patch('app.features.mailboxes.api.router.google_principal') as verify, \
++                patch('app.features.mailboxes.api.router.get_membership_checker') as members:
++            response = client.get('/whoami')
++        self.assertEqual(response.status_code, 200)
++        self.assertEqual(response.json(), {'user_id': str(UUID(DEV_USER)), 'email': 'dev@thoner.local'})
++        verify.assert_not_called()
++        members.assert_not_called()
++        app.state.auth_http_client.get.assert_not_called()
++
++    def test_without_dev_no_auth_token_is_still_required(self):
++        client, _ = self.client(settings())
++        self.assertEqual(client.get('/whoami').json(), {'code': 'AUTH_REQUIRED'})
++
++
++class DevReadyTests(TestCase):
++    def test_dev_ready_checks_database_only_and_lists_disabled_features(self):
++        from app.features.system.api import router as system
++        probe = SimpleNamespace(readiness=lambda: ('ready', True))
++        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
++            settings=settings(dev_no_auth_user_id=DEV_USER, app_build_revision='abc1234'))))
++        with patch.object(system, '_readiness_probes', return_value=(None, probe)):
++            body = system.ready(request)
++        self.assertEqual(body['status'], 'ready')
++        self.assertEqual(body['degraded_features'], [])
++        self.assertEqual(body['disabled_features'], ['google_oauth', 'llm'])
++        self.assertEqual(body['build_revision'], 'abc1234')
++
++    def test_dev_ready_reports_database_failure(self):
++        from app.features.system.api import router as system
++        probe = SimpleNamespace(readiness=lambda: ('failed', None))
++        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
++            settings=settings(dev_no_auth_user_id=DEV_USER))))
++        with patch.object(system, '_readiness_probes', return_value=(None, probe)):
++            response = system.ready(request)
++        self.assertEqual(response.status_code, 503)
