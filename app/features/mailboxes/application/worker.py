@@ -59,7 +59,7 @@ class ConnectedMailboxWorker:
         saved = duplicates = deleted = quarantined = 0
         logger.info('gmail sync_started sync_id=%s mode=connected', sync_id)
         try:
-            with LeaseHeartbeat(lambda: self.repo.heartbeat(job)) as lease:
+            with LeaseHeartbeat(lambda: self.repo.heartbeat(job), worker='gmail_sync', job_id=sync_id) as lease:
                 row, grant = self._access(job)
                 watch = row['public']['watch']
                 expiration = watch.get('expiration')

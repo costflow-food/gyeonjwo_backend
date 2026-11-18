@@ -37,7 +37,8 @@ class ExtractionWorker:
             raise ServiceError('PROCESSING_UNAVAILABLE', '실행 접수 결과를 확인할 수 없습니다.', 503)
         logger.info('extraction started role=INFO_EXTRACTOR')
         try:
-            with LeaseHeartbeat(lambda: self.repo.heartbeat(job), seconds=10) as lease:
+            with LeaseHeartbeat(lambda: self.repo.heartbeat(job), seconds=10, worker='extraction',
+                                job_id=job['job_id']) as lease:
                 scope = ExtractionScope(owner=job['owner_user_id'], case_id=str(job['case_id']),
                     revision=job['input_revision'], batch_id=str(job['batch_id']), mail_ids=tuple(job['mail_ids']),
                     repo=self.repo, mailbox=self.mailbox, attachment_repo=self.attachment_repo,
