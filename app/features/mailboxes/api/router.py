@@ -13,7 +13,7 @@ from app.core.request_context import current_request_id
 from app.features.mailboxes.application.auth import google_principal
 from app.features.mailboxes.application.membership import MembershipChecker
 from app.features.mailboxes.application.service import GoogleConnectionService
-from app.features.mailboxes.domain.schemas import GoogleConnection, GoogleConnectRequest
+from app.features.mailboxes.domain.schemas import GoogleConnection, GoogleConnectRequest, GooglePrincipal
 from app.features.mailboxes.infrastructure.crypto import TokenCipher
 from app.features.mailboxes.infrastructure.google import GoogleAPI
 from app.features.mailboxes.infrastructure.repository import MailboxRepository
@@ -52,9 +52,19 @@ def get_membership_checker(request: Request) -> MembershipChecker:
         return request.app.state.membership_checker
 
 
+def dev_principal(settings) -> GooglePrincipal:
+    """DEV 존 로그인 생략용 고정 사용자."""
+    email = (settings.dev_no_auth_email or 'dev@thoner.local').strip().casefold()
+    return GooglePrincipal(str(settings.dev_no_auth_user_id), 'dev-no-auth', email)
+
+
 def require_google_user(request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
     secure=Depends(require_secure_transport)):
+    settings = request.app.state.settings
+    if settings.dev_no_auth:
+        # DEV 존: 로그인 없이 고정 DEV 사용자로 처리한다(운영에서는 시작 단계에서 막힘)
+        return dev_principal(settings)
     if not credentials:
         raise ServiceError('AUTH_REQUIRED', '로그인이 필요합니다.', 401)
     principal = google_principal(credentials.credentials, request.app.state.settings,
