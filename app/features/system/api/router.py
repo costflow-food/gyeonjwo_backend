@@ -39,6 +39,21 @@ def _readiness_probes(request):
         return probes
 
 
+def _dev_ready(request, report, revision):
+    """DEV 존(로그인 생략): 메일·LLM 키 없이 DB만 확인한다. 꺼진 기능은 disabled_features로 알린다."""
+    _, decision_probe = _readiness_probes(request)
+    status, _ = decision_probe.readiness()
+    checks = {'configuration': 'development', 'database': 'ready' if status in {'ready', 'refreshing'} else status}
+    if checks['database'] != 'ready':
+        return _not_ready(checks, revision)
+    missing = set(report['missing'])
+    disabled = [name for name, fields in (
+        ('google_oauth', {'GMAIL_CLIENT_ID', 'GMAIL_CLIENT_SECRET', 'GOOGLE_TOKEN_ENCRYPTION_KEY'}),
+        ('llm', {'LLM_BASE_URL', 'LLM_API_KEY'})) if fields & missing]
+    return {'status': 'ready', 'mode': 'dev-no-auth', 'environment': 'development', 'checks': checks,
+            'degraded_features': [], 'disabled_features': disabled, 'build_revision': revision}
+
+
 @router.get('/ready')
 def ready(request: Request):
     settings=request.app.state.settings
@@ -46,6 +61,8 @@ def ready(request: Request):
     revision = settings.app_build_revision
     checks={'configuration':'not_ready','database':'not_checked','gmail_worker':'not_running'}
     report=configuration_report(settings)
+    if settings.dev_no_auth:
+        return _dev_ready(request, report, revision)
     if report['status']!='ready':
         return _not_ready(checks, revision)
     checks['configuration']='ready'
