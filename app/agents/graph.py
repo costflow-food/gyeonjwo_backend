@@ -183,6 +183,9 @@ def build_graph(run_agent: RunAgent, current_revision: CurrentRevision, nodes: N
     def agent_node(role):
         def node(state):
             if state.get('role_calls', 0) >= MAX_ROLE_CALLS_PER_RUN:
+                # DB에는 GRAPH_FAILED만 남으므로 한도로 끝났다는 사실을 서버 로그에 남긴다(KAN-326)
+                logger.warning('graph role call limit case_id=%s role=%s calls=%s', state['case_id'], role,
+                               state.get('role_calls', 0))
                 return _failed('ROLE_CALL_LIMIT')
             try:
                 quote_ids = latest_quote_ids(role, state)

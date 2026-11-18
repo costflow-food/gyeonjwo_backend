@@ -2116,22 +2116,40 @@ class AgentRunner:
             context = RunContext(context.case_id, context.input_revision, started['agent_run_id'],
                                  started['review_batch_id'], handles=handles)
         log = ToolCallLog()
+        # 실행이 끝난 뒤 후처리(업체명 바꾸기·완료 저장)에서 난 예외도 원인을 남긴다(KAN-326).
+        # stage가 None이면 failure_summary가 정한 단계(FINAL_CHECK·TOOL_LIMIT·TOOL·OTHER)를 쓴다
+        stage = None
         try:
             run = lambda messages: self._run_once(role, agent, data, context, messages, log)
             output, messages = run([HumanMessage(handles.hide_json(data.model_dump_json()))])
             output = self._verified(role, handles, output, messages, run)
+            if role != AgentRole.INFO_EXTRACTOR:      # ①은 KAN-259 범위 밖(테스트 진행 중)
+                stage = 'SUPPLIER_NAMES'
+                output = with_supplier_names(output, handles, context.case_id)
+            if self.runs is not None:      # 06 agent_runs.output_jsonb: 구조화 결과 + 참고한 견적 ID(source_quote_ids)
+                stage = 'FINISH'
+                sources = {'source_quote_ids': list(data.quote_version_ids)} if hasattr(data, 'quote_version_ids') else {}
+                self.runs.finish_agent_run(context.agent_run_id, 'COMPLETED',
+                                           output.model_dump(mode='json') | sources, None)
         except Exception as error:
-            if self.runs is not None:      # 부분 결과: 실패하기 전까지 부른 도구와 그 결과 (07 5.2)
-                self.runs.finish_agent_run(context.agent_run_id, 'FAILED',
-                                           {'partial_tool_calls': log.calls} if log.calls else None,
-                                           failure_summary(error, log.calls))
+            if self.runs is not None:
+                self._save_failure(role, context, log, error, stage)
             raise
-        if role != AgentRole.INFO_EXTRACTOR:      # ①은 KAN-259 범위 밖(테스트 진행 중)
-            output = with_supplier_names(output, handles, context.case_id)
-        if self.runs is not None:      # 06 agent_runs.output_jsonb: 구조화 결과 + 참고한 견적 ID(source_quote_ids)
-            sources = {'source_quote_ids': list(data.quote_version_ids)} if hasattr(data, 'quote_version_ids') else {}
-            self.runs.finish_agent_run(context.agent_run_id, 'COMPLETED', output.model_dump(mode='json') | sources, None)
         return output
+
+    def _save_failure(self, role: AgentRole, context: RunContext, log: 'ToolCallLog', error: Exception,
+                      stage: str | None) -> None:
+        """실패한 역할 실행을 FAILED로 저장한다. 부분 결과는 실패하기 전까지 부른 도구와 그 결과다(07 5.2).
+        저장 자체가 실패해도(완료 저장이 이미 반영됐거나 DB 확인에 걸림) 원래 예외를 덮지 않는다:
+        저장 실패는 코드형 값만 서버 로그에 남기고, 호출자가 원래 예외를 다시 올린다."""
+        summary = failure_summary(error, log.calls) | ({'stage': stage} if stage else {})
+        try:
+            self.runs.finish_agent_run(context.agent_run_id, 'FAILED',
+                                       {'partial_tool_calls': log.calls} if log.calls else None, summary)
+        except Exception as save_error:
+            logger.warning('agent failure not saved role=%s run=%s stage=%s error=%s save_error=%s', role,
+                           context.agent_run_id, summary.get('stage'), summary.get('error_type'),
+                           type(save_error).__name__)
 
     @staticmethod
     def _run_once(role: AgentRole, agent, data: AgentInput, context: RunContext, messages: list,
