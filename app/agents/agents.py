@@ -479,6 +479,9 @@ next_action:
      비용은 금액이나 "무료"·"없음"이 적힌 구절만 답이다. "운송비 별도"처럼 금액이 없으면 원문에 답이 없는 것이다.
      금액이 있으면 "별도"가 붙어도 답이다(예: "운송비: 회당 10,000원 별도" → 답, "운송비 별도" → 답 아님).
      recheck에는 missing_required·unknown_costs에 있는 field만 넣는다. 이미 견적에 있는 값은 원문에 있어도 다시 넣지 않는다.
+     누락은 업체마다 따로 확인한다. 다른 업체의 누락 항목을 이 업체에 넣지 않는다(예: "운송비 없음"이 이미 0원으로
+     견적에 있는 업체는 unknown_costs에 없으니 재추출하지 않는다).
+     mail_id와 source_text는 그 supplier_id가 보낸 메일에서만 가져온다. 다른 업체 메일의 구절은 이 업체의 답이 아니다.
      quantity_per_order_unit은 "박스당 10kg"처럼 중량이 적힌 구절만 답이다. "박스당 54,000원"처럼 단가만 있으면 답이 없는 것이다.
    - 원문에도 답이 없는 필수 누락은 그 field를 MUST_CONFIRM으로 묻는다. 원문에도 금액이 없는 비용은 5번으로 판단한다.
    - 재추출할 항목이 있으면 질문·초안보다 먼저 RECHECK_SOURCE로 끝낸다. 다시 추출된 뒤 이 역할이 다시 실행되어 질문을 보낸다.
@@ -704,6 +707,11 @@ def build_agent(role: AgentRole, model: BaseChatModel, limit: int | None = None,
 class UngroundedOutputError(RuntimeError):
     """최종 응답이 이번 실행의 도구 결과와 맞지 않는다 (예: 저장되지 않은 견적 버전 ID).
     역할별 최종 검사(FINAL_CHECKS)가 실패를 알릴 때 쓴다. AgentRunner가 실행 기록을 FAILED로 닫는다."""
+
+
+class UngroundedRecheckError(UngroundedOutputError):
+    """재추출 근거가 틀렸다(누락·미확인 항목이 아님, 다른 업체 메일, 원문에 없는 인용). 판단이 가끔 흔들려 생기므로
+    AgentRunner가 초안을 만들지 않은 실행이면 새 대화로 한 번 다시 실행한다."""
 
 
 def _tool_results(messages: list, name: str) -> list[dict]:
@@ -993,7 +1001,7 @@ def _grounded_recheck(output: AgentOutput, suppliers: dict, messages: list) -> t
     """재추출 근거를 확인한다: 항목이 그 업체의 누락이고, 인용한 구절이 이번 실행에서 읽은 그 업체 메일에 그대로 있어야 한다.
     반환: (①에 넘길 추출 필드 이름, 확인된 근거). 비용 누락('cost:…')은 cost_terms로 다시 추출한다."""
     if not output.recheck:
-        raise UngroundedOutputError('RECHECK_SOURCE needs recheck evidence quoted from the mail')
+        raise UngroundedRecheckError('RECHECK_SOURCE needs recheck evidence quoted from the mail')
     read = {}
     for result in _tool_results(messages, 'read_mail_evidence'):
         if result.get('status') == 'OK':
@@ -1006,11 +1014,11 @@ def _grounded_recheck(output: AgentOutput, suppliers: dict, messages: list) -> t
         open_fields = set((supplier or {}).get('missing_required', [])) | {
             c['field'] for c in (supplier or {}).get('unknown_costs', [])}
         if item.field not in open_fields:
-            raise UngroundedOutputError(f'{item.supplier_id}.{item.field} is not missing in the comparison')
+            raise UngroundedRecheckError(f'{item.supplier_id}.{item.field} is not missing in the comparison')
         if mail_supplier.get(item.mail_id, item.supplier_id) != item.supplier_id:
-            raise UngroundedOutputError(f'{item.mail_id} is not a mail of {item.supplier_id}')
+            raise UngroundedRecheckError(f'{item.mail_id} is not a mail of {item.supplier_id}')
         if re.sub(r'\s+', '', item.source_text) not in re.sub(r'\s+', '', read.get(item.mail_id, '')):
-            raise UngroundedOutputError(f'quoted text for {item.supplier_id}.{item.field} is not in the mail read')
+            raise UngroundedRecheckError(f'quoted text for {item.supplier_id}.{item.field} is not in the mail read')
         fields.append('cost_terms' if item.field.startswith('cost:') else item.field)
     return [name for name in dict.fromkeys(fields) if name in EXTRACTION_FIELD_NAMES], \
         [item.model_dump() for item in output.recheck]
@@ -2022,6 +2030,11 @@ def with_supplier_names(output: AgentOutput, handles: 'IdHandles', case_id: str)
     return type(output).model_validate(rename(data, top=True))
 
 
+def _drafted(role: AgentRole, log: 'ToolCallLog') -> bool:
+    """이번 호출에서 그 역할의 초안 도구가 실행됐는지. 초안이 저장된 실행은 다시 하지 않는다(초안이 겹친다)."""
+    return any(call['tool'] == DRAFT_TOOLS.get(role) for call in log.calls)
+
+
 class ToolCallLog(BaseCallbackHandler):
     """에이전트 실행 중 부른 도구와 결과를 순서대로 모은다. 실행이 실패하면 AgentRunner가 부분 결과로 남긴다."""
 
@@ -2119,7 +2132,15 @@ class AgentRunner:
         stage = None
         try:
             run = lambda messages: self._run_once(role, agent, data, context, messages, log)
-            output, messages = run([HumanMessage(handles.hide_json(data.model_dump_json()))])
+            first = [HumanMessage(handles.hide_json(data.model_dump_json()))]
+            try:
+                output, messages = run(first)
+            except UngroundedRecheckError as error:
+                if _drafted(role, log):
+                    raise
+                # 재추출 근거 판단은 가끔 흔들린다. 같은 대화에서 고칠 점을 알려도 같은 답을 되풀이해(G23) 새 대화로 다시 한다
+                logger.info('agent rerun after recheck error role=%s error=%s', role, error)
+                output, messages = run(first)
             output = self._verified(role, handles, output, messages, run)
             if role != AgentRole.INFO_EXTRACTOR:      # ①은 KAN-259 범위 밖(테스트 진행 중)
                 stage = 'SUPPLIER_NAMES'
