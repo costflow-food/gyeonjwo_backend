@@ -41,6 +41,14 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
 
+      # PRD 이미지에는 DEV 전용 로그인 생략 코드가 절대 들어가면 안 된다
+      - name: Guard - no DEV login bypass in PRD
+        run: |
+          if git grep -nE "dev_no_auth|DEV_NO_AUTH" -- app scripts tests; then
+            echo "::error::DEV 전용 로그인 생략 코드가 소스에 있습니다. PRD에 배포하지 않습니다."
+            exit 1
+          fi
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
