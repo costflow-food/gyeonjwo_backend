@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import ClassVar, Literal
+from uuid import UUID
 
 from pydantic import HttpUrl, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -8,6 +9,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 ROOT = Path(__file__).resolve().parents[2]
 # OpenAI reasoning effort 값. 모델마다 받는 값이 다르다 (예: gpt-5.4-mini는 minimal·max 없음)
 ReasoningEffort = Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+# 운영(PRD) Supabase 프로젝트 ref. DEV 로그인 생략은 이 DB를 가리키면 절대 켜지지 않는다
+PRODUCTION_SUPABASE_REFS: frozenset[str] = frozenset({'qlabhitzpdiawtbdmlgw'})
 
 
 class Settings(BaseSettings):
@@ -68,10 +71,15 @@ class Settings(BaseSettings):
     app_environment: str = 'development'
     # 조직 단위 Service Key는 기록할 작업 공간 ID가 있어야 한다(LangSmith Settings 화면에서 확인)
     langsmith_workspace_id: str | None = None
+    # DEV 존 전용 로그인 생략: 값이 있으면 모든 API 요청을 이 사용자(auth.users에 있어야 함)로 처리한다.
+    # APP_ENVIRONMENT=development이고 운영 Supabase가 아닐 때만 허용한다(아니면 서버가 시작하지 않는다).
+    # 켜지면 메일·LLM 키가 없어도 /ready가 DB 기준으로 200을 준다(DEV 배포 확인용)
+    dev_no_auth_user_id: UUID | None = None
+    dev_no_auth_email: str = 'dev@thoner.local'
 
     @field_validator('supabase_url', 'llm_base_url', 'supabase_secret_key', 'supabase_publishable_key',
                      'llm_api_key', 'stt_url', 'stt_api_key', 'gmail_client_secret', 'google_token_encryption_key', 'langsmith_api_key',
-                     'langsmith_workspace_id', mode='before')
+                     'langsmith_workspace_id', 'dev_no_auth_user_id', mode='before')
     @classmethod
     def empty_optional_values(cls, value):
         return None if isinstance(value, str) and not value.strip() else value
@@ -102,6 +110,20 @@ class Settings(BaseSettings):
         self.require_server()
         if not self.gmail_client_id or not self.gmail_client_secret or not self.google_token_encryption_key:
             raise RuntimeError('Google OAuth client and token encryption key must be configured')
+
+    @property
+    def dev_no_auth(self) -> bool:
+        """DEV 존 로그인 생략이 켜져 있는지. 시작 검사(require_dev_no_auth_allowed)를 통과한 설정에서만 의미가 있다."""
+        return self.dev_no_auth_user_id is not None
+
+    def require_dev_no_auth_allowed(self) -> None:
+        """로그인 생략이 켜졌는데 운영 환경이거나 운영 DB를 가리키면 시작을 막는다."""
+        if not self.dev_no_auth:
+            return
+        host = self.supabase_url.host.casefold() if self.supabase_url else ''
+        if (self.app_environment.strip().casefold() != 'development'
+                or any(host.startswith(ref + '.') for ref in PRODUCTION_SUPABASE_REFS)):
+            raise RuntimeError('DEV_NO_AUTH_USER_ID is allowed only in the development environment')
 
     @property
     def gmail_push_configured(self):
