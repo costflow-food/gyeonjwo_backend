@@ -109,6 +109,7 @@ def run_graph(*, settings, scope, runner_factory=None, store_factory=GraphStore)
                     'UngroundedOutputError': 'AGENT_UNGROUNDED_OUTPUT',
                     'ValidationError': 'AGENT_VALIDATION_FAILED',
                     'APITimeoutError': 'AGENT_PROVIDER_TIMEOUT',
+                    'OwnershipLost': 'EXTRACTION_LEASE_LOST',
                 }.get(type(error).__name__, 'GRAPH_ROLE_FAILED')
                 logger.warning('graph role_failed start_from=%s role=%s code=%s', mode, str(role), safe)
                 raise RuntimeError(safe) from None
