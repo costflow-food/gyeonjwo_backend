@@ -24,7 +24,11 @@ from app.shared.domain.schemas import StrictModel
 # ─────────────────────────────────────────────
 # 1. 실행 한도 (07 7절)
 # ─────────────────────────────────────────────
-MAX_ROLE_CALLS_PER_RUN = 6
+# 회신 검토 정상 경로는 ①③④⑤ 4회. 되돌림 한 번의 추가 호출은 최대 4회(⑤ RECHECK_SOURCE → ①③④⑤)라서
+# 8이면 어떤 되돌림이든 한 번은 호출 횟수 안에 끝까지 간다(KAN-326). 다만 검토 실행의 300초 시간 한도
+# (agent_graph_review_timeout_seconds)에 먼저 걸리면 GRAPH_TIME_LIMIT로 끝난다.
+# DB begin_case_graph_agent_run의 한도(>=8)와 같은 값이어야 한다
+MAX_ROLE_CALLS_PER_RUN = 8
 MAX_TOOL_CALLS_PER_AGENT_CALL = 8
 # LLM 검증자 검증 횟수(역할 호출 하나당). 마지막 검증도 수정 필요면 마지막 결과로 진행하고 남은 지적을 reason에 적는다
 MAX_VERIFY_ATTEMPTS = 3

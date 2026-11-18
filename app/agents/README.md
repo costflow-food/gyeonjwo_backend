@@ -129,7 +129,8 @@ PLAN ─────────────────────────
 
 | 상황 | 결과 |
 |---|---|
-| 한 실행에서 역할 호출 6회 초과 | FAILED `ROLE_CALL_LIMIT` |
+| 한 실행에서 역할 호출 8회 초과 (DB `begin_case_graph_agent_run`도 같은 한도) | FAILED `ROLE_CALL_LIMIT` (서버 로그 `graph role call limit`) |
+| 역할 실행 뒤 후처리(업체명 바꾸기·완료 저장)에서 예외 | FAILED `{역할}: AGENT_FAILED`, `agent_runs.error_jsonb.stage`가 `SUPPLIER_NAMES`·`FINISH` |
 | 한 에이전트 호출에서 도구 8회 초과 | FAILED `{역할}: AGENT_FAILED` |
 | 모델·도구 예외 | FAILED `{역할}: AGENT_FAILED` |
 | 최종 응답이 `…Out` 형식이 아님 | FAILED `{역할}: INVALID_OUTPUT` |

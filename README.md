@@ -96,7 +96,7 @@ python -m unittest scripts.check_graph_hold scripts.check_workflow_logs scripts.
 | 키 | 뜻 |
 |---|---|
 | `code` | 항상 `AGENT_FAILED` |
-| `stage` | `TOOL`(마지막 도구가 예외) / `TOOL_LIMIT`(도구 호출 한도) / `FINAL_CHECK`(최종 검사 불일치) / `OTHER`(모델·그 밖) |
+| `stage` | `TOOL`(마지막 도구가 예외) / `TOOL_LIMIT`(도구 호출 한도) / `FINAL_CHECK`(최종 검사 불일치) / `OTHER`(모델·그 밖) / `SUPPLIER_NAMES`(역할 실행 뒤 업체명 바꾸기) / `FINISH`(역할 완료 저장) |
 | `error_type` | 예외 클래스 이름 (예: `ServiceError`, `UngroundedOutputError`) |
 | `error_code` | `ServiceError` 코드 (예: `PROCESSING_UNAVAILABLE`) |
 | `db_code`·`db_sqlstate` | DB 함수가 올린 코드형 예외와 SQLSTATE (예: `REVIEW_SUPPLIER_NOT_AUTHORIZED`, `23514`) |
@@ -111,7 +111,7 @@ where work_case_id = '<업무 ID>' order by started_at;
 
 실행 로그 화면(API-28)의 `GRAPH_ROLE_FINISHED` 항목에도 `error_code`·`tool_name`이 함께 보입니다.
 
-예외 메시지 원문까지 봐야 하면 서버 로그를 봅니다. 그래프는 `agent failed role=… error=…` 줄을 남깁니다. Lightsail 컨테이너 서비스 `gyeonjwo-api`(서울, `ap-northeast-2`), 컨테이너 이름 `api`입니다.
+예외 메시지 원문까지 봐야 하면 서버 로그를 봅니다. 그래프는 `agent failed role=… error=…` 줄을 남깁니다. FAILED 저장까지 실패하면 `agent failure not saved role=… run=… stage=…` 줄이, 역할 호출 한도(8회)로 끝나면 `graph role call limit case_id=… role=…` 줄이 남습니다(DB에는 `GRAPH_FAILED`만 남음). Lightsail 컨테이너 서비스 `gyeonjwo-api`(서울, `ap-northeast-2`), 컨테이너 이름 `api`입니다.
 
 - 콘솔: Lightsail → 컨테이너 → `gyeonjwo-api` → 로그(Logs) 탭
 - CLI (Lightsail 읽기 권한이 있는 AWS 자격 증명 필요):

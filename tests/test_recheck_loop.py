@@ -82,10 +82,11 @@ class RecheckLoopGraphTests(unittest.TestCase):
                          AgentRole.INFO_PRIORITY: [recheck(), recheck(field='cost:SHIPPING', source='배송비: 당사 부담'),
                                                    PriorityOut(next_action=N.BUILD_PLANS, reason='진행')],
                          AgentRole.RESPONSE_PLAN: [PLAN_HOLD]})
-        run(script)
-        I, P = AgentRole.INFO_EXTRACTOR, AgentRole.INFO_PRIORITY
-        # 다른 항목의 재확인은 ①로 돌아간다 (그 뒤는 역할 호출 한도 6회에 걸린다)
-        self.assertEqual(script.calls[:5], [I, P, I, P, I])
+        result = run(script)
+        I, P, R = AgentRole.INFO_EXTRACTOR, AgentRole.INFO_PRIORITY, AgentRole.RESPONSE_PLAN
+        # 다른 항목의 재확인은 ①로 돌아간다. 7회째 ④가 보류로 끝난다(역할 호출 한도 8 안)
+        self.assertEqual(script.calls, [I, P, I, P, I, P, R])
+        self.assertEqual(result.status, RunStatus.ON_HOLD)
 
     def test_plan_repeating_a_recheck_stops_with_hold(self):
         plan_recheck = PlanOut(next_action=N.RECHECK_SOURCE, reason='재추출', unknown_fields=['tax_terms'],
