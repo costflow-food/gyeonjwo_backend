@@ -148,6 +148,25 @@ class CounterDraftEvidenceTests(unittest.TestCase):
         self.assertIn('quote_versions', kinds)
 
 
+class CounterDraftQuantityTests(unittest.TestCase):
+    """2026-11-20 E2E(냉동 망고 15회): ⑤가 conditions를 비우면 역제안 초안에 업무 수량이 빠졌다(15/15).
+    수량은 LLM 조건이 아니라 업무 값으로 항상 적는다."""
+
+    def test_draft_states_case_quantity_without_conditions(self):
+        store = broccoli()
+        result = save_counter_offer_draft(store, CONTEXT, '4139', [], alternative(600))
+        self.assertEqual(result['status'], 'DRAFTED')
+        self.assertIn('- 수량: 600kg', store.draft.body_text)
+        lines = store.draft.body_text.splitlines()
+        self.assertEqual(lines.index('- 수량: 600kg') + 1, lines.index('- 단가: 4,139원/kg'))
+
+    def test_thousands_separator_matches_rfq(self):
+        store = Store(2000, quote('incumbent', 4900, 2000, None), quote('alt', 4600, 2000, None), 4500)
+        result = save_counter_offer_draft(store, CONTEXT, '4600', [], alternative(2000))
+        self.assertEqual(result['status'], 'DRAFTED')
+        self.assertIn('- 수량: 2,000kg', store.draft.body_text)
+
+
 class CounterRangeFunctionTests(unittest.TestCase):
     def test_lower_bound_rounds_up_to_whole_won(self):
         self.assertEqual(counter_range(Decimal('4400'), Decimal('4000'), Decimal('4138.3333')),
