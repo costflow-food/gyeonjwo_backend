@@ -860,7 +860,7 @@ def _scaled(value: str, scale: int) -> str:
 
 def _number_pattern(raw: str) -> str:
     """단가 표기의 숫자를 정규화한 원문 줄에서 찾는 패턴. 더 긴 숫자의 일부는 맞지 않는다."""
-    number = re.search(_NUMBER, _nfkc(raw))[0].replace(',', '')
+    number = re.search(_NUMBER, _ocr_spacing(_nfkc(raw)))[0].replace(',', '')     # OCR '3 ,300원' → 3300
     return rf'(?<![\d.]){re.escape(number)}(?!\.?\d)'
 
 

@@ -36,3 +36,8 @@ def test_quantity_with_several_numbers_is_rejected_even_with_unit_code(code):
 def test_ocr_spacing_does_not_join_separate_numbers():
     assert T._ocr_spacing('1,000kg 2,000kg') == '1,000kg 2,000kg'
     assert T._ocr_spacing('12 월 1 ,000kg') == '12 월 1,000kg'
+
+
+def test_price_source_lookup_uses_the_whole_ocr_spaced_number():
+    """원문 줄에서 단가를 찾을 때 '3 ,300원'의 3만 찾아 '컷 3cm' 줄을 잡지 않는다(평가 v2 #163: PRICE_NOTATION_UNKNOWN)."""
+    assert T._number_pattern('3 ,300원') == T._number_pattern('3,300원')
