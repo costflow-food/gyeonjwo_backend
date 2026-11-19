@@ -26,6 +26,9 @@ def case_actions(case, readiness: StartReadiness, resume_readiness: StartReadine
     else:
         reason = ('ACTION_NOT_ALLOWED', '현재 업무 상태에서는 최초 검토를 시작할 수 없습니다.')
     disabled = ([{'action': 'START', 'reason_code': reason[0], 'message': reason[1]}] if reason else [])
+    if case.get('processing_step') == 'NEEDS_INFO':
+        disabled.append({'action': 'RESUME', 'reason_code': 'RESUME_INTEGRATION_REQUIRED',
+                         'message': '정보 보완 후 다시 진행하는 저장 기능이 아직 준비되지 않았습니다.'})
     if case.get('status') == 'Waiting' and case.get('decision') == 'ACCEPT_INCREASE':
         disabled.append({'action': 'RESUME', 'reason_code': 'ACTION_NOT_ALLOWED',
                          'message': '현재 재개 API는 추출 보류 업무의 재개만 지원합니다.'})
