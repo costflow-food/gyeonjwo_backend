@@ -3287,6 +3287,7 @@ COUNTER_BODY = ('안녕하세요. {업체명} 담당자님\n'
                 '보내 주신 {품목} 단가 조정 안내 잘 받았습니다. 검토 결과 아래 조건으로 거래를 이어가기를 요청드립니다.\n\n'
                 '<요청 조건>\n'
                 '- 품목: {품목}\n'
+                '{수량줄}'
                 '- 단가: {목표단가}원/{단위}\n'
                 '{조건목록}\n\n'
                 '{회신기한}에 회신 부탁드립니다.\n'
@@ -3342,7 +3343,10 @@ def save_counter_offer_draft(store: CounterOfferStore, context: RunContext, targ
                 'hint': '조건에 다른 업체의 업체명·단가·물량을 쓰지 않는다. 그 조건을 빼거나 고쳐 같은 목표 단가로 다시 부른다.'}
     style = _read(lambda: store.current_send_settings(context.case_id)) or {}
     lines = '\n'.join(f'- {text}' for text in (mail_value(c, MAIL_VALUE_LIMITS['조건']) for c in conditions) if text)
+    # 역제안은 업무 수량을 전제로 한 단가다. 수량은 LLM 조건이 아니라 업무 값으로 항상 적는다(없으면 줄을 뺀다)
+    quantity = f"- 수량: {_mail_quantity(case['quantity'])}{case.get('unit') or ''}\n" if case.get('quantity') else ''
     subject, body = _mail_text(COUNTER_SUBJECT, COUNTER_BODY, {
+        '수량줄': quantity,
         '회신기한': REPLY_DEADLINE, '품목': recipient_item_name(store, case, numbers['supplier_id']),
         '업체명': contact.get('name') or '담당자', '목표단가': f"{Decimal(checked['target_unit_price']):,}",
         '단위': numbers['unit'] or '', '조건목록': lines, **_style_values(style)})
