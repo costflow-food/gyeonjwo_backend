@@ -64,11 +64,11 @@ def message_metadata(raw):
                 except LookupError:
                     text = decoded.decode('utf-8', errors='replace')
                 if part['mimeType'] == 'text/plain':
-                    texts.append(text)
+                    texts.append(text.replace('\x00', ''))
                 else:
                     parser = HtmlText()
                     parser.feed(text)
-                    html_texts.append(''.join(parser.parts))
+                    html_texts.append(''.join(parser.parts).replace('\x00', ''))
                 if sum(map(len, texts + html_texts)) > 1000000:
                     raise ValueError('Text limit')
             for child in part.get('parts', []):

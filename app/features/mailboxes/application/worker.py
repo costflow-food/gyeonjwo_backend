@@ -135,7 +135,17 @@ class ConnectedMailboxWorker:
                     lease.check()
                     phase = 'save_message'
                     logger.info('gmail message_save_started sync_id=%s', sync_id)
-                    result = self.repo.ingest(job, message, classification, link)
+                    try:
+                        result = self.repo.ingest(job, message, classification, link)
+                    except ServiceError as error:
+                        # Only a confirmed encoding rejection proves this write rolled back.
+                        if error.cause.get('db_sqlstate') != '22021':
+                            raise
+                        lease.check()
+                        self.repo.quarantine_message(job, message_id, 'SOURCE_READ_FAILED')
+                        quarantined += 1
+                        logger.warning('gmail message_quarantined sync_id=%s code=SOURCE_READ_FAILED', sync_id)
+                        continue
                     # Repository validates outcome against a fixed allowlist. Never
                     # include provider IDs, recipients, classification reasons or bodies.
                     outcome = result['outcome']

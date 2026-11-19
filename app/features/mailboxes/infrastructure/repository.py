@@ -4,7 +4,7 @@ Never substitute process memory for these transactions. Raw provider tokens and
 request bodies are never RPC parameters.
 """
 import logging
-from app.core.errors import ServiceError
+from app.core.errors import ServiceError, db_error_cause
 
 logger = logging.getLogger('uvicorn.error.gmail_receive')
 SYNC_MAX_ATTEMPTS = 5
@@ -21,7 +21,8 @@ class MailboxRepository:
             if getattr(error,'code',None) == 'PGRST202':
                 raise ServiceError('MAILBOX_SCHEMA_REQUIRED','계정 연결용 DB 함수를 적용해야 합니다.',503,
                                    retryable=False,next_action='CONTACT_SERVER_ADMIN') from None
-            raise ServiceError('MAILBOX_STORAGE_UNAVAILABLE', '메일함 저장소를 확인할 수 없습니다.', 503) from None
+            raise ServiceError('MAILBOX_STORAGE_UNAVAILABLE', '메일함 저장소를 확인할 수 없습니다.', 503,
+                               cause=db_error_cause(error)) from None
 
     def claim(self, user_id, key, body_hash):
         result = self.call('claim_google_connection_request', p_user_id=user_id, p_key=key, p_body_hash=body_hash)
