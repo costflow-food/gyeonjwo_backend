@@ -576,14 +576,20 @@ def _compact(text: str) -> str:
     return re.sub(r'\s+', '', _nfkc(text))
 
 
+def _ocr_spacing(text: str) -> str:
+    """스캔 OCR이 숫자 안 구분 기호 앞뒤에 넣은 공백을 뺀다('9 ,600원' → '9,600원', '1 . 5kg' → '1.5kg').
+    숫자 사이의 쉼표·점에만 적용해 서로 다른 숫자를 붙이지 않는다."""
+    return re.sub(r'(?<=\d)\s*([,.])\s*(?=\d)', r'\1', text)
+
+
 def _quantity_text(raw: str) -> str:
-    return _QUANTITY_WORDS.sub('', _nfkc(raw).strip()).strip()
+    return _QUANTITY_WORDS.sub('', _ocr_spacing(_nfkc(raw)).strip()).strip()
 
 
 def _date(raw: str, field_name: str) -> str:
     """연도가 있는 날짜만 받는다. '2026년 12월 1일', '2026-12-01', '2026. 12. 1.', 'December 20, 2026',
     뒤의 '까지·부터'는 허용."""
-    text = _DATE_SUFFIX.sub('', _nfkc(raw).strip())
+    text = _DATE_SUFFIX.sub('', re.sub(r'\s+,', ',', _nfkc(raw)).strip())     # OCR: 'December 1 , 2026'
     english = _ENGLISH_DATE.fullmatch(text)
     if english and (month := _MONTHS.get((english['m1'] or english['m2']).lower())):
         try:
@@ -713,8 +719,8 @@ def _unit(raw: str, field_name: str, code: str | None = None) -> str:
 
 def _price(raw: str, field_name: str) -> tuple[str, str | None]:
     """단가·금액을 (소수 문자열, 외화 통화 코드)로 읽는다. '3.20 USD', 'USD 3.10', '$3.20'은 통화를 나누고,
-    그 밖에는 원화 표기만 받는다. '9,700천원'·'970만원'은 배수를 곱한다."""
-    raw = _nfkc(raw)
+    그 밖에는 원화 표기만 받는다. '9,700천원'·'970만원'은 배수를 곱한다. OCR 공백('9 ,600원')은 뺀다."""
+    raw = _ocr_spacing(_nfkc(raw))
     if scaled := _SCALED_PRICE.fullmatch(raw):
         return _scaled(str(decimal_value(scaled[1] + scaled[3], field_name)), _SCALES[scaled[2]]), None
     match = _FOREIGN_PRICE.fullmatch(raw.strip())
@@ -727,7 +733,9 @@ def _quantity(raw: str, field_name: str, code: str | None = None) -> tuple[str, 
     """수량을 (소수 문자열, 단위)로 읽는다. '최소 20박스' → ('20', 'box'), '박스당 10kg' → ('10', 'kg'), '300' → ('300', None).
     code는 _unit과 같다. 단위 표기가 없으면 쓰지 않는다."""
     match = re.fullmatch(rf'({_NUMBER})\s*(.*)', _quantity_text(raw))
-    if match is None:
+    # 단위 자리에 숫자가 또 있으면('12월 공급 계획 물량 1,000kg') 앞 숫자가 수량인지 알 수 없다. unit_code로 단위를
+    # 보정하기 전에 거절해 LLM이 숫자와 단위만 다시 보내게 한다(평가 v2 #179: 12kg로 저장됨)
+    if match is None or re.search(r'\d', match[2]):
         raise ReviewRequired('INVALID_NUMBER', f'{field_name}의 숫자와 단위를 확인할 수 없습니다.', field_name)
     try:
         unit = _unit(match[2], field_name, code) if match[2] else None
