@@ -26,7 +26,9 @@ class Settings(BaseSettings):
     llm_classification_model: ClassVar[str] = 'gpt-6-luna'
     llm_classification_reasoning_effort: ClassVar[ReasoningEffort] = 'low'
     # 에이전트 역할별 모델. 없는 역할은 llm_model을 쓴다
-    llm_role_models: ClassVar[dict[str, str]] = {}
+    # ① 정보 추출은 gpt-6.1-terra(2026-11-19). 평가에서 luna medium은 인용된 이전 메일의 값을 현재 견적으로 저장하는 실수가 있었고
+    # (정확도 세트 181/190), terra medium은 시험 세트 2회 160/160·정확도 세트 190/190이었다. 업무당 비용은 약 $0.009 → $0.04
+    llm_role_models: ClassVar[dict[str, str]] = {'INFO_EXTRACTOR': 'gpt-6.1-terra'}
     # 에이전트 역할별 추론 수준. 없는 역할은 llm_reasoning_effort(None이면 보내지 않음)
     llm_reasoning_effort: ClassVar[ReasoningEffort | None] = None
     llm_role_reasoning_efforts: ClassVar[dict[str, ReasoningEffort]] = {
