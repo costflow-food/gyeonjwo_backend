@@ -15,6 +15,17 @@ from app.core.logs import error_origin
 logger = logging.getLogger('uvicorn.error.case_graph')
 
 
+def input_changed(repo, job):
+    """job을 예약한 뒤 업무 입력(revision·batch)이 바뀌었는지. 확인하지 못하면 False(원래 코드로 기록한다)."""
+    check = getattr(repo, 'input_changed', None)
+    if check is None:
+        return False
+    try:
+        return check(job) is True
+    except Exception:
+        return False
+
+
 class GraphWorker(ExtractionWorker):
     def __init__(self, *args, on_drafts_ready=None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -33,8 +44,16 @@ class GraphWorker(ExtractionWorker):
         elif isinstance(error, ServiceError):
             code = {'REVISION_CONFLICT': 'INPUT_REVISION_CHANGED', 'EXTRACTION_TIME_LIMIT': 'GRAPH_TIME_LIMIT',
                     'WORKER_INTERRUPTED': 'WORKER_INTERRUPTED'}.get(error.code, 'GRAPH_FAILED')
+        if (isinstance(error, OwnershipLost) or code == 'GRAPH_FAILED') and input_changed(self.repo, job):
+            # 실행 중 새 회신 등으로 입력이 바뀐 경우(KAN-336). DB의 임대 갱신(heartbeat_case_graph_run)은 revision이
+            # 바뀌어도 false를 돌려줘 임대 상실과 구분되지 않고, 역할 안에서 난 REVISION_CONFLICT도 그래프가 일반 실패로
+            # 바꾼다. 실패가 아니라 STALE로 남겨야 통계가 맞고, 이 job이 읽지 못한 회신을 다음 예약이 다시 넘긴다
+            # (DB internal.stale_reply_needs_retry는 STALE·INPUT_REVISION_CHANGED인 job의 회신만 다시 넘긴다. KAN-338)
+            logger.info('graph input changed during run; recorded as INPUT_REVISION_CHANGED instead of %s job_id=%s',
+                        code, job.get('job_id'))
+            code = 'INPUT_REVISION_CHANGED'
         recorded = self.repo.fail(job, code)
-        if isinstance(error, OwnershipLost) and recorded is not True:
+        if isinstance(error, OwnershipLost) and code == 'WORKER_INTERRUPTED' and recorded is not True:
             # fail_case_graph_run은 DB 임대가 아직 남아 있으면 WORKER_INTERRUPTED를 받지 않는다(false). 상실을 판단한
             # 시점(갱신 실패 60초·DB가 소유권 변경을 알림)에는 임대가 대개 남아 있어, 그대로 두면 만료 뒤
             # recover_case_graph_runs가 정리할 때까지 최대 약 2분 job이 PROCESSING으로 남아 같은 업무의 회신 검토 예약이

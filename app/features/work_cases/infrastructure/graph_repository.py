@@ -113,6 +113,15 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
     def fail(self, job, code):
         return self.call('fail_case_graph_run', p_job=job['job_id'], p_token=job['claim_token'], p_code=code)
 
+    def input_changed(self, job):
+        """업무의 현재 revision·batch가 이 job이 예약된 때와 다른지(context()가 REVISION_CONFLICT로 보는 조건과 같다)."""
+        rows = (self.client.table('work_cases').select('input_revision,current_batch_id')
+                .eq('owner_user_id', str(job['owner_user_id'])).eq('id', str(job['case_id'])).limit(1).execute().data)
+        if not isinstance(rows, list) or len(rows) != 1:
+            return False
+        row = rows[0]
+        return row['input_revision'] != job['input_revision'] or str(row.get('current_batch_id')) != str(job['batch_id'])
+
     def recover(self):
         result = self.call('recover_case_graph_runs')
         # Explicit graph-mode rollout may continue already-authorized Running
