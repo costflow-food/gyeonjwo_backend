@@ -1,7 +1,38 @@
-# 견줘 Python 백엔드
+# Thoner Python 백엔드
 
 공급업체의 단가 인상 메일을 받아 대체 업체 견적 요청, 회신 비교, 구매안·역제안 작성까지 이어 주는 FastAPI 서버입니다.
 Gmail로 메일을 받고, LangGraph 에이전트(①~⑤)가 업무를 진행하며, 결과는 Supabase(PostgreSQL)에 저장합니다.
+
+## Thoner 전체 구성
+
+Thoner는 구매 담당자가 공급업체의 단가 인상 통보를 받았을 때, 대체 업체 견적 요청부터 회신 비교, 구매안과
+역제안 초안까지 이어 주는 구매 견적 검토 AI 서비스입니다. 메일 발송과 최종 결정은 담당자가 화면에서 확인하고 승인합니다.
+서비스는 두 저장소로 나뉩니다.
+
+| 저장소 | 맡은 일 | 기술 | 배포 |
+|---|---|---|---|
+| [gyeonjwo_frontend](https://github.com/costflow-food/gyeonjwo_frontend) | 업무 큐, 원문·첨부 보기, 검토 카드, 메일 초안 확인·발송 승인, 거래처, 실행 로그 화면 | Flutter Web, Riverpod | Vercel |
+| gyeonjwo_backend (이 저장소) | API, Gmail 수신·발송, 원문·첨부 읽기, 에이전트 ①~⑤와 LLM 검증자, 저장 | FastAPI, LangGraph, Supabase | AWS Lightsail |
+
+```
+담당자(Chrome) ─ Flutter Web ─ HTTPS + Supabase 로그인 토큰 ─ FastAPI ─┬─ Supabase(PostgreSQL)
+                   └ Supabase Auth (Google 로그인)                       ├─ Gmail API (메일 수신·발송)
+                                                                         └─ LLM API (에이전트 ①~⑤, 검증자)
+```
+
+- 프론트는 Supabase Auth로 Google 로그인을 하고, 그 토큰을 `Authorization: Bearer`로 붙여 이 서버의 API를 부릅니다.
+  프론트에는 공개해도 되는 값(Supabase publishable 키, API 주소)만 들어가고, 비밀 키는 모두 이 서버의 환경변수에 있습니다.
+- 에이전트 다섯 역할은 아래와 같습니다. 흐름과 계약은 [에이전트 작업 안내](app/agents/README.md)에 있습니다.
+
+| 역할 | 하는 일 |
+|---|---|
+| ① 정보 추출 | 메일 본문·첨부에서 업체·품목·단가·조건을 읽어 견적으로 저장 |
+| ② 후보 추천 | 대체 업체 후보를 고르고 견적 요청(RFQ) 메일 초안 작성 |
+| ③ 확인 우선순위 | 회신을 보고 업체에 더 물을 것을 골라 확인 메일 초안을 쓰거나, 구매안 단계로 넘김 |
+| ④ 대응 구매안 | 유지·전환·분할 구매안을 만들고 도구로 금액 계산 |
+| ⑤ 역제안 | 기존 업체에 보낼 가격 역제안 초안 작성 |
+
+- 금액 계산은 LLM이 아니라 도구(Decimal)가 합니다. 초안과 최종 응답은 코드 규칙과 LLM 검증자를 거친 뒤 저장됩니다.
 
 ## 실행 (로컬)
 
@@ -68,7 +99,7 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 | `app/agents/` | LangGraph 그래프, 에이전트 ①~⑤ 프롬프트·도구·계약, LLM 검증자. [에이전트 작업 안내](app/agents/README.md) |
 | `app/features/<기능>/` | 기능별 `api` / `application` / `domain` / `infrastructure` |
 | `app/shared/` | 여러 기능이 쓰는 도메인 규칙, DB 클라이언트·저장소, LLM 어댑터 |
-| `scripts/` | 연결 점검(`check_connection.py`, 서버가 읽는 테이블 접근 확인), 로컬 회귀 점검(`check_*.py`), 서버 실행 스크립트 |
+| `scripts/` | 연결 점검(`check_connection.py`, 서버가 읽는 테이블 접근 확인), 로컬 회귀 점검(`check_*.py`), 에이전트 평가(`agent_eval/`), 서버 실행 스크립트 |
 
 기능 폴더:
 
@@ -87,6 +118,17 @@ Supabase·Gmail·LLM 실호출 없이 그래프 보류 코드, 로그 커서, �
 
 ```bash
 python -m unittest scripts.check_graph_hold scripts.check_workflow_logs scripts.check_review_queue scripts.check_env_names
+```
+
+### 에이전트 평가 (`scripts/agent_eval`)
+
+에이전트 ②~⑤를 평가 시나리오 201개로 실행하고 자동 채점합니다. 서비스와 같은 `AgentRunner`(프롬프트·도구·최종 검사·LLM 검증자)를
+그대로 쓰고, DB 대신 시나리오마다 새로 만든 메모리 저장소를 씁니다. 시나리오마다 새 프로세스에서 돌아 앞 시나리오의 결과가
+다음 시나리오에 섞이지 않습니다. 실행 방법과 측정 기록은 [scripts/agent_eval/README.md](scripts/agent_eval/README.md)에 있습니다.
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.agent_eval.oracle   # API 없이 시나리오 정답과 도구 계산이 맞는지 점검
+.\.venv\Scripts\python.exe -m scripts.agent_eval.smoke    # API 없이 실행기 배선 점검
 ```
 
 ### 에이전트 실패 원인 찾기
