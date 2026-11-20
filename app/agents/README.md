@@ -1,17 +1,17 @@
 # 에이전트 작업 안내
 
-Notion [07 에이전트 구성도](https://app.notion.com/p/b30311ce9342825286b1815d97c03672)의 다섯 역할을 LangGraph로 연결한 뼈대다.
-그래프 흐름, 입출력 계약, 한도와 오류 처리는 이미 구현되어 있고 테스트도 통과한다.
-아직 비어 있는 부분은 **역할별 프롬프트, 도구, 코드 노드**다.
+Notion [07 에이전트 구성도](https://app.notion.com/p/b30311ce9342825286b1815d97c03672)의 다섯 역할을 LangGraph로 연결한 구현이다.
+그래프 흐름, 입출력 계약, 역할별 프롬프트·도구, 코드 노드 4개, LLM 검증자, 한도와 오류 처리가 들어 있다.
+역할별 평가는 [scripts/agent_eval](../../scripts/agent_eval/README.md)로 한다.
 
 ## 브랜치
 
 ```bash
 git fetch origin
-git switch -c feature/agents-<역할> origin/feature/agents   # 예: feature/agents-extractor
+git switch -c fix/<작업> origin/dev   # 예: fix/counter-offer-quantity
 ```
 
-- PR은 `feature/agents`로 올린다(`main`이 아니다). 오케스트레이션 담당이 리뷰하고 합친 뒤 `main`에 올린다.
+- PR은 `dev`로 올린다. `dev` → `main` PR이 합쳐지면 서버가 배포된다(루트 README "배포").
 - 자기 역할의 구역만 고친다. `schemas.py`와 `graph.py`는 수정하지 않는다(아래 "계약 변경" 참고).
 
 ## 파일과 담당
@@ -22,7 +22,7 @@ git switch -c feature/agents-<역할> origin/feature/agents   # 예: feature/age
 | `graph.py` | 오케스트레이션 | 노드 연결, `next_action` 분기, 한도·STALE·실패 처리 |
 | `agents.py` | 역할 담당 | `PROMPTS[역할]`의 지시문 |
 | `tools.py` | 역할 담당 | 파일 맨 아래 역할별 구역에 `@register` 도구 추가 |
-| `nodes.py` | 정해야 함 | 코드 노드 4개: 전처리, 구매안 검증, 가격 검증, 검토 카드 |
+| `nodes.py` | 오케스트레이션 | 코드 노드 4개: 전처리, 구매안 검증, 가격 검증, 검토 카드 |
 
 ## 흐름
 
@@ -99,7 +99,7 @@ PLAN ─────────────────────────
   - LLM이 넘긴 인자를 믿지 말고 업무 범위와 revision을 도구 안에서 검사한다.
   - 금액 계산은 도구가 Decimal로 한다.
   - 결과는 작게 돌려준다.
-- 공통 도구 3개(`get_case_context`, `read_mail_evidence`, `save_agent_result`)는 한 사람이 먼저 만든다. 누가 만들지 정하고 시작한다.
+- 공통 도구 3개(`get_case_context`, `read_mail_evidence`, `save_agent_result`)는 모든 역할이 같이 쓴다.
 - 초안 도구는 역할별로 나눈다: `create_rfq_draft`(②)·`create_clarification_draft`(③)·`create_counter_offer_draft`(⑤). 저장은 같은 `mail_drafts` 테이블.
 
 #### 공통 도구 계약 (구현됨, `feature/agents-1-2`)
@@ -142,8 +142,8 @@ PLAN ─────────────────────────
 
 `schemas.py`의 필드, `next_action`, 도구 목록을 바꿔야 하면 직접 고치지 않는다. 오케스트레이션 담당에게 요청하거나 따로 PR을 올린다. 이 계약이 바뀌면 그래프와 다른 역할이 같이 깨지기 때문이다.
 
-## 아직 정하지 않은 것
+## 백엔드와 이어지는 곳
 
-- `nodes.py` 코드 노드 담당과 구현
-- `ProcessingStep`을 `work_cases`로 옮길지 여부(PR #3과 맞춤)
-- 백엔드에서 `run_case`를 호출하는 위치(업무 실행 API·워커)
+- 그래프 워커(`app/features/work_cases/application/graph_worker.py`)가 업무를 집어
+  `graph_boundary.run_graph`로 `run_case`를 부른다.
+- 그래프가 멈춘 단계는 `schemas.ProcessingStep`으로 결과(`processing_step`)에 담겨 백엔드로 돌아간다.

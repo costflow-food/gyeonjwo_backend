@@ -9,6 +9,8 @@ __pycache__/
 logs/
 .local-tmp/
 models/
+# 에이전트 평가 실행 결과(scripts/agent_eval). 발표·제출용 요약은 README에 옮겨 적는다
+eval_results/
 
 # 테스트·작업 문서는 저장소에서 추적하지 않고 각자 로컬에 둔다 (fd04466 규칙)
 /tests/
