@@ -1,6 +1,6 @@
 """One mutation RPC per transaction. No multi-request REST pseudo-transactions."""
 from threading import Lock
-from time import monotonic
+from time import monotonic, sleep
 
 from app.core.errors import ServiceError, db_error_cause
 from app.shared.infrastructure.db.read_retry import read_with_retry
@@ -8,6 +8,11 @@ from app.shared.infrastructure.db.read_retry import read_with_retry
 # 회신 검토 초안 저장(stage_case_graph_review_draft)이 업체 단위로 거절할 때의 DB 예외 코드.
 # 다른 RPC 오류처럼 PROCESSING_UNAVAILABLE로 뭉개면 도구가 그 업체만 건너뛰지 못하고 역할 전체가 실패한다
 DRAFT_REJECTIONS = frozenset({'REVIEW_SUPPLIER_NOT_AUTHORIZED'})
+# DB가 문장을 취소해 아무것도 저장되지 않은 것이 확실한 일시 오류(KAN-329). 한 번만 다시 부른다.
+#   57014 statement timeout·취소, 55P03 lock timeout, 40P01 deadlock
+# 응답 없음·연결 끊김은 저장됐는지 알 수 없으므로 여기 넣지 않는다.
+TRANSIENT_SQLSTATES = frozenset({'57014', '55P03', '40P01'})
+RETRY_PAUSE_SECONDS = 0.5
 
 
 class CaseRuntimeRepository:
@@ -16,9 +21,18 @@ class CaseRuntimeRepository:
         self._schema_lock = Lock()
         self._schema_cache = None
 
+    def execute(self, name, params):
+        try:
+            return self.client.rpc(name, params).execute().data
+        except Exception as error:
+            if getattr(error, 'code', None) not in TRANSIENT_SQLSTATES:
+                raise
+        sleep(RETRY_PAUSE_SECONDS)
+        return self.client.rpc(name, params).execute().data
+
     def call(self, name, **params):
         try:
-            result = self.client.rpc(name, params).execute().data
+            result = self.execute(name, params)
         except Exception as error:
             if getattr(error, 'code', None) == 'PGRST202':
                 raise ServiceError('EXTRACTION_SCHEMA_REQUIRED', 'Supabase의 업무 실행·저장 함수 구성을 확인해야 합니다.', 503,
