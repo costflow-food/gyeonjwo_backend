@@ -3,6 +3,7 @@ from threading import Lock
 from time import monotonic
 
 from app.core.errors import ServiceError, db_error_cause
+from app.shared.infrastructure.db.read_retry import read_with_retry
 
 # 회신 검토 초안 저장(stage_case_graph_review_draft)이 업체 단위로 거절할 때의 DB 예외 코드.
 # 다른 RPC 오류처럼 PROCESSING_UNAVAILABLE로 뭉개면 도구가 그 업체만 건너뛰지 못하고 역할 전체가 실패한다
@@ -209,8 +210,10 @@ class CaseRuntimeRepository:
 
     def revision(self, owner, case_id):
         try:
-            rows = (self.client.table('work_cases').select('input_revision').eq('owner_user_id', owner)
-                    .eq('id', str(case_id)).limit(1).execute().data)
+            # 역할이 끝날 때마다 거치는 조회다. 일시 오류 한 번으로 실행이 실패하지 않게 다시 읽는다(KAN-339)
+            rows = read_with_retry(lambda: self.client.table('work_cases').select('input_revision')
+                                   .eq('owner_user_id', owner).eq('id', str(case_id)).limit(1).execute().data,
+                                   label='input_revision')
         except Exception:
             raise ServiceError('PROCESSING_UNAVAILABLE', '입력 버전을 확인할 수 없습니다.', 503) from None
         if not rows:

@@ -55,9 +55,14 @@ EXTRACTOR_SEGMENTS = (
 '''),
     ('*', '''
 가장 먼저 지킬 규칙 (위에서부터 순서대로 판단한다):
-1. 저장할지 먼저 정한다. 업무 품목(get_case_context의 item_name)의 단가가 메일·첨부에 숫자로 적혀 있을 때만 저장한다.
-   물량별 단가만 있어도 저장한다. 아래면 store_structured_mail을 부르지 않고 HOLD한다.
-   - 단가가 없다 ("추후 안내", "견적서 송부 예정", 접수 안내)
+1. 저장할지 먼저 정한다. 업무 품목(get_case_context의 item_name)의 단가가 메일·첨부에 숫자로 적혀 있으면 저장한다.
+   물량별 단가만 있어도 저장한다.
+   단가가 없어도 업무 품목의 비용(운송비·배송비·하차비 등)·공급 가능량·납기·세금 조건이 하나라도 적혀 있으면 저장한다
+   (확인 요청에 답한 회신, 정정 메일. 예: "배송비는 납품 1회당 520,000원 별도입니다"). 적힌 값만 store_structured_mail로
+   보낸다(비용은 cost_terms). 단가 등 나머지는 도구가 같은 업체의 이전 견적에서 이어받는다. 이전 견적이 없는 업체면 도구가
+   NO_QUOTE_DATA로 거절하고, 그때 HOLD한다. 이전 견적이 있는지를 스스로 짐작해서 도구를 부르지 않고 HOLD하지 않는다.
+   아래면 store_structured_mail을 부르지 않고 HOLD한다.
+   - 단가도 위의 견적 조건도 없다 ("추후 안내", "견적서 송부 예정", 접수 안내)
 '''),
     ('MAIL', '''   본문에 단가가 없고 "첨부 참고"처럼 첨부가 있으면, 첨부를 읽기 전에는 단가가 없다고 정하지 않는다.
    첨부 status가 NO_TEXT(글자가 없는 스캔본)여도 read_mail_evidence로 그 쪽을 읽는다. 서버가 그림을 글자로 읽어(OCR) 준다.
@@ -727,6 +732,49 @@ def _tool_results(messages: list, name: str) -> list[dict]:
 
 
 _STORED_AFTER_HOLD = '견적을 저장했습니다. 확인이 필요한 항목은 검토 화면에서 확인해 주세요.'
+
+
+# ①이 저장 도구를 한 번도 부르지 않고 NO_QUOTE_DATA로 보류했는데, 그 메일을 보낸 업체에 이전 견적이 있을 때 돌려주는 안내.
+# 코드가 저장소에서 확인한 사실이라 반박할 수 없게 쓴다(검증자 지적은 "틀렸으면 그대로 둔다"라 ①이 같은 답을 되풀이했다)
+_RESEND_REPLY_TERMS = (
+    '코드 확인에서 아래 문제가 나왔다. {mails}을(를) 보낸 업체는 이 업무에 이전 견적이 저장돼 있다. '
+    '그래서 이 메일에 단가가 없어도 견적 없음(NO_QUOTE_DATA)이 아니다. 이 메일에 적힌 비용(운송비·하차비 등)·공급 가능량·'
+    '납기·세금 조건은 그 견적을 바꾸는 값이다. 이 메일에 적힌 값만 store_structured_mail로 보낸다(비용은 cost_terms 인자, '
+    '원문에 회사명이 있으면 supplier_name도 함께). 단가 등 나머지는 도구가 이전 견적에서 이어받는다. '
+    '도구가 거절하면 그 결과와 hints대로 처리한다. 이 메일에 저장할 값이 하나도 없을 때(인사·접수 안내뿐)만 '
+    'NO_QUOTE_DATA로 다시 답한다. reason에는 이 확인 과정을 쓰지 않는다.')
+
+
+def unsent_reply_mails(role: AgentRole, data: AgentInput, output: AgentOutput, messages: list, store=None) -> list[str]:
+    """①이 견적 저장을 시도하지 않고 NO_QUOTE_DATA로 보류한 메일 가운데, 보낸 업체에 이전 견적이 있는 메일 ID.
+
+    확인요청 회신처럼 비용 조건만 답한 메일은 같은 업체의 이전 견적을 바꾸는 견적이고, 저장 도구가 나머지 값을 이어받는다.
+    그런데 LLM은 업체별 이전 견적을 구분하지 못해 "단가 없음 → 견적 아님"으로 바로 보류할 때가 있다(KAN-337: 배송비만 답한
+    회신을 두 번 연속 NO_QUOTE_DATA로 보류. 검증자가 두 번 지적해도 저장 도구를 부르지 않았다).
+    도구를 한 번이라도 불렀으면(저장·거절) 도구 결과가 판단 근거이므로 해당하지 않는다. 재추출(recheck)도 제외한다."""
+    if (role != AgentRole.INFO_EXTRACTOR or output.next_action != 'HOLD' or output.hold is None
+            or output.hold.code != 'NO_QUOTE_DATA' or getattr(data, 'recheck_fields', None)):
+        return []
+    if any(isinstance(message, ToolMessage) and message.name == 'store_structured_mail' for message in messages):
+        return []
+    if store is None:
+        from app.agents import tools as agent_tools
+        store = agent_tools._quote_store
+    if store is None:
+        return []
+    case_id = str(data.case_id)
+    suppliers = {str(mail['mail_id']): mail.get('supplier_id') for mail in store.list_case_mails(case_id)}
+    quoted = {}
+    found = []
+    for mail_id in map(str, data.mail_ids):
+        supplier_id = suppliers.get(mail_id)
+        if supplier_id is None:
+            continue
+        if supplier_id not in quoted:
+            quoted[supplier_id] = store.latest_quote_version(case_id, supplier_id) is not None
+        if quoted[supplier_id]:
+            found.append(mail_id)
+    return found
 
 
 def check_extraction(role: AgentRole, data: AgentInput, context: RunContext, output: AgentOutput,
@@ -2141,6 +2189,7 @@ class AgentRunner:
                 # 재추출 근거 판단은 가끔 흔들린다. 같은 대화에서 고칠 점을 알려도 같은 답을 되풀이해(G23) 새 대화로 다시 한다
                 logger.info('agent rerun after recheck error role=%s error=%s', role, error)
                 output, messages = run(first)
+            output, messages = self._resent_reply_terms(role, data, handles, output, messages, run)
             output = self._verified(role, handles, output, messages, run)
             if role != AgentRole.INFO_EXTRACTOR:      # ①은 KAN-259 범위 밖(테스트 진행 중)
                 stage = 'SUPPLIER_NAMES'
@@ -2155,6 +2204,20 @@ class AgentRunner:
                 self._save_failure(role, context, log, error, stage)
             raise
         return output
+
+    @staticmethod
+    def _resent_reply_terms(role: AgentRole, data: AgentInput, handles: 'IdHandles', output: AgentOutput,
+                            messages: list, run: Callable[[list], tuple[AgentOutput, list]]) -> tuple[AgentOutput, list]:
+        """①이 이전 견적이 있는 업체의 회신을 저장 도구에 보내 보지 않고 NO_QUOTE_DATA로 보류했으면, 그 사실을 알려
+        같은 대화에서 한 번 더 실행한다(unsent_reply_mails). 두 번째 결과는 그대로 받는다(정말 저장할 값이 없는 회신일 수 있다).
+        해당하지 않으면 받은 결과를 그대로 돌려준다. 다시 실행하다 난 예외는 올린다(그 사이 견적이 저장됐을 수 있어
+        처음의 보류로 끝내면 서버가 HOLD_AFTER_QUOTE_STORED로 거절한다)."""
+        mail_ids = unsent_reply_mails(role, data, output, messages)
+        if not mail_ids:
+            return output, messages
+        logger.info('agent rerun: reply terms not sent to store role=%s mails=%s', role, len(mail_ids))
+        labels = handles.hide({'mail_ids': mail_ids})['mail_ids']
+        return run([*messages, HumanMessage(_RESEND_REPLY_TERMS.format(mails='·'.join(labels)))])
 
     def _save_failure(self, role: AgentRole, context: RunContext, log: 'ToolCallLog', error: Exception,
                       stage: str | None) -> None:
