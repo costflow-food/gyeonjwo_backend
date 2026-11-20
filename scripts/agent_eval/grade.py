@@ -39,7 +39,7 @@ DUE_Q, NO_DUE_Q = '요청 납기일 납품 가능 여부', '납품 가능 일정
 PRIORITY = {'MUST_CONFIRM': 'MUST', 'CAN_CHANGE_CHOICE': 'CAN', 'LOW_VALUE': 'LOW'}
 ENGLISH_CODE = re.compile(r'\b[A-Z]{2,}(?:_[A-Z]+)+\b|supplier_item_id|quote_version_id')
 # "대안보다 비싸다"는 사실을 적었는지: 활용형(비쌉니다)·같은 뜻(비용이 높습니다·초과) 포함
-PRICIER = re.compile(r'비싸|비쌉|비쌀|비싼|높습|높아|높은|높다|높게|초과|웃돌|상회')
+PRICIER = re.compile(r'비싸|비쌉|비쌀|비싼|높습|높아|높은|높다|높게|높을|높으|초과|웃돌|상회')
 AMOUNT = re.compile(r'\d{1,3}(?:,\d{3})+\s*원|\d{4,}\s*원')
 RUN_ERRORS = ('AuthenticationError', 'RateLimitError', 'APIConnectionError', 'APITimeoutError', 'PermissionDeniedError',
               'InternalServerError', 'NotFoundError', 'BadRequestError', 'KeyError: \'EVAL_OPENAI_API_KEY\'',
