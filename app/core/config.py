@@ -28,7 +28,11 @@ class Settings(BaseSettings):
     # 에이전트 역할별 모델. 없는 역할은 llm_model을 쓴다
     # ① 정보 추출은 gpt-6.1-terra(2026-11-19). 평가에서 luna medium은 인용된 이전 메일의 값을 현재 견적으로 저장하는 실수가 있었고
     # (정확도 세트 181/190), terra medium은 시험 세트 2회 160/160·정확도 세트 190/190이었다. 업무당 비용은 약 $0.009 → $0.04
-    llm_role_models: ClassVar[dict[str, str]] = {'INFO_EXTRACTOR': 'gpt-6.1-terra'}
+    # ②~⑤도 gpt-6.1-terra(2026-11-20). scripts/agent_eval 시나리오 201개 × 3회(검증자 켬)에서 luna 575/591(97.3%),
+    # terra 588/591(99.5%)이었고, 3회 사이에 결과가 갈린 시나리오가 luna 5개·terra 0개였다. 평가 비용은 1회분 약 $0.58 → $1.10
+    llm_role_models: ClassVar[dict[str, str]] = {
+        'INFO_EXTRACTOR': 'gpt-6.1-terra', 'CANDIDATE': 'gpt-6.1-terra', 'INFO_PRIORITY': 'gpt-6.1-terra',
+        'RESPONSE_PLAN': 'gpt-6.1-terra', 'COUNTER_OFFER': 'gpt-6.1-terra'}
     # 에이전트 역할별 추론 수준. 없는 역할은 llm_reasoning_effort(None이면 보내지 않음)
     llm_reasoning_effort: ClassVar[ReasoningEffort | None] = None
     llm_role_reasoning_efforts: ClassVar[dict[str, ReasoningEffort]] = {
@@ -36,7 +40,7 @@ class Settings(BaseSettings):
         'RESPONSE_PLAN': 'medium', 'COUNTER_OFFER': 'low'}
     # LLM 검증자(에이전트 결과를 원문·도구 결과와 대조). 여기에 추론 수준이 있는 역할만 검증한다.
     # ②③⑤는 초안 도구를 실행하기 전에, ①④는 최종 답을 검증한다
-    # 에이전트(gpt-6-luna)와 다른 모델을 써서 같은 착각을 공유하지 않게 한다(2026-11-18, gpt-6-luna high에서 변경)
+    # 2026-11-18 gpt-6-luna high에서 변경. 2026-11-20부터 에이전트 ①~⑤도 같은 terra다(평가는 이 조합으로 했다)
     llm_verifier_model: ClassVar[str] = 'gpt-6.1-terra'
     llm_verifier_reasoning_efforts: ClassVar[dict[str, ReasoningEffort]] = {
         'INFO_EXTRACTOR': 'medium', 'CANDIDATE': 'medium', 'INFO_PRIORITY': 'medium', 'RESPONSE_PLAN': 'medium',
