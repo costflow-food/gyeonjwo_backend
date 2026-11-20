@@ -6,6 +6,8 @@ are scoped through a ContextVar proxy; no per-user global store replacement.
 from copy import deepcopy
 from uuid import UUID
 from app.core.errors import ServiceError
+from app.shared.infrastructure.db.contracts import OwnershipLost
+from app.shared.infrastructure.db.read_retry import read_with_retry
 from app.features.mail.application.attachments import fetch_gmail_attachment
 from app.features.mail.domain.attachment_ids import part_reference
 from app.features.review.infrastructure.documents import read_pdf_pages
@@ -29,13 +31,14 @@ class AgentStore:
         self.scope.check(str(case_id), self.scope.revision)
 
     def rows(self, query):
-        self.scope.remaining_seconds()
         try:
-            rows = query.execute().data
+            # 조회 한 번의 일시 오류로 역할 전체가 실패하지 않게 다시 읽는다(KAN-339). 시도마다 실행 한도·임대를 확인한다
+            rows = read_with_retry(lambda: query.execute().data, before_attempt=self.scope.remaining_seconds,
+                                   label='agent_store')
             if not isinstance(rows, list):
                 raise ValueError('Invalid rows')
             return rows
-        except ServiceError:
+        except (ServiceError, OwnershipLost):
             raise
         except Exception:
             raise ServiceError('PROCESSING_UNAVAILABLE', '에이전트 저장소 조회에 실패했습니다.', 503) from None

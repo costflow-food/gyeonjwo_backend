@@ -4,6 +4,7 @@ from time import monotonic
 
 from app.core.errors import ServiceError
 from app.shared.infrastructure.db.health_probe import HealthProbe
+from app.shared.infrastructure.db.read_retry import read_with_retry
 from app.features.work_cases.infrastructure.runtime_repository import CaseRuntimeRepository
 
 
@@ -64,10 +65,11 @@ class GraphRuntimeRepository(CaseRuntimeRepository):
 
     def context(self, owner, case_id, revision, batch):
         try:
-            rows = (self.client.table('work_cases').select(
+            # 도구 호출마다 거치는 조회다. 일시 오류 한 번으로 역할이 실패하지 않게 다시 읽는다(KAN-339)
+            rows = read_with_retry(lambda: self.client.table('work_cases').select(
                 'id,initial_mail_id,mailbox_ref,input_revision,current_batch_id,status,processing_step,archived_at,decision,'
                 'item_name,standardized_item_key,specification,quantity::text,unit,due_date,mandatory_conditions_jsonb,policy_jsonb')
-                .eq('owner_user_id', str(owner)).eq('id', str(case_id)).limit(1).execute().data)
+                .eq('owner_user_id', str(owner)).eq('id', str(case_id)).limit(1).execute().data, label='graph_context')
             if not isinstance(rows, list) or len(rows) > 1:
                 raise ValueError('Invalid context')
         except Exception:
