@@ -406,6 +406,9 @@ _URL = re.compile(r'(?i)\b(?:https?://|www\.)\S+')
 _HINTS = {
     'TOO_LONG': '그 항목의 값 부분만 짧게 옮긴다. 앞뒤 문장·설명은 넣지 않는다. 품목명·규격은 원문 표기 그대로 핵심만 쓴다.',
     'SOURCE_MISMATCH': '원문 표기 그대로 값 부분만 옮긴다. 원문에 없는 값은 null로 보낸다.',
+    'COST_TEXT_OUTSIDE_SOURCE': 'cost_terms의 amount·basis·payer는 그 비용의 source_text 안에 적힌 표기여야 한다. 비용이 여러 '
+                                '줄에 나뉘어 적혀 있으면(금액 줄·산정 기준 줄·부담 주체 줄) source_text에 그 줄들을 원문 그대로 '
+                                '이어서 넣는다. source_text에 넣을 수 없는 basis·payer는 null로 둔다.',
     'MISSING_EVIDENCE': '값을 읽은 메일의 evidence{mail_id, part, page}를 붙인다. 원문에서 그 항목을 직접 읽지 않았다면 '
                         '(다른 항목의 값을 옮겨 쓴 경우 등) 그 항목은 빼고 다시 보낸다.',
     'EVIDENCE_NOT_IN_CASE': 'get_case_context 메일 목록의 mail_id와 part(본문 body, 첨부 att-1 등)를 쓴다.',
@@ -1091,7 +1094,9 @@ def _costs(check, costs: list[CostTerm], rejected: list, review: list) -> list[d
                               (basis, False), (cost.payer, False)):
             if not issue and text and not _contains(_normalized(cost.source_text, numeric), _normalized(text, numeric),
                                                     numeric):
-                issue = 'SOURCE_MISMATCH'
+                # source_text 자체는 원문에 있다. 금액·산정 기준·부담 주체가 그 구절 밖(다음 줄 등)에 적힌 경우다.
+                # SOURCE_MISMATCH("원문 표기 그대로")로 알리면 ①이 무엇을 고칠지 몰라 같은 값을 다시 보낸다(KAN-335)
+                issue = 'COST_TEXT_OUTSIDE_SOURCE'
         amount = None
         if not issue:
             amount, issue = _number(check, amount_text, 'amount', cost.evidence, zero_words=True)
