@@ -18,9 +18,7 @@ ITEM = '냉동 망고'
 SPEC = 'IQF 다이스 10kg/박스'
 
 
-# ─────────────────────────────────────────────
 # 등록 데이터 (② 후보 추천)
-# ─────────────────────────────────────────────
 
 @dataclass
 class Supplier:
@@ -50,9 +48,7 @@ class Item:
         return f'i-{self.supplier}{self.suffix}'
 
 
-# ─────────────────────────────────────────────
 # 견적 메일 (③④⑤ 및 ②의 인상 통보)
-# ─────────────────────────────────────────────
 
 @dataclass
 class Cost:
@@ -220,9 +216,7 @@ def quote_mail(q: Quote, name: str, order: int) -> tuple[dict, list[QuoteField],
     return mail, fields, costs, notes
 
 
-# ─────────────────────────────────────────────
 # 세계 만들기
-# ─────────────────────────────────────────────
 
 DEFAULT_CASE = {'item_name': ITEM, 'specification': SPEC, 'mandatory_conditions': ['HACCP'], 'quantity': '1000',
                 'unit': 'kg', 'due_date': '2026-12-01', 'policy': {}}
