@@ -95,9 +95,7 @@ def tools_for(role: AgentRole) -> list[BaseTool]:
     return [_registry[name] for name in ROLE_TOOLS[role] if name in _registry]
 
 
-# ─────────────────────────────────────────────
 # 도구 구현
-# ─────────────────────────────────────────────
 
 # 공통: get_case_context, read_mail_evidence
 #   06 work_cases·mail_messages·agent_runs 기준. 업무·revision·실행 ID는 runtime.context(RunContext),
@@ -2241,14 +2239,12 @@ def create_rfq_draft(supplier_item_ids: list[str], supplier_ids: list[str], runt
                             questions)
 
 
-# ─────────────────────────────────────────────
 # 공통 계산 (③④⑤ 도구와 구매안·가격 검증 노드가 함께 쓴다. LLM이 직접 부르는 도구가 아니다)
 #   설계: docs/AGENTS345_COMMON_DESIGN.md. 견적 행(QuoteVersionRecord)을 업무 수량·단위 기준으로 계산한다.
 #   - 금액은 Decimal로 계산한다. 적히지 않은 비용은 0원이 아니라 미확인이다("없음"·"무료"만 0원)
 #   - 단가 구간 경계는 원문 표기(이상·초과·미만·이하·까지)대로 적용한다
 #   - 단위는 kg·g·톤 사이, 그리고 견적에 박스당 중량이 적혀 있을 때만 박스↔무게로 바꾼다
 #   - 세금 기준(TAX_BASES)이 같은 견적끼리만 총액을 비교한다. 다르거나 모르면 비교하지 않는다
-# ─────────────────────────────────────────────
 
 _WEIGHT_KG = {'kg': Decimal(1), 'g': Decimal('0.001'), '톤': Decimal(1000)}
 # 비용 산정 기준 중 주문(배송) 한 번에 한 번 붙는 것. '회당'·'1회'·'건당' 등에서 '당'·'1'을 뗀 표기
@@ -2606,11 +2602,9 @@ def keep_price_ceiling(incumbent: CostSheet, record: QuoteVersionRecord, alterna
 
 
 
-# ─────────────────────────────────────────────
 # ③ INFO_PRIORITY: check_comparability(③④⑤ 공통), calculate_break_even, create_clarification_draft
 #   설계: docs/AGENT3_PRIORITY_DESIGN.md. 업무의 최신 견적을 업무 수량 기준으로 비교해 필수 누락·미확인 비용을 찾고,
 #   미확인 비용은 역전 기준으로 선택이 바뀔 수 있는지 계산한다. 질문 문장·메일 문안은 코드가 정한다.
-# ─────────────────────────────────────────────
 
 class ComparisonStore(CaseStore, Protocol):
     """check_comparability·calculate_break_even의 저장소 (06 quote_versions)."""
@@ -2899,12 +2893,10 @@ def create_clarification_draft(requests: list[ClarificationRequest], runtime: To
 
 
 
-# ─────────────────────────────────────────────
 # ④ RESPONSE_PLAN: build_plan_candidates, validate_purchase_plan (+ 구매안 검증 노드의 revalidate_plans)
 #   설계: docs/AGENT4_PLAN_DESIGN.md. 확인된 업체로 유지(KEEP)·전환(SWITCH)·최대 2곳 분산(SPLIT) 안을 코드가 만들고 검증한다.
 #   필수 조건 미충족·불명확, 미확인 비용, 필수 누락이 남은 업체는 뺀다. 기존 업체만 예외로 유지안을 남기고 그 사유를
 #   성립 조건으로 단다(CONDITIONAL). 규격·인증 중 판단이 필요한 항목(CHECK)은 LLM이 충족이라고 넘긴 것만 충족이다.
-# ─────────────────────────────────────────────
 
 MAX_PLAN_OPTIONS = 3                 # build_plan_candidates가 돌려주는 전환·분산안 수 (각각 총액이 낮은 순)
 
@@ -3147,14 +3139,12 @@ def _missing_keep(store: ComparisonStore, case_id: str, case: dict, records: dic
 
 
 
-# ─────────────────────────────────────────────
 # ⑤ COUNTER_OFFER: calculate_counter_offer, validate_counter_offer, create_counter_offer_draft (+ 가격 검증 노드)
 #   설계: docs/AGENT5_COUNTER_OFFER_DESIGN.md. 회사 정책(허용 인상률 등)은 쓰지 않는다(11-16 팀 결정).
 #   요청 단가로도 대안보다 싸거나 같으면 수용을 추천한다(역제안 생략).
 #   그 외에는 [max(유지 상한, 인상 전 단가), 요청 단가] 안에서 역제안한다. 유지 상한은 가장 싼 대안의 총액을 기존 업체
 #   단가로 바꾼 값(이 단가면 대안과 총액이 같다)이다. 인상 전 단가가 유지 상한보다 높으면 하한을 인상 전 단가로 두고
 #   범위 안의 어떤 값도 대안보다 비싸다고 알린다. 메일에는 다른 공급처 이야기를 넣지 않는다.
-# ─────────────────────────────────────────────
 
 COUNTER_STATUSES = ('PROPOSABLE', 'NOT_NEEDED', 'NOT_COMPUTABLE', 'COSTS_UNKNOWN', 'PREVIOUS_UNKNOWN')
 COUNTER_SKIP_STATUSES = ('NOT_NEEDED',)          # 역제안 없이 인상 수용을 추천하는 상태

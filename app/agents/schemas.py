@@ -21,9 +21,7 @@ from pydantic import Field, StrictBool, model_validator
 
 from app.shared.domain.schemas import StrictModel
 
-# ─────────────────────────────────────────────
 # 1. 실행 한도 (07 7절)
-# ─────────────────────────────────────────────
 # 회신 검토 정상 경로는 ①③④⑤ 4회. 되돌림 한 번의 추가 호출은 최대 4회(⑤ RECHECK_SOURCE → ①③④⑤)라서
 # 8이면 어떤 되돌림이든 한 번은 호출 횟수 안에 끝까지 간다(KAN-326). 다만 검토 실행의 300초 시간 한도
 # (agent_graph_review_timeout_seconds)에 먼저 걸리면 GRAPH_TIME_LIMIT로 끝난다.
@@ -37,9 +35,7 @@ READ_RETRY_LIMIT = 1
 DecimalStr = Annotated[str, Field(pattern=r'^-?\d+(\.\d+)?$')]
 
 
-# ─────────────────────────────────────────────
 # 2. 백엔드 ↔ 그래프 계약
-# ─────────────────────────────────────────────
 
 class StartFrom(StrEnum):
     """재개 지점 (07 5.1). 항상 다섯 역할을 처음부터 돌리지 않는다."""
@@ -98,9 +94,7 @@ class RunCaseOutput(StrictModel):
     steps: list['AgentStep'] = []                   # 역할 호출 기록 → 백엔드가 실행 기록으로 저장 (07 9절)
 
 
-# ─────────────────────────────────────────────
 # 3. 코드 노드 결과
-# ─────────────────────────────────────────────
 
 class PlanCheck(StrEnum):
     PASS = 'PASS'            # → ⑤
@@ -114,9 +108,7 @@ class PriceCheck(StrEnum):
     NEED_INFO = 'NEED_INFO'  # → ③
 
 
-# ─────────────────────────────────────────────
 # 4. 역할 결과 항목
-# ─────────────────────────────────────────────
 
 class CheckState(StrEnum):
     PASS = 'PASS'
@@ -248,9 +240,7 @@ class ReviewCard(StrictModel):
     steps: list['AgentStep'] = []          # 역할 호출 기록 (next_action·reason)
 
 
-# ─────────────────────────────────────────────
 # 5. 에이전트 입력
-# ─────────────────────────────────────────────
 
 class AgentRole(StrEnum):
     INFO_EXTRACTOR = 'INFO_EXTRACTOR'
@@ -312,9 +302,7 @@ class CounterOfferIn(AgentInput):
     price_check_reason: str | None = None  # 가격 검증 FIX로 재진입 시 사유
 
 
-# ─────────────────────────────────────────────
 # 6. 에이전트 결과 — next_action은 역할마다 허용 값만 Literal로 둔다
-# ─────────────────────────────────────────────
 
 class AgentNextAction(StrEnum):
     STORED = 'STORED'                                  # ① 검증 저장 완료 → START면 ②, 그 외 ③
